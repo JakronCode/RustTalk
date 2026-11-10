@@ -16,8 +16,11 @@ cpal = "0.15"
 # Medien: Bilder, Kamera, Bildschirm, GIFs
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 rfd = "0.15"
-nokhwa = "0.10"
-scrap = "0.5"
+# input-msmf = Windows-Kamera-Backend (Media Foundation). Ohne dieses Feature
+# hat nokhwa auf Windows KEIN Backend und jede Kamera schlaegt fehl.
+nokhwa = { version = "0.10", features = ["input-msmf"] }
+# Bildschirm + einzelne Fenster (Auswahl-Dialog mit Vorschaubildern)
+xcap = "0.9"
 ureq = { version = "2", features = ["json"] }
 serde_json = "1"
 audiopus = "0.2"

@@ -14,14 +14,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use rusttalk_shared::protocol::{ChannelInfo, ChannelKind, ServerMessage, UserInfo, MAX_MEDIA_BYTES};
+use rusttalk_shared::protocol::{
+    ChannelInfo, ChannelKind, ServerMessage, UserInfo, VideoKind, MAX_MEDIA_BYTES,
+};
 
 use crate::audio::{capture, playback, AudioControl, AudioEngine, LocalMuteSet, TalkingMap};
 use crate::config::{ClientConfig, ServerBookmark};
 use crate::logo;
 use crate::media::{self, TextureCache};
 use crate::net::{self, Command, NetEvent};
-use crate::video::{self, VideoCapture};
+use crate::video::{self, CameraDevice, ShareEntry, ShareSource, VideoCapture};
 
 // Phosphor-Icons (Regular-Variante) als Fallback-Font.
 mod icons {
@@ -38,6 +40,9 @@ const COLOR_IDLE: egui::Color32 = egui::Color32::from_rgb(0xA3, 0xA8, 0xB2);
 const COLOR_TEXT: egui::Color32 = egui::Color32::from_rgb(0xE3, 0xE5, 0xE8);
 const COLOR_MUTED: egui::Color32 = egui::Color32::from_rgb(0xF2, 0x3F, 0x43);
 const COLOR_HOVER: egui::Color32 = egui::Color32::from_rgb(0x3A, 0x3C, 0x41);
+
+/// Max. Video-Bytes in der eigenen Sende-Queue (~1 s Bildschirm-Stream).
+const MAX_UPLOAD_BACKLOG: usize = 3 * 1024 * 1024;
 
 /// Avatar-Farbpalette (Name -> deterministische Farbe).
 const AVATAR_PALETTE: [egui::Color32; 8] = [
@@ -74,6 +79,42 @@ struct GiphyState {
     error: Option<String>,
     /// Bereits angefragte Vorschau-URLs (gegen Doppel-Downloads).
     requested: HashSet<String>,
+}
+
+/// Kamera-Dialog: Geraeteauswahl + Live-Vorschau vor dem Teilen.
+struct CamDialog {
+    devices: Vec<CameraDevice>,
+    selected: Option<u32>,
+    error: Option<String>,
+}
+
+/// Reiter im Bildschirm-Auswahldialog.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShareTab {
+    Apps,
+    Screens,
+}
+
+/// Bildschirm/Fenster-Auswahl (aehnlich Discord): Vorschaubilder werden
+/// im Hintergrund erzeugt und per Channel geliefert.
+struct ScreenPicker {
+    tab: ShareTab,
+    entries: Vec<(ShareEntry, Option<egui::TextureHandle>)>,
+    selected: Option<ShareSource>,
+    loading: bool,
+    rx: std::sync::mpsc::Receiver<Vec<ShareEntry>>,
+}
+
+impl ScreenPicker {
+    fn open() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = std::thread::Builder::new()
+            .name("share-sources".into())
+            .spawn(move || {
+                let _ = tx.send(video::list_share_sources());
+            });
+        Self { tab: ShareTab::Apps, entries: Vec::new(), selected: None, loading: true, rx }
+    }
 }
 
 /// Nachrichten aus Hintergrund-Threads (GIPHY-Suche/Downloads).
@@ -123,10 +164,28 @@ pub struct RustTalkApp {
     textures: TextureCache,
     /// Angehaengtes, noch nicht gesendetes Bild (Name, Bytes).
     pending_image: Option<(String, Vec<u8>)>,
-    /// Letzte Video-Frames pro User (JPEG).
-    video_frames: HashMap<u64, Vec<u8>>,
+    /// Letzte Video-Frames pro (User, Art) als JPEG – Kamera und Bildschirm
+    /// eines Users sind getrennte Kacheln.
+    video_frames: HashMap<(u64, VideoKind), Vec<u8>>,
+    /// Video-Bytes in der Sende-Queue (siehe `net::connect`).
+    upload_backlog: Arc<std::sync::atomic::AtomicUsize>,
+    /// Vom Bildschirm-Thread gesetzt, wenn er wegen eines Fehlers endet.
+    screen_failed: Arc<std::sync::atomic::AtomicBool>,
+    /// Vollbild-Ansicht eines Streams (None = normale Ansicht).
+    fullscreen: Option<(u64, VideoKind)>,
+    /// egui-Kontext fuer Repaints aus Capture-/Netzwerk-Threads.
+    ctx: egui::Context,
+    /// Kamera (Vorschau oder live, siehe `VideoCapture::is_sending`).
     cam: Option<VideoCapture>,
     screen: Option<VideoCapture>,
+    cam_dialog: Option<CamDialog>,
+    screen_picker: Option<ScreenPicker>,
+    /// Letzter eigener Frame (auch im reinen Vorschau-Modus).
+    local_preview: Arc<Mutex<Option<Vec<u8>>>>,
+    /// Textur der eigenen Vorschau (wird pro Frame ueberschrieben).
+    local_preview_tex: Option<(u64, egui::TextureHandle)>,
+    /// Fehler aus dem Kamera-Thread fuer die Anzeige im Kamera-Dialog.
+    cam_error: Arc<Mutex<Option<String>>>,
     giphy: GiphyState,
     giphy_tx: std::sync::mpsc::Sender<GiphyMsg>,
     giphy_rx: std::sync::mpsc::Receiver<GiphyMsg>,
@@ -187,8 +246,17 @@ impl RustTalkApp {
             textures: TextureCache::default(),
             pending_image: None,
             video_frames: HashMap::new(),
+            screen_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            upload_backlog: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            fullscreen: None,
+            ctx: cc.egui_ctx.clone(),
             cam: None,
             screen: None,
+            cam_dialog: None,
+            screen_picker: None,
+            local_preview: Arc::new(Mutex::new(None)),
+            local_preview_tex: None,
+            cam_error: Arc::new(Mutex::new(None)),
             giphy: GiphyState::default(),
             giphy_tx: giphy_tx.clone(),
             giphy_rx,
@@ -212,7 +280,14 @@ impl RustTalkApp {
         self.control.self_muted.store(false, Ordering::Relaxed);
         self.control.self_deafened.store(false, Ordering::Relaxed);
         self.control.noise_suppression.store(self.config.noise_suppression, Ordering::Relaxed);
-        self.cmd_tx = Some(net::connect(self.config.clone(), self.event_tx.clone()));
+        // Neuer Zaehler pro Verbindung (alte Queue ist mit der Verbindung weg).
+        self.upload_backlog = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        self.cmd_tx = Some(net::connect(
+            self.config.clone(),
+            self.event_tx.clone(),
+            self.ctx.clone(),
+            self.upload_backlog.clone(),
+        ));
         self.config.save();
     }
 
@@ -232,7 +307,12 @@ impl RustTalkApp {
         // Video stoppen + Frames rauswerfen.
         self.cam = None;
         self.screen = None;
+        self.cam_dialog = None;
+        self.screen_picker = None;
+        *self.local_preview.lock().unwrap() = None;
+        self.local_preview_tex = None;
         self.video_frames.clear();
+        self.leave_fullscreen();
         self.pending_image = None;
     }
 
@@ -342,8 +422,24 @@ impl RustTalkApp {
                 for ch in self.channels.values_mut() {
                     ch.user_ids.retain(|&id| id != client_id);
                 }
+                self.clear_video_of(client_id, None);
             }
             ServerMessage::UserMoved { client_id, channel_id } => {
+                // Wer den Channel wechselt, schickt uns keine Frames mehr (bzw.
+                // wir bekommen keine mehr, wenn wir selbst wechseln).
+                if client_id == self.my_id {
+                    let others: Vec<u64> = self
+                        .video_frames
+                        .keys()
+                        .map(|(id, _)| *id)
+                        .filter(|id| *id != self.my_id)
+                        .collect();
+                    for id in others {
+                        self.clear_video_of(id, None);
+                    }
+                } else {
+                    self.clear_video_of(client_id, None);
+                }
                 let name = self.users.get(&client_id).map(|u| u.name.clone());
                 if let Some(u) = self.users.get_mut(&client_id) {
                     u.channel_id = channel_id;
@@ -424,21 +520,23 @@ impl RustTalkApp {
                     u.sharing = sharing;
                 }
                 if !sharing {
-                    if let Some(old) = self.video_frames.remove(&client_id) {
-                        self.textures.remove_bytes(&old);
-                    }
+                    self.clear_video_of(client_id, None);
                 }
             }
-            ServerMessage::VideoFrame { from_id, data } => {
+            ServerMessage::VideoFrame { from_id, kind, data } => {
                 // Alten Frame ersetzen (Texture-Cache schont die Dekodierung).
-                if let Some(old) = self.video_frames.get(&from_id) {
+                let key = (from_id, kind);
+                if let Some(old) = self.video_frames.get(&key) {
                     if old.len() == data.len() && old == &data {
                         return; // identischer Frame, nichts tun
                     }
                     let old = old.clone();
                     self.textures.remove_bytes(&old);
                 }
-                self.video_frames.insert(from_id, data);
+                self.video_frames.insert(key, data);
+            }
+            ServerMessage::VideoStopped { from_id, kind } => {
+                self.clear_video_of(from_id, Some(kind));
             }
             ServerMessage::Error { message } => {
                 self.status = format!("Server: {message}");
@@ -468,6 +566,8 @@ impl eframe::App for RustTalkApp {
         self.ui_rename(ctx);
         self.ui_new_channel(ctx);
         self.ui_giphy(ctx);
+        self.ui_camera_dialog(ctx);
+        self.ui_screen_picker(ctx);
 
         // Mikro-Monitor fuer den Pegel-Test in den Einstellungen (ohne Verbindung).
         if self.show_settings && self.audio.is_none() && self.mic_monitor.is_none() {
@@ -681,6 +781,21 @@ impl RustTalkApp {
     fn ui_connected(&mut self, ctx: &egui::Context) {
         let cmd_tx = self.cmd_tx.clone().expect("connected");
 
+        // Bildschirm-Thread ist mit Fehler beendet (z. B. Fenster geschlossen).
+        if self.screen_failed.swap(false, Ordering::Relaxed) && self.screen.is_some() {
+            self.screen = None;
+            self.after_source_stopped(VideoKind::Screen, &cmd_tx);
+        }
+
+        // Vollbild: nur Stream + User-Leiste. Endet, wenn der Stream weg ist.
+        if let Some(key) = self.fullscreen {
+            if self.video_frames.contains_key(&key) {
+                self.ui_fullscreen(ctx, key);
+                return;
+            }
+            self.leave_fullscreen();
+        }
+
         // --- Bottom-Bar: eigener User + Controls ---
         egui::TopBottomPanel::bottom("bottom_bar")
             .frame(egui::Frame::default().fill(COLOR_DARK).inner_margin(egui::Margin::same(6)))
@@ -726,30 +841,19 @@ impl RustTalkApp {
                         let _ = cmd_tx.send(Command::SetMute { muted, deafened: new });
                     }
                     ui.separator();
-                    // Kamera / Bildschirm: aktuell KAPUTT (Fix in Arbeit) ->
-                    // deaktiviert, damit niemand in den defekten Pfad laeuft.
-                    let _ = ui
-                        .add_enabled(
-                            false,
-                            egui::Button::new(
-                                egui::RichText::new(icons::regular::VIDEO_CAMERA)
-                                    .size(18.0)
-                                    .color(egui::Color32::WHITE),
-                            )
-                            .min_size(egui::vec2(34.0, 28.0)),
-                        )
-                        .on_hover_text("Kamera: aktuell kaputt – Fix in Arbeit (WIP)");
-                    let _ = ui
-                        .add_enabled(
-                            false,
-                            egui::Button::new(
-                                egui::RichText::new(icons::regular::MONITOR)
-                                    .size(18.0)
-                                    .color(egui::Color32::WHITE),
-                            )
-                            .min_size(egui::vec2(34.0, 28.0)),
-                        )
-                        .on_hover_text("Bildschirm teilen: aktuell kaputt – Fix in Arbeit (WIP)");
+                    // Kamera / Bildschirm: Klick oeffnet Vorschau bzw. Auswahl,
+                    // waehrend des Teilens beendet ein Klick das Teilen.
+                    let cam_live = self.cam.as_ref().is_some_and(|c| c.is_sending());
+                    let cam_tip = if cam_live { "Kamera ausschalten" } else { "Kamera (mit Vorschau)" };
+                    if share_button(ui, icons::regular::VIDEO_CAMERA, cam_live, cam_tip).clicked() {
+                        self.toggle_cam(&cmd_tx);
+                    }
+                    let screen_live = self.screen.is_some();
+                    let screen_tip =
+                        if screen_live { "Teilen beenden" } else { "Bildschirm / Fenster teilen" };
+                    if share_button(ui, icons::regular::MONITOR, screen_live, screen_tip).clicked() {
+                        self.toggle_screen(&cmd_tx);
+                    }
                     ui.separator();
                     if icon_button(ui, icons::regular::GEAR_SIX, false, "Einstellungen").clicked() {
                         self.input_devices = capture::input_device_names();
@@ -1262,64 +1366,690 @@ impl RustTalkApp {
         }
     }
 
-    /// Kamera an/aus. Beim Ausschalten wird Sharing nur gemeldet,
-    /// wenn auch der Screen-Share aus ist.
-    fn toggle_cam(&mut self, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>) {
-        if self.cam.is_some() {
-            self.cam = None;
-            let _ = cmd_tx.send(Command::SetSharing(self.screen.is_some()));
-            return;
-        }
-        self.screen = None; // nur eine Quelle gleichzeitig
-        match video::start_camera(self.make_frame_sink(cmd_tx), self.make_error_sink()) {
-            Ok(cap) => {
-                self.cam = Some(cap);
-                let _ = cmd_tx.send(Command::SetSharing(true));
-            }
-            Err(e) => self.status = format!("Kamera-Fehler: {e:#}"),
+    /// Stream im Vollbild zeigen (App-Fenster geht in den Vollbildmodus).
+    fn enter_fullscreen(&mut self, key: (u64, VideoKind)) {
+        self.fullscreen = Some(key);
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+    }
+
+    fn leave_fullscreen(&mut self) {
+        if self.fullscreen.take().is_some() {
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
     }
 
-    /// Bildschirm teilen an/aus.
+    /// Vollbild: Stream fuellt das Fenster, unten die Mitglieder des Channels
+    /// (gruener Punkt = spricht). Esc / Doppelklick / Button beendet.
+    fn ui_fullscreen(&mut self, ctx: &egui::Context, key: (u64, VideoKind)) {
+        let (uid, kind) = key;
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.leave_fullscreen();
+            return;
+        }
+        let streamer = self.users.get(&uid).map(|u| u.name.clone()).unwrap_or_default();
+        let members: Vec<UserInfo> = self
+            .users
+            .get(&uid)
+            .and_then(|u| self.channels.get(&u.channel_id))
+            .map(|c| c.user_ids.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|id| self.users.get(&id).cloned())
+            .collect();
+        let talking: HashMap<u64, Instant> = self.talking.lock().unwrap().clone();
+        let self_transmitting = self.control.transmitting.load(Ordering::Relaxed);
+        let mut switch_to: Option<(u64, VideoKind)> = None;
+        let mut leave = false;
+
+        // --- Unten: User-Leiste ---
+        egui::TopBottomPanel::bottom("fs_users")
+            .frame(
+                egui::Frame::default().fill(COLOR_DARK).inner_margin(egui::Margin::symmetric(12, 8)),
+            )
+            .show(ctx, |ui| {
+                egui::ScrollArea::horizontal().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for user in &members {
+                            let talking_now = talking
+                                .get(&user.id)
+                                .is_some_and(|t| t.elapsed() < Duration::from_millis(250))
+                                || (user.id == self.my_id && self_transmitting);
+                            ui.allocate_ui(egui::vec2(84.0, 86.0), |ui| {
+                                ui.vertical_centered(|ui| {
+                                    let r = draw_avatar(ui, &user.name, 40.0, talking_now);
+                                    if talking_now {
+                                        draw_talk_dot(ui, r);
+                                    }
+                                    let mut name = egui::RichText::new(&user.name)
+                                        .size(12.0)
+                                        .color(COLOR_TEXT);
+                                    if user.id == uid {
+                                        name = name.strong();
+                                    }
+                                    ui.label(name);
+                                    ui.horizontal(|ui| {
+                                        if user.muted {
+                                            ui.label(
+                                                egui::RichText::new(icons::regular::MICROPHONE_SLASH)
+                                                    .color(COLOR_MUTED),
+                                            );
+                                        }
+                                        if user.deafened {
+                                            ui.label(
+                                                egui::RichText::new(icons::regular::SPEAKER_SLASH)
+                                                    .color(COLOR_MUTED),
+                                            );
+                                        }
+                                        // Streams dieses Users: Klick wechselt die Ansicht.
+                                        for k in [VideoKind::Screen, VideoKind::Camera] {
+                                            if !self.video_frames.contains_key(&(user.id, k)) {
+                                                continue;
+                                            }
+                                            let active = (user.id, k) == key;
+                                            let btn = egui::Button::new(
+                                                egui::RichText::new(kind_icon(k)).color(
+                                                    if active { egui::Color32::WHITE } else { COLOR_IDLE },
+                                                ),
+                                            )
+                                            .small()
+                                            .fill(if active { COLOR_ACCENT } else { COLOR_HOVER });
+                                            if ui
+                                                .add(btn)
+                                                .on_hover_text(format!(
+                                                    "{} von {} ansehen",
+                                                    kind_label(k),
+                                                    user.name
+                                                ))
+                                                .clicked()
+                                            {
+                                                switch_to = Some((user.id, k));
+                                            }
+                                        }
+                                    });
+                                });
+                            });
+                        }
+                    });
+                });
+            });
+
+        // --- Mitte: Stream ---
+        egui::CentralPanel::default()
+            .frame(egui::Frame::default().fill(egui::Color32::BLACK))
+            .show(ctx, |ui| {
+                let rect = ui.max_rect();
+                if let Some(data) = self.video_frames.get(&key).cloned() {
+                    if let Some(tex) =
+                        self.textures.texture_for(ctx, &data, &format!("video-{uid}-{kind:?}"))
+                    {
+                        let fit = fit_size(tex.size_vec2(), rect.size());
+                        ui.painter().image(
+                            tex.id(),
+                            egui::Rect::from_center_size(rect.center(), fit),
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                    }
+                }
+                let resp = ui.interact(rect, ui.id().with("fs_video"), egui::Sense::click());
+                if resp.double_clicked() {
+                    leave = true;
+                }
+            });
+
+        // --- Overlays: Titel links oben, Beenden rechts oben ---
+        let overlay = egui::Frame::default()
+            .fill(egui::Color32::from_black_alpha(170))
+            .corner_radius(6.0)
+            .inner_margin(egui::Margin::symmetric(10, 6));
+        egui::Area::new(egui::Id::new("fs_title"))
+            .anchor(egui::Align2::LEFT_TOP, egui::vec2(12.0, 12.0))
+            .show(ctx, |ui| {
+                overlay.show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}  {} – {}",
+                            kind_icon(kind),
+                            streamer,
+                            kind_label(kind)
+                        ))
+                        .color(egui::Color32::WHITE),
+                    );
+                });
+            });
+        egui::Area::new(egui::Id::new("fs_exit"))
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
+            .show(ctx, |ui| {
+                overlay.show(ui, |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(format!(
+                                    "{}  Vollbild verlassen (Esc)",
+                                    icons::regular::CORNERS_IN
+                                ))
+                                .color(egui::Color32::WHITE),
+                            )
+                            .frame(false),
+                        )
+                        .clicked()
+                    {
+                        leave = true;
+                    }
+                });
+            });
+
+        if leave {
+            self.leave_fullscreen();
+        } else if let Some(k) = switch_to {
+            self.fullscreen = Some(k);
+        }
+    }
+
+    /// Kamera-Button: live -> ausschalten, sonst Vorschau-Dialog oeffnen.
+    fn toggle_cam(&mut self, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>) {
+        if self.cam.as_ref().is_some_and(|c| c.is_sending()) {
+            self.cam = None;
+            self.after_source_stopped(VideoKind::Camera, cmd_tx);
+            return;
+        }
+        if self.cam_dialog.is_some() {
+            return;
+        }
+        let (devices, error) = match video::list_cameras() {
+            Ok(d) if d.is_empty() => (d, Some("Keine Kamera gefunden.".to_string())),
+            Ok(d) => (d, None),
+            Err(e) => (Vec::new(), Some(format!("{e:#}"))),
+        };
+        let selected = devices
+            .iter()
+            .find(|d| Some(&d.name) == self.config.camera.as_ref())
+            .or(devices.first())
+            .map(|d| d.index);
+        self.cam_dialog = Some(CamDialog { devices, selected, error });
+        if let Some(index) = selected {
+            self.start_cam_preview(index, cmd_tx);
+        }
+    }
+
+    /// Kamera im Vorschau-Modus starten (sendet noch nichts).
+    fn start_cam_preview(
+        &mut self,
+        index: u32,
+        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
+    ) {
+        self.cam = None; // alten Thread stoppen
+        *self.local_preview.lock().unwrap() = None;
+        if let Some(d) = &mut self.cam_dialog {
+            d.error = None;
+        }
+        match video::start_camera(
+            index,
+            self.config.video_quality,
+            self.make_frame_sink(VideoKind::Camera, cmd_tx),
+            self.make_cam_error_sink(),
+        ) {
+            Ok(cap) => self.cam = Some(cap),
+            Err(e) => {
+                if let Some(d) = &mut self.cam_dialog {
+                    d.error = Some(format!("{e:#}"));
+                }
+            }
+        }
+    }
+
+    /// Bildschirm-Button: teilt -> beenden, sonst Auswahl-Dialog oeffnen.
     fn toggle_screen(&mut self, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>) {
         if self.screen.is_some() {
             self.screen = None;
-            let _ = cmd_tx.send(Command::SetSharing(self.cam.is_some()));
+            self.after_source_stopped(VideoKind::Screen, cmd_tx);
             return;
         }
-        self.cam = None; // nur eine Quelle gleichzeitig
-        match video::start_screen(self.make_frame_sink(cmd_tx), self.make_error_sink()) {
-            Ok(cap) => {
-                self.screen = Some(cap);
-                let _ = cmd_tx.send(Command::SetSharing(true));
-            }
-            Err(e) => self.status = format!("Bildschirm-Fehler: {e:#}"),
+        if self.screen_picker.is_none() {
+            self.screen_picker = Some(ScreenPicker::open());
         }
     }
 
-    /// Frame-Senke fuer Capture-Threads: sendet das JPEG an den Server
-    /// und spiegelt es als eigene Vorschau in die UI.
+    /// Ausgewaehlte Quelle teilen (eine laufende Kamera bleibt an).
+    fn start_screen_share(
+        &mut self,
+        source: ShareSource,
+        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
+    ) {
+        self.screen = None;
+        // Erst Sharing melden, dann senden (Server relayed nur Sharer).
+        let _ = cmd_tx.send(Command::SetSharing(true));
+        match video::start_screen(
+            source,
+            self.config.video_quality,
+            self.make_frame_sink(VideoKind::Screen, cmd_tx),
+            self.make_screen_error_sink(),
+        ) {
+            Ok(cap) => self.screen = Some(cap),
+            Err(e) => {
+                self.status = format!("Bildschirm-Fehler: {e:#}");
+                let still = self.cam.as_ref().is_some_and(|c| c.is_sending());
+                let _ = cmd_tx.send(Command::SetSharing(still));
+            }
+        }
+    }
+
+    /// Nach dem Stoppen einer Quelle: Zuschauern den einzelnen Stream
+    /// abmelden, eigene Kachel weg, Sharing-Status aktualisieren.
+    fn after_source_stopped(
+        &mut self,
+        kind: VideoKind,
+        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
+    ) {
+        // Reihenfolge wichtig: StopVideo vor SetSharing(false), sonst hat der
+        // Server keine Relay-Ziele mehr.
+        let _ = cmd_tx.send(Command::StopVideo(kind));
+        let still = self.screen.is_some() || self.cam.as_ref().is_some_and(|c| c.is_sending());
+        let _ = cmd_tx.send(Command::SetSharing(still));
+        self.clear_video_of(self.my_id, Some(kind));
+        if kind == VideoKind::Camera {
+            *self.local_preview.lock().unwrap() = None;
+            self.local_preview_tex = None;
+        }
+    }
+
+    /// Video-Kacheln eines Users entfernen (eine Art oder alle).
+    fn clear_video_of(&mut self, user_id: u64, kind: Option<VideoKind>) {
+        for k in [VideoKind::Camera, VideoKind::Screen] {
+            if kind.is_some_and(|want| want != k) {
+                continue;
+            }
+            if let Some(old) = self.video_frames.remove(&(user_id, k)) {
+                self.textures.remove_bytes(&old);
+            }
+        }
+    }
+
+    /// Frame-Senke fuer Capture-Threads. Kamera-Frames landen zusaetzlich in
+    /// der lokalen Vorschau (Kamera-Dialog); nur wenn `sending` -> an den
+    /// Server + eigene Kachel. Stoesst sofort ein Neuzeichnen an.
     fn make_frame_sink(
         &self,
+        kind: VideoKind,
         cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
-    ) -> impl FnMut(Vec<u8>) + Send + 'static {
+    ) -> impl FnMut(Vec<u8>, bool) + Send + 'static {
         let tx = cmd_tx.clone();
         let events = self.event_tx.clone();
+        let preview = self.local_preview.clone();
+        let ctx = self.ctx.clone();
+        let backlog = self.upload_backlog.clone();
         let my_id = self.my_id;
-        move |jpeg: Vec<u8>| {
-            let _ = tx.send(Command::VideoFrame(jpeg.clone()));
-            let _ = events.send(NetEvent::Message(ServerMessage::VideoFrame {
-                from_id: my_id,
-                data: jpeg,
-            }));
+        move |jpeg: Vec<u8>, sending: bool| {
+            if kind == VideoKind::Camera {
+                *preview.lock().unwrap() = Some(jpeg.clone());
+            }
+            if sending {
+                // Upload staut (langsames WLAN o. ae.) -> Frame nicht senden,
+                // statt Latenz und Speicher endlos wachsen zu lassen.
+                let len = jpeg.len();
+                if backlog.load(Ordering::Relaxed) + len <= MAX_UPLOAD_BACKLOG {
+                    backlog.fetch_add(len, Ordering::Relaxed);
+                    if tx.send(Command::VideoFrame(kind, jpeg.clone())).is_err() {
+                        backlog.fetch_sub(len, Ordering::Relaxed);
+                    }
+                }
+                let _ = events.send(NetEvent::Message(ServerMessage::VideoFrame {
+                    from_id: my_id,
+                    kind,
+                    data: jpeg,
+                }));
+            }
+            ctx.request_repaint();
         }
     }
 
-    /// Fehler-Senke fuer Capture-Threads (Kamera/Screen) -> Statuszeile.
-    fn make_error_sink(&self) -> impl FnMut(String) + Send + 'static {
+    /// Fehler des Bildschirm-Threads: Thread ist beendet -> in `update`
+    /// wird das Teilen sauber abgemeldet.
+    fn make_screen_error_sink(&self) -> impl FnMut(String) + Send + 'static {
         let events = self.event_tx.clone();
+        let failed = self.screen_failed.clone();
         move |msg: String| {
+            failed.store(true, Ordering::Relaxed);
             let _ = events.send(NetEvent::Status(msg));
+        }
+    }
+
+    /// Fehler des Kamera-Threads: Statuszeile + Anzeige im Kamera-Dialog.
+    fn make_cam_error_sink(&self) -> impl FnMut(String) + Send + 'static {
+        let events = self.event_tx.clone();
+        let errors = self.cam_error.clone();
+        move |msg: String| {
+            *errors.lock().unwrap() = Some(msg.clone());
+            let _ = events.send(NetEvent::Status(msg));
+        }
+    }
+
+    /// Eigene Vorschau als Textur (eine Textur, wird pro Frame aktualisiert).
+    fn local_preview_texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        let data = self.local_preview.lock().unwrap().clone()?;
+        let key = media::hash_bytes(&data);
+        if let Some((k, tex)) = &self.local_preview_tex {
+            if *k == key {
+                return Some(tex.clone());
+            }
+        }
+        let img = image::load_from_memory(&data).ok()?.to_rgba8();
+        let color = egui::ColorImage::from_rgba_unmultiplied(
+            [img.width() as usize, img.height() as usize],
+            &img,
+        );
+        match &mut self.local_preview_tex {
+            Some((k, tex)) => {
+                tex.set(color, egui::TextureOptions::LINEAR);
+                *k = key;
+                Some(tex.clone())
+            }
+            None => {
+                let tex = ctx.load_texture("local-preview", color, egui::TextureOptions::LINEAR);
+                self.local_preview_tex = Some((key, tex.clone()));
+                Some(tex)
+            }
+        }
+    }
+
+    /// Kamera-Dialog: Geraet waehlen, Live-Vorschau, dann "Kamera teilen".
+    fn ui_camera_dialog(&mut self, ctx: &egui::Context) {
+        if self.cam_dialog.is_none() {
+            return;
+        }
+        let Some(cmd_tx) = self.cmd_tx.clone() else {
+            self.cam_dialog = None;
+            return;
+        };
+        // Fehler aus dem Kamera-Thread in den Dialog uebernehmen.
+        if let Some(err) = self.cam_error.lock().unwrap().take() {
+            if let Some(d) = &mut self.cam_dialog {
+                d.error = Some(err);
+            }
+        }
+        let preview = self.local_preview_texture(ctx);
+        let mut open = true;
+        let mut action: Option<bool> = None; // Some(true) = teilen, Some(false) = abbrechen
+        let mut switch_to: Option<u32> = None;
+        egui::Window::new(format!("{}  Kamera", icons::regular::VIDEO_CAMERA))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .fixed_size([480.0, 360.0])
+            .show(ctx, |ui| {
+                let Some(dialog) = self.cam_dialog.as_mut() else { return };
+                if !dialog.devices.is_empty() {
+                    let current = dialog
+                        .devices
+                        .iter()
+                        .find(|d| Some(d.index) == dialog.selected)
+                        .map(|d| d.name.clone())
+                        .unwrap_or_default();
+                    egui::ComboBox::from_label("Kamera")
+                        .selected_text(current)
+                        .width(320.0)
+                        .show_ui(ui, |ui| {
+                            for d in &dialog.devices {
+                                if ui
+                                    .selectable_label(dialog.selected == Some(d.index), &d.name)
+                                    .clicked()
+                                    && dialog.selected != Some(d.index)
+                                {
+                                    dialog.selected = Some(d.index);
+                                    switch_to = Some(d.index);
+                                }
+                            }
+                        });
+                }
+                ui.add_space(8.0);
+                let size = egui::vec2(480.0, 270.0);
+                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                ui.painter().rect_filled(rect, 8.0, COLOR_DARK);
+                if let Some(tex) = &preview {
+                    let fit = fit_size(tex.size_vec2(), size);
+                    let img_rect = egui::Rect::from_center_size(rect.center(), fit);
+                    egui::Image::new(tex).corner_radius(8.0).paint_at(ui, img_rect);
+                } else {
+                    let text = match &dialog.error {
+                        Some(e) => e.clone(),
+                        None => "Kamera startet...".to_string(),
+                    };
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        text,
+                        egui::FontId::proportional(14.0),
+                        COLOR_IDLE,
+                    );
+                }
+                ui.add_space(10.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(
+                            preview.is_some(),
+                            egui::Button::new(
+                                egui::RichText::new(format!(
+                                    "{}  Kamera teilen",
+                                    icons::regular::VIDEO_CAMERA
+                                ))
+                                .color(egui::Color32::WHITE),
+                            )
+                            .fill(COLOR_ACCENT),
+                        )
+                        .clicked()
+                    {
+                        action = Some(true);
+                    }
+                    if ui.button("Abbrechen").clicked() {
+                        action = Some(false);
+                    }
+                });
+            });
+        if let Some(index) = switch_to {
+            self.start_cam_preview(index, &cmd_tx);
+        }
+        match action {
+            Some(true) => {
+                if let Some(d) = &self.cam_dialog {
+                    self.config.camera = d
+                        .devices
+                        .iter()
+                        .find(|x| Some(x.index) == d.selected)
+                        .map(|x| x.name.clone());
+                    self.config.save();
+                }
+                // Bildschirm-Teilen laeuft ggf. parallel weiter.
+                if let Some(cam) = &self.cam {
+                    // Erst Sharing melden, dann senden (Server relayed nur Sharer).
+                    let _ = cmd_tx.send(Command::SetSharing(true));
+                    cam.set_sending(true);
+                }
+                self.cam_dialog = None;
+                return;
+            }
+            Some(false) => open = false,
+            None => {}
+        }
+        if !open {
+            // Abbrechen: Vorschau-Kamera aus (eine live laufende bleibt).
+            self.cam_dialog = None;
+            if !self.cam.as_ref().is_some_and(|c| c.is_sending()) {
+                self.cam = None;
+                *self.local_preview.lock().unwrap() = None;
+            }
+        }
+    }
+
+    /// Bildschirm/Fenster-Auswahl mit Reitern "Anwendungen" / "Gesamter Bildschirm".
+    fn ui_screen_picker(&mut self, ctx: &egui::Context) {
+        let Some(cmd_tx) = self.cmd_tx.clone() else {
+            self.screen_picker = None;
+            return;
+        };
+        let Some(picker) = &mut self.screen_picker else { return };
+        if let Ok(list) = picker.rx.try_recv() {
+            picker.loading = false;
+            picker.selected = None;
+            picker.entries = list
+                .into_iter()
+                .enumerate()
+                .map(|(i, e)| {
+                    let tex = e.thumbnail.as_ref().map(|img| {
+                        ctx.load_texture(
+                            format!("share-thumb-{i}"),
+                            egui::ColorImage::from_rgba_unmultiplied(
+                                [img.width() as usize, img.height() as usize],
+                                img,
+                            ),
+                            egui::TextureOptions::LINEAR,
+                        )
+                    });
+                    (e, tex)
+                })
+                .collect();
+            if !picker.entries.iter().any(|(e, _)| matches!(e.source, ShareSource::Window(_))) {
+                picker.tab = ShareTab::Screens;
+            }
+        }
+
+        let mut open = true;
+        let mut cancel = false;
+        let mut share: Option<ShareSource> = None;
+        let mut refresh = false;
+        egui::Window::new(format!("{}  Bildschirm teilen", icons::regular::MONITOR))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .fixed_size([700.0, 520.0])
+            .show(ctx, |ui| {
+                // Reiter
+                ui.horizontal(|ui| {
+                    let tab_w = (ui.available_width() - 8.0) / 2.0;
+                    for (tab, icon, label) in [
+                        (ShareTab::Apps, icons::regular::APP_WINDOW, "Anwendungen"),
+                        (ShareTab::Screens, icons::regular::MONITOR, "Gesamter Bildschirm"),
+                    ] {
+                        let active = picker.tab == tab;
+                        let btn = egui::Button::new(
+                            egui::RichText::new(format!("{icon}  {label}"))
+                                .size(15.0)
+                                .color(if active { egui::Color32::WHITE } else { COLOR_IDLE }),
+                        )
+                        .fill(if active { COLOR_HOVER } else { COLOR_DARK })
+                        .min_size(egui::vec2(tab_w, 34.0));
+                        if ui.add(btn).clicked() && !active {
+                            picker.tab = tab;
+                            picker.selected = None;
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+
+                let list_h = 420.0;
+                if picker.loading {
+                    ui.allocate_ui(egui::vec2(ui.available_width(), list_h), |ui| {
+                        ui.centered_and_justified(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("Fenster und Bildschirme werden gesucht...");
+                            });
+                        });
+                    });
+                } else {
+                    let wanted_window = picker.tab == ShareTab::Apps;
+                    egui::ScrollArea::vertical()
+                        .max_height(list_h)
+                        .min_scrolled_height(list_h)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            let items: Vec<usize> = picker
+                                .entries
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, (e, _))| {
+                                    matches!(e.source, ShareSource::Window(_)) == wanted_window
+                                })
+                                .map(|(i, _)| i)
+                                .collect();
+                            if items.is_empty() {
+                                ui.weak(if wanted_window {
+                                    "Keine teilbaren Fenster gefunden."
+                                } else {
+                                    "Keine Bildschirme gefunden."
+                                });
+                            }
+                            let card_w = (ui.available_width() - 12.0) / 2.0;
+                            for row in items.chunks(2) {
+                                ui.horizontal(|ui| {
+                                    for &i in row {
+                                        let (entry, tex) = &picker.entries[i];
+                                        let selected = picker.selected == Some(entry.source);
+                                        let resp =
+                                            share_card(ui, entry, tex.as_ref(), selected, card_w);
+                                        if resp.clicked() {
+                                            picker.selected = Some(entry.source);
+                                        }
+                                        if resp.double_clicked() {
+                                            share = Some(entry.source);
+                                        }
+                                    }
+                                });
+                                ui.add_space(10.0);
+                            }
+                        });
+                }
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            !picker.loading,
+                            egui::Button::new(format!(
+                                "{}  Aktualisieren",
+                                icons::regular::ARROWS_CLOCKWISE
+                            )),
+                        )
+                        .clicked()
+                    {
+                        refresh = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_enabled(
+                                picker.selected.is_some(),
+                                egui::Button::new(
+                                    egui::RichText::new(format!(
+                                        "{}  Teilen",
+                                        icons::regular::BROADCAST
+                                    ))
+                                    .color(egui::Color32::WHITE),
+                                )
+                                .fill(COLOR_ACCENT),
+                            )
+                            .clicked()
+                        {
+                            share = picker.selected;
+                        }
+                        if ui.button("Abbrechen").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            });
+
+        if refresh {
+            let tab = picker.tab;
+            let mut fresh = ScreenPicker::open();
+            fresh.tab = tab;
+            *picker = fresh;
+        }
+        if let Some(source) = share {
+            self.screen_picker = None;
+            self.start_screen_share(source, &cmd_tx);
+        } else if !open || cancel {
+            self.screen_picker = None;
         }
     }
 
@@ -1420,30 +2150,58 @@ impl RustTalkApp {
         }
 
         // Video-Grid: teilende Mitglieder (Kamera/Bildschirm) als Kacheln.
-        let sharers: Vec<&UserInfo> =
-            members.iter().filter(|u| u.sharing || self.video_frames.contains_key(&u.id)).collect();
-        if !sharers.is_empty() {
+        // Pro User bis zu zwei Kacheln (Kamera + Bildschirm). Klick = Vollbild.
+        let tiles: Vec<(UserInfo, VideoKind)> = members
+            .iter()
+            .flat_map(|u| {
+                [VideoKind::Screen, VideoKind::Camera]
+                    .into_iter()
+                    .filter(|k| self.video_frames.contains_key(&(u.id, *k)))
+                    .map(|k| (u.clone(), k))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        if !tiles.is_empty() {
             ui.add_space(8.0);
+            let mut open_fs = None;
             ui.horizontal_wrapped(|ui| {
-                for user in sharers {
-                    if let Some(data) = self.video_frames.get(&user.id).cloned() {
-                        if let Some(tex) =
-                            self.textures.texture_for(ui.ctx(), &data, &format!("video-{}", user.id))
-                        {
-                            ui.vertical(|ui| {
-                                ui.add(
-                                    egui::Image::new(&tex)
-                                        .max_width(320.0)
-                                        .max_height(200.0)
-                                        .rounding(6.0),
-                                );
-                                ui.label(egui::RichText::new(&user.name).color(COLOR_TEXT));
-                            });
-                            ui.add_space(8.0);
+                for (user, kind) in tiles {
+                    let Some(data) = self.video_frames.get(&(user.id, kind)).cloned() else {
+                        continue;
+                    };
+                    let name = format!("video-{}-{kind:?}", user.id);
+                    let Some(tex) = self.textures.texture_for(ui.ctx(), &data, &name) else {
+                        continue;
+                    };
+                    ui.vertical(|ui| {
+                        let resp = ui
+                            .add(
+                                egui::Image::new(&tex)
+                                    .max_width(320.0)
+                                    .max_height(200.0)
+                                    .corner_radius(6.0)
+                                    .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("Klicken fuer Vollbild")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if resp.clicked() {
+                            open_fs = Some((user.id, kind));
                         }
-                    }
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}  {}",
+                                kind_icon(kind),
+                                user.name
+                            ))
+                            .color(COLOR_TEXT),
+                        );
+                    });
+                    ui.add_space(8.0);
                 }
             });
+            if let Some(key) = open_fs {
+                self.enter_fullscreen(key);
+            }
             ui.separator();
         }
 
@@ -1479,7 +2237,7 @@ impl RustTalkApp {
             egui::ViewportId::from_hash_of("settings_viewport"),
             egui::ViewportBuilder::default()
                 .with_title("RustTalk – Einstellungen")
-                .with_inner_size([430.0, 470.0])
+                .with_inner_size([460.0, 560.0])
                 .with_min_inner_size([360.0, 320.0]),
             |ctx, _class| {
                 if ctx.input(|i| i.viewport().close_requested()) {
@@ -1589,6 +2347,19 @@ impl RustTalkApp {
 
         ui.separator();
         ui.weak("Geraetewechsel greifen beim naechsten Verbinden.");
+        ui.separator();
+        ui.label(egui::RichText::new(format!("{}  Video", icons::regular::VIDEO_CAMERA)).strong());
+        ui.horizontal(|ui| {
+            ui.label("Qualitaet beim Teilen:");
+            egui::ComboBox::from_id_salt("video_quality")
+                .selected_text(self.config.video_quality.label())
+                .show_ui(ui, |ui| {
+                    for q in [video::VideoQuality::High, video::VideoQuality::Balanced] {
+                        ui.selectable_value(&mut self.config.video_quality, q, q.label());
+                    }
+                });
+        });
+        ui.weak("Gilt ab dem naechsten Start von Kamera/Bildschirm. \"Hoch\" fuer LAN, \"Ausgewogen\" fuer WLAN.");
         ui.separator();
         ui.label(egui::RichText::new(format!("{}  Integrationen", icons::regular::GIF)).strong());
         ui.horizontal(|ui| {
@@ -1850,6 +2621,99 @@ impl RustTalkApp {
 // ---------------------------------------------------------------------------
 
 /// Icon-Button fuer die Bottom-Bar (aktiv = rot hinterlegt).
+/// Kamera/Bildschirm-Button: gruen hinterlegt, solange live geteilt wird.
+fn share_button(ui: &mut egui::Ui, icon: &str, live: bool, tooltip: &str) -> egui::Response {
+    let text = egui::RichText::new(icon).size(18.0).color(egui::Color32::WHITE);
+    let btn = egui::Button::new(text)
+        .fill(if live { COLOR_TALKING } else { egui::Color32::TRANSPARENT })
+        .min_size(egui::vec2(34.0, 28.0));
+    ui.add(btn).on_hover_text(tooltip)
+}
+
+/// Seitenverhaeltnis-treue Groesse von `img` innerhalb von `bounds`.
+fn fit_size(img: egui::Vec2, bounds: egui::Vec2) -> egui::Vec2 {
+    if img.x <= 0.0 || img.y <= 0.0 {
+        return bounds;
+    }
+    let scale = (bounds.x / img.x).min(bounds.y / img.y);
+    img * scale
+}
+
+/// Karte im Bildschirm-Auswahldialog: Vorschaubild + Titel (+ App-Name).
+fn share_card(
+    ui: &mut egui::Ui,
+    entry: &ShareEntry,
+    tex: Option<&egui::TextureHandle>,
+    selected: bool,
+    width: f32,
+) -> egui::Response {
+    let thumb_h = width * 9.0 / 16.0;
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(width, thumb_h + 44.0), egui::Sense::click());
+    let painter = ui.painter_at(rect);
+    let bg = if selected || resp.hovered() { COLOR_HOVER } else { COLOR_DARK };
+    painter.rect_filled(rect, 8.0, bg);
+    let thumb_rect = egui::Rect::from_min_size(rect.min, egui::vec2(width, thumb_h)).shrink(6.0);
+    painter.rect_filled(thumb_rect, 6.0, egui::Color32::BLACK);
+    match tex {
+        Some(tex) => {
+            let fit = fit_size(tex.size_vec2(), thumb_rect.size());
+            let r = egui::Rect::from_center_size(thumb_rect.center(), fit);
+            painter.image(
+                tex.id(),
+                r,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+        None => {
+            painter.text(
+                thumb_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Keine Vorschau",
+                egui::FontId::proportional(13.0),
+                COLOR_IDLE,
+            );
+        }
+    }
+    let text_y = thumb_rect.bottom() + 8.0;
+    let max_chars = ((width - 16.0) / 7.5) as usize;
+    let shorten = |t: &str| -> String {
+        if t.chars().count() > max_chars {
+            let mut s: String = t.chars().take(max_chars.saturating_sub(1)).collect();
+            s.push('…');
+            s
+        } else {
+            t.to_string()
+        }
+    };
+    painter.text(
+        egui::pos2(rect.left() + 8.0, text_y),
+        egui::Align2::LEFT_TOP,
+        shorten(&entry.title),
+        egui::FontId::proportional(14.0),
+        egui::Color32::WHITE,
+    );
+    if !entry.subtitle.is_empty() {
+        painter.text(
+            egui::pos2(rect.left() + 8.0, text_y + 17.0),
+            egui::Align2::LEFT_TOP,
+            shorten(&entry.subtitle),
+            egui::FontId::proportional(12.0),
+            COLOR_IDLE,
+        );
+    }
+    if selected {
+        painter.rect_stroke(
+            rect.shrink(1.0),
+            8.0,
+            egui::Stroke::new(2.0_f32, COLOR_ACCENT),
+            egui::StrokeKind::Inside,
+        );
+    }
+    resp.on_hover_text(&entry.title)
+}
+
 fn icon_button(ui: &mut egui::Ui, icon: &str, active: bool, tooltip: &str) -> egui::Response {
     let text = egui::RichText::new(icon).size(18.0).color(egui::Color32::WHITE);
     let btn = egui::Button::new(text)
@@ -1859,7 +2723,7 @@ fn icon_button(ui: &mut egui::Ui, icon: &str, active: bool, tooltip: &str) -> eg
 }
 
 /// Kreis-Avatar mit Initial; gruener Ring, wenn `talking`.
-fn draw_avatar(ui: &mut egui::Ui, name: &str, size: f32, talking: bool) {
+fn draw_avatar(ui: &mut egui::Ui, name: &str, size: f32, talking: bool) -> egui::Rect {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
     let painter = ui.painter();
     let center = rect.center();
@@ -1876,6 +2740,29 @@ fn draw_avatar(ui: &mut egui::Ui, name: &str, size: f32, talking: bool) {
         egui::FontId::proportional(size * 0.52),
         egui::Color32::WHITE,
     );
+    rect
+}
+
+fn kind_icon(kind: VideoKind) -> &'static str {
+    match kind {
+        VideoKind::Camera => icons::regular::VIDEO_CAMERA,
+        VideoKind::Screen => icons::regular::MONITOR,
+    }
+}
+
+fn kind_label(kind: VideoKind) -> &'static str {
+    match kind {
+        VideoKind::Camera => "Kamera",
+        VideoKind::Screen => "Bildschirm",
+    }
+}
+
+/// Gruener Punkt unten rechts am Avatar (spricht gerade).
+fn draw_talk_dot(ui: &egui::Ui, avatar: egui::Rect) {
+    let r = avatar.width() * 0.16;
+    let c = avatar.right_bottom() - egui::vec2(r * 0.6, r * 0.6);
+    ui.painter().circle_filled(c, r + 2.0, COLOR_DARK);
+    ui.painter().circle_filled(c, r, COLOR_TALKING);
 }
 
 /// Deterministische Avatar-Farbe aus dem Namen.

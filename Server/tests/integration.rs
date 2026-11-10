@@ -518,18 +518,32 @@ async fn video_relay_und_sharing() {
 
     // Video-Frame von a kommt bei b an (nicht bei a selbst).
     let frame = vec![0xFF, 0xD8, 0xFF, 1, 2, 3, 4, 5];
-    send(&mut a, &ClientMessage::VideoFrame { data: frame.clone() }).await;
-    match recv(&mut b, 2000).await {
-        Some(ServerMessage::VideoFrame { from_id, data }) => {
-            assert_eq!(from_id, wa.client_id);
-            assert_eq!(data, frame);
+    // Kamera und Bildschirm gleichzeitig: beide Arten kommen getrennt an.
+    for kind in [VideoKind::Camera, VideoKind::Screen] {
+        send(&mut a, &ClientMessage::VideoFrame { kind, data: frame.clone() }).await;
+        match recv(&mut b, 2000).await {
+            Some(ServerMessage::VideoFrame { from_id, kind: got, data }) => {
+                assert_eq!(from_id, wa.client_id);
+                assert_eq!(got, kind);
+                assert_eq!(data, frame);
+            }
+            other => panic!("VideoFrame erwartet, bekam: {other:?}"),
         }
-        other => panic!("VideoFrame erwartet, bekam: {other:?}"),
     }
     assert!(recv(&mut a, 400).await.is_none(), "Sender bekommt kein Echo");
 
+    // Einzelnen Stream beenden -> b bekommt VideoStopped.
+    send(&mut a, &ClientMessage::StopVideo { kind: VideoKind::Camera }).await;
+    match recv(&mut b, 2000).await {
+        Some(ServerMessage::VideoStopped { from_id, kind }) => {
+            assert_eq!(from_id, wa.client_id);
+            assert_eq!(kind, VideoKind::Camera);
+        }
+        other => panic!("VideoStopped erwartet, bekam: {other:?}"),
+    }
+
     // b teilt nicht -> Frame von b erreicht niemanden.
-    send(&mut b, &ClientMessage::VideoFrame { data: frame }).await;
+    send(&mut b, &ClientMessage::VideoFrame { kind: VideoKind::Camera, data: frame }).await;
     assert!(recv(&mut a, 400).await.is_none(), "Nicht-Sharer wird nicht relayed");
 }
 

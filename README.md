@@ -17,11 +17,11 @@ Schlanker Voice-Chat in Rust — Client im Discord-Look, Server im TeamSpeak-Sti
 - **Text-Chat** mit Verlauf, Bildern (PNG/JPEG/GIF), Ungelesen-Markierung
 - **SQLite-Persistenz** (Server): Channels, Chat-Verlauf (Retention 10k/Channel), Spawn-Log überleben Neustarts
 - **Client-UI:** Dark-Mode (fest), prozedurales Logo, Lesezeichen für Server, Einstellungen als eigenes Fenster, Mikro-Pegel-Meter, Avatare mit Talking-Ring, lokale Stummschaltung pro User (Rechtsklick)
+- **Video (MJPEG ~25 fps über TCP):** Webcam mit Geräteauswahl + Live-Vorschau, Bildschirm/Fenster teilen mit Auswahldialog („Anwendungen" / „Gesamter Bildschirm"); beides gleichzeitig möglich. Klick auf eine Kachel = Vollbild mit User-Leiste (grüner Punkt beim Sprechen)
 - **Server:** Single-Binary + `server.toml`, systemd-Service, ein Port (7331 TCP+UDP), optionales Passwort
 
 ### Kaputt — Fix in Arbeit (WIP)
 
-- ⛔ **Webcam / Bildschirm teilen** (nokhwa/scrap → MJPEG über TCP): Buttons sind deaktiviert markiert. [test.md](test.md), Eintrag 8 hat die Code-Basis; Aufnahme/Transport funktioniert nicht zuverlässig.
 - ⛔ **GIPHY-Suche**: Integration existiert (`media.rs`, API-Key in den Einstellungen), funktioniert aber nicht — Button deaktiviert. Wird später gefixt.
 
 ---
@@ -50,7 +50,7 @@ Client (Windows)                          Server (Debian)
                                             └──────────────┘
 ```
 
-- **TCP:** Login, Channels, Chat (Text + Bilder), Events, Video-Frames (WIP)
+- **TCP:** Login, Channels, Chat (Text + Bilder), Events, Video-Frames (Kamera/Bildschirm, v5)
 - **UDP:** nur Opus-Audio (20 ms Frames, Token+Sequence-Header), Server relayed 1:1 innerhalb des Voice-Channels
 - **Spawn-Channel:** alle landen dort beim Verbinden; Sprechen serverseitig blockiert; Join-Log
 
@@ -112,12 +112,12 @@ bash Server/Test_Scripts/e2e_local.sh
 ## Projektstruktur
 
 ```
-├── shared/            # Protokoll (v4), Framing, UDP-Paketformat
+├── shared/            # Protokoll (v5), Framing, UDP-Paketformat
 ├── Server/            # Linux-Server (+ test_client CLI, Integrationstests, deploy/, Test_Scripts/)
 │   └── src/           #   main, config, state (RAM), db (SQLite), tcp, udp
 └── Client/Windows/    # egui-Client
     └── src/           #   app (UI), net, audio/ (capture, encoder+RNNoise, playback, jitter,
-                       #   resample), media (Bilder/GIPHY), video (Kamera/Screen, WIP), config, logo
+                       #   resample), media (Bilder/GIPHY), video (Kamera/Bildschirm/Fenster), config, logo
 ```
 
 ## Bekannte Einschränkungen
@@ -125,4 +125,5 @@ bash Server/Test_Scripts/e2e_local.sh
 - Keine Verschlüsselung/Authentifizierung außer optionalem Server-Passwort (LAN-Einsatz)
 - PTT wirkt nur bei fokussiertem Fenster (globaler Hotkey: geplant)
 - Keine Echo-Kompensation → Kopfhörer empfohlen
-- Webcam/Screen-Share und GIPHY: **kaputt, Fix in Arbeit**
+- GIPHY: **kaputt, Fix in Arbeit**
+- Video als MJPEG über TCP: bei „Hoch" ~5–6 MB/s pro Bildschirm-Stream und Zuschauer – fürs LAN gedacht (im WLAN „Ausgewogen" wählen). Bei sehr großen Monitoren (3440×1440) schafft „Hoch" ~19 fps

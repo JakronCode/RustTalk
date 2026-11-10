@@ -10,11 +10,20 @@
 //! - **Text:** nur Text-/Bild-Chat (fuer alle Clients sichtbar, kein Join noetig).
 //!
 //! v4: Bilder im Chat, Video-Frames (JPEG), Sharing-Status.
+//! v5: Video-Frames mit Art (Kamera/Bildschirm) -> beide gleichzeitig teilbar;
+//!     `StopVideo`/`VideoStopped` beendet einen einzelnen Stream.
 
 use serde::{Deserialize, Serialize};
 
 /// Aktuelle Protokollversion. Client und Server müssen übereinstimmen.
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
+
+/// Art eines Video-Streams. Ein User kann beide gleichzeitig senden.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum VideoKind {
+    Camera,
+    Screen,
+}
 
 /// Maximale Groesse eines Bildes/Video-Frames in Bytes (4 MiB).
 pub const MAX_MEDIA_BYTES: usize = 4 * 1024 * 1024;
@@ -144,7 +153,12 @@ pub enum ClientMessage {
     },
     /// Ein Video-Frame (JPEG) fuer die Mitglieder des eigenen Voice-Channels.
     VideoFrame {
+        kind: VideoKind,
         data: Vec<u8>,
+    },
+    /// Einen einzelnen Stream beenden (der andere darf weiterlaufen).
+    StopVideo {
+        kind: VideoKind,
     },
     /// Sauberes Trennen (Server antwortet nicht, schließt nur).
     Disconnect,
@@ -210,7 +224,13 @@ pub enum ServerMessage {
     /// Video-Frame (JPEG) eines Mitglieds des eigenen Voice-Channels.
     VideoFrame {
         from_id: u64,
+        kind: VideoKind,
         data: Vec<u8>,
+    },
+    /// Ein Mitglied hat einen einzelnen Stream beendet.
+    VideoStopped {
+        from_id: u64,
+        kind: VideoKind,
     },
     Error {
         message: String,
@@ -266,7 +286,8 @@ mod tests {
             ClientMessage::Chat { channel_id: 1, text: String::new(), image: Some(vec![0xFF, 0xD8]) },
             ClientMessage::SetMuteState { muted: true, deafened: false },
             ClientMessage::SetSharing { sharing: true },
-            ClientMessage::VideoFrame { data: vec![1, 2, 3] },
+            ClientMessage::VideoFrame { kind: VideoKind::Camera, data: vec![1, 2, 3] },
+            ClientMessage::StopVideo { kind: VideoKind::Screen },
             ClientMessage::Disconnect,
         ];
         for msg in msgs {
@@ -327,7 +348,8 @@ mod tests {
             },
             ServerMessage::MuteStateChanged { client_id: 1, muted: true, deafened: true },
             ServerMessage::SharingChanged { client_id: 1, sharing: true },
-            ServerMessage::VideoFrame { from_id: 1, data: vec![9, 8, 7] },
+            ServerMessage::VideoFrame { from_id: 1, kind: VideoKind::Screen, data: vec![9, 8, 7] },
+            ServerMessage::VideoStopped { from_id: 1, kind: VideoKind::Camera },
             ServerMessage::Error { message: "Fehler".into() },
         ];
         for msg in msgs {

@@ -40,6 +40,12 @@ pub struct ClientConfig {
     pub input_device: Option<String>,
     #[serde(default)]
     pub output_device: Option<String>,
+    /// Zuletzt geteilte Kamera (Name), Vorauswahl im Kamera-Dialog.
+    #[serde(default)]
+    pub camera: Option<String>,
+    /// Qualitaet gesendeter Video-Streams (Kamera + Bildschirm).
+    #[serde(default)]
+    pub video_quality: crate::video::VideoQuality,
 }
 
 fn default_username() -> String {
@@ -72,6 +78,8 @@ impl Default for ClientConfig {
             bookmarks: Vec::new(),
             input_device: None,
             output_device: None,
+            camera: None,
+            video_quality: crate::video::VideoQuality::default(),
         }
     }
 }
@@ -121,6 +129,8 @@ mod tests {
             ],
             input_device: Some("Mikro".into()),
             output_device: None,
+            camera: None,
+            video_quality: crate::video::VideoQuality::default(),
         };
         let text = toml::to_string_pretty(&cfg).unwrap();
         let back: ClientConfig = toml::from_str(&text).unwrap();

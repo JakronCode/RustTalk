@@ -2,6 +2,62 @@
 
 > Pflichtdokumentation aller Testläufe. Neueste oben.
 
+## 2026-11-10 (12) – Verbindungsabbruch, hängende Server-Verbindung, Auflösung
+
+**Feedback:** Gute Bildrate, aber Auflösung mau; ein Fehler mit Neuverbindung, alte Verbindung blieb auf dem Server offen.
+
+**Ursachen:**
+- **Fehler/Neuverbindung (Client):** `read_frame` lief als Zweig im `tokio::select!` und ist nicht abbruchsicher. Bei jedem ausgehenden Befehl (25 fps eigenes Video) wurde ein halb gelesener eingehender Frame verworfen → Stream verschoben → „Netzwerkfehler". Fix: Lesen in eigenem Task. Regressionstest `net::tests::large_frames_in_both_directions_stay_intact` (150 × 180 KB in beide Richtungen); **Gegenprobe mit altem Ablauf schlägt fehl** („Netzwerkfehler: unexpected end of file"), neuer Ablauf grün.
+- **Hängende Verbindung (Server):** Server-Log zeigte die alte Verbindung von 10.69.43.53 weiter als ESTABLISHED, 245 KB unbestätigt, 9 Retransmits; der Server merkte das nicht (wartete nur aufs Lesen). Fix: TCP-Keepalive (15 s/5 s/3), `TCP_USER_TIMEOUT` 20 s (Linux), Schreib-Timeout 15 s, Sitzung endet auch, wenn der Writer scheitert. Verifiziert: `ss -o` zeigt `timer:(keepalive,…)`.
+- **Speicher/Latenz:** Video-Frames landeten pro Zuschauer in einer unbegrenzten Queue (auch für tote Clients). Jetzt max. 3 MB Rückstand pro Zuschauer, darüber werden Frames verworfen; Client-Upload ebenso begrenzt.
+- **Auflösung:** Bildschirm war auf 1280×720 / JPEG-Qualität 60 begrenzt (3440×1440 → 1280×536, im Vollbild 2,7× hochskaliert). Neu: Einstellung **Video-Qualität** – „Hoch" (Standard: Bildschirm 1920×1080 q75, Kamera 1280×720 q80) oder „Ausgewogen" (720p/540p q70). Kodierung in einem Encoder-Pool (bis 3 Threads, Reihenfolge bleibt).
+
+**Messung (Release, Monitor 3440×1440):** 1080p-Kodierung 64 ms/Bild, 1280er 36 ms. „Hoch" → **18,7 fps**, ~290 KB/Frame (≈ 5,4 MB/s pro Zuschauer); Grenze ist jetzt die GDI-Aufnahme des 5-MP-Monitors. „Ausgewogen" → ~25 fps. Kleinere Monitore/Fenster sind schneller.
+
+**Tests:** Client 39 ✅ (neu: Regressionstest Netz, `encoder_pool_keeps_order_and_shuts_down`, `quality_levels_scale_up`), Server 27 ✅, Integration 7 ✅, Shared 12 ✅ – unter Windows und auf dem Linux-Server.
+
+**Server 10.69.40.101:** neu gebaut, installiert (vorheriges Binary als `rusttalk-server.v5a.bak`), Dienst `active`, `test_client` → `WELCOME`. Protokoll bleibt v5 (Clients aus Eintrag 11 verbinden weiter, haben aber den Lese-Bug).
+
+---
+
+## 2026-11-10 (11) – Kamera + Bildschirm gleichzeitig, 25 fps, Vollbild (Protokoll v5)
+
+**Feedback:** Webcam läuft auf dem zweiten Testgerät. Wünsche: Vollbild mit User-Leiste, Kamera und Bildschirm gleichzeitig, weniger Lag (Ziel 25 fps).
+
+**Änderungen:**
+- **Protokoll v5:** `VideoKind { Camera, Screen }` an `VideoFrame`; neu `StopVideo` / `VideoStopped` zum Beenden eines einzelnen Streams. Server relayed die Art mit. Client und Server müssen beide v5 sein.
+- **Parallel teilen:** Kamera und Bildschirm stoppen sich nicht mehr gegenseitig; pro User bis zu zwei Kacheln (Icon zeigt die Art).
+- **Lag:** (1) UI zeichnete nur alle 100 ms neu → jetzt Repaint sofort bei jedem eigenen und empfangenen Frame. (2) 25 fps statt 5 fps (gleichmäßiger Takt, `Pacer`). (3) Kamera fordert 720p MJPEG an, sendet max. 960×540; Bildschirm max. 1280×720. (4) Bildschirm: Aufnahme und Kodierung in getrennten Threads (vorher 13 fps bei 3440×1440, jetzt 25,7 fps).
+- **Vollbild:** Klick auf eine Kachel → Fenster im Vollbild, Stream füllt die Fläche, unten die Channel-Mitglieder (grüner Punkt + Ring beim Sprechen, Mute-Icons, Buttons zum Umschalten auf andere Streams). Beenden mit Esc, Doppelklick oder Button.
+- Geteiltes Fenster geschlossen → Teilen endet sauber (Button nicht mehr grün).
+
+**Tests (Windows):** Client 36 ✅ (neu: `pacer_yields_about_25_fps_from_30_fps_camera`, `screen_frames_use_larger_size`), Server 27 ✅, Integration 7 ✅ (Video-Test erweitert: Kamera + Bildschirm getrennt, `VideoStopped`), Shared 12 ✅. Hardware (Release): Monitor 3440×1440 → **25,7 fps**, ~113 KB/Frame (≈ 2,8 MB/s pro Zuschauer).
+
+**Server 10.69.40.101:** Quellen nach `/opt/rusttalk/src` übertragen (vorher identisch mit Commit 8ef2f5c), Release-Build + Tests dort grün (27/7/12). Installiert und Dienst neu gestartet (altes Binary als `rusttalk-server.v4.bak`), Dienst `active`, 7 Channels / 12 Log-Einträge / 4 Chat-Nachrichten unverändert vorhanden. `test_client` (v5) bekommt `WELCOME`.
+
+**Manuell zu prüfen:** Vollbild-Ansicht + User-Leiste in der GUI, Kamera + Bildschirm gleichzeitig mit zwei Geräten, gefühlte Flüssigkeit.
+
+---
+
+## 2026-11-10 (10) – Webcam-Fix + Vorschau, Bildschirm/Fenster-Auswahl
+
+**Ursachen:**
+- **Webcam:** `nokhwa` wurde ohne Feature `input-msmf` gebaut → auf Windows gab es gar kein Kamera-Backend, jedes Öffnen schlug fehl. Fix: `nokhwa = { features = ["input-msmf"] }`, Format-Fallbacks (640×480 MJPEG → YUYV → NV12 → Default).
+- **Screen-Share:** Der alte `scrap`-Code ignorierte den Zeilen-Stride der DXGI-Frames (bei gepaddeten Zeilen ein verzerrtes Bild), nahm fest den Hauptmonitor und kann keine einzelnen Fenster. Ersetzt durch `xcap` (Monitore **und** Fenster).
+
+**Neu:**
+- Kamera-Button öffnet einen Dialog mit Geräteauswahl + Live-Vorschau; erst „Kamera teilen" sendet (`VideoCapture::set_sending`). Gewählte Kamera wird in `client_config.toml` (`camera`) gemerkt.
+- Bildschirm-Button öffnet eine Auswahl im Discord-Stil: Reiter „Anwendungen" / „Gesamter Bildschirm", Kacheln mit Vorschaubild + Titel/App, Klick wählt, Doppelklick oder „Teilen" startet, „Aktualisieren" lädt neu.
+- Buttons grün hinterlegt, solange live geteilt wird; erneuter Klick beendet das Teilen.
+
+**Tests:** 34 Client-Tests grün (neu: `thumbnail_fits_picker_box`, `sending_flag_toggles`, `camera_errors_are_readable`). Hardware-Tests (`#[ignore]`, Aufruf: Test-Binary mit `hw_ --ignored --nocapture`):
+- `hw_share_sources_and_window_capture` ✅ – 2 Monitore (3440×1440, 1920×1080) und 16 Fenster (u. a. World of Warcraft, Chrome, Discord) mit Vorschaubild gefunden; Monitor- und Fenster-Capture liefern JPEG-Frames.
+- `hw_camera_delivers_frames` ❌ – „Lenovo Performance RGB Camera" wird gefunden und geöffnet, jeder Lesevorgang endet mit `0x800703E3` (ERROR_OPERATION_ABORTED), in allen Formaten. Gegenprobe mit reinem Media Foundation (ohne nokhwa, mit und ohne Video-Processing): identischer Fehler → Geräte-/Systemzustand, nicht RustTalk. Datenschutz-Einstellungen erlauben Kamerazugriff, keine andere App nutzt sie. Der Client zeigt dafür jetzt einen verständlichen Hinweis (Blende/Kamera-Schalter prüfen, neu einstecken).
+
+**Manuell zu prüfen:** Dialoge in der laufenden GUI (Layout, Vorschau-Kacheln), Empfang beim Gegenüber, Webcam nach Neu-Einstecken bzw. mit anderer Kamera.
+
+---
+
 ## 2026-11-10 (9) – WIP-Deklaration + Git-Repo + README
 
 **WIP (kaputt, Fix in Arbeit):** Webcam/Screen-Share und GIPHY funktionieren nicht zuverlässig → Buttons in der UI deaktiviert (Tooltip: „aktuell kaputt – Fix in Arbeit"). Code-Basis bleibt im Repo (`video.rs`, `media.rs`) inkl. Tests. Konkrete Fix-Gründe ausstehend (Aufnahme/Transport prüfen).

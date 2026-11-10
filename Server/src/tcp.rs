@@ -1,6 +1,8 @@
 //! TCP-Steuerkanal: Listener + ein Task pro Verbindung.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
@@ -11,10 +13,33 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-use crate::state::SharedState;
+use crate::state::{SharedState, MAX_VIDEO_BACKLOG};
 
 /// Zeitlimit für das erste `Hello` nach dem Verbindungsaufbau.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Haengt ein einzelner Schreibvorgang laenger, gilt die Verbindung als tot.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Tote Verbindungen erkennen, auch wenn der Client sich nicht abmeldet
+/// (Absturz, WLAN weg, Firewall verwirft Pakete still):
+/// - Keepalive: nach 15 s Stille alle 5 s pruefen.
+/// - Linux `TCP_USER_TIMEOUT`: 20 s unbestaetigte Daten -> Verbindung zu
+///   (ohne das versucht der Kernel ~15 min lang neu zu senden).
+fn configure_socket(stream: &TcpStream) {
+    let sock = socket2::SockRef::from(stream);
+    let ka = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(15))
+        .with_interval(Duration::from_secs(5));
+    #[cfg(target_os = "linux")]
+    let ka = ka.with_retries(3);
+    if let Err(e) = sock.set_tcp_keepalive(&ka) {
+        debug!("Keepalive setzen: {e}");
+    }
+    #[cfg(target_os = "linux")]
+    if let Err(e) = sock.set_tcp_user_timeout(Some(Duration::from_secs(20))) {
+        debug!("TCP_USER_TIMEOUT setzen: {e}");
+    }
+}
 
 pub async fn run_listener(state: SharedState, bind: &str) -> Result<()> {
     let listener = TcpListener::bind(bind).await.with_context(|| format!("TCP-Bind an {bind}"))?;
@@ -33,6 +58,7 @@ pub async fn run_listener(state: SharedState, bind: &str) -> Result<()> {
 
 async fn handle_connection(stream: TcpStream, peer: SocketAddr, state: SharedState) -> Result<()> {
     stream.set_nodelay(true).ok();
+    configure_socket(&stream);
     let (mut reader, mut writer) = tokio::io::split(stream);
 
     // 1. Hello mit Timeout erwarten.
@@ -71,7 +97,7 @@ async fn handle_connection(stream: TcpStream, peer: SocketAddr, state: SharedSta
     //    Reihenfolge pro Client ist durch die mpsc-Queue garantiert
     //    (Welcome landet vor UserJoined in der Queue des Neuen).
     let (tx, rx) = mpsc::unbounded_channel::<ServerMessage>();
-    let (client_id, username) = {
+    let (client_id, username, video_backlog) = {
         let mut st = state.lock().unwrap();
         let username = sanitize_username(&username, st.next_client_id_hint());
         let (id, token) = st.add_client(username.clone(), tx);
@@ -83,21 +109,27 @@ async fn handle_connection(stream: TcpStream, peer: SocketAddr, state: SharedSta
             spawn_log: st.spawn_log(),
             chat_history: st.chat_history(),
         };
-        let user = st.client(id).expect("frisch registrierter Client").info();
+        let client = st.client(id).expect("frisch registrierter Client");
+        let user = client.info();
+        let video_backlog = client.video_backlog.clone();
         st.send_to(id, &welcome);
         st.broadcast(&ServerMessage::UserJoined { user });
         // Join im Spawn-Log dokumentieren (persistiert serverseitig).
         let entry = st.push_spawn_log(format!("{username} ist erschienen"));
         st.broadcast(&ServerMessage::SpawnLogEntry { entry });
-        (id, username)
+        (id, username, video_backlog)
     };
     info!("Client {client_id} ({username}) von {peer} verbunden");
 
     // 4. Writer-Task uebernimmt ab hier den Sendeteil des Streams.
-    let writer_handle = tokio::spawn(writer_task(writer, rx));
+    let mut writer_handle = tokio::spawn(writer_task(writer, rx, video_backlog));
 
-    // 5. Message-Loop bis Disconnect/Fehler.
-    let result = message_loop(&mut reader, &state, client_id).await;
+    // 5. Message-Loop bis Disconnect/Fehler – oder bis das Senden scheitert
+    //    (sonst wuerde der Server ewig auf einen toten Client warten).
+    let result = tokio::select! {
+        r = message_loop(&mut reader, &state, client_id) => r,
+        _ = &mut writer_handle => Err(anyhow::anyhow!("Senden an Client fehlgeschlagen")),
+    };
 
     // 6. Cleanup: Client entfernen, alle informieren, Writer beenden.
     {
@@ -106,15 +138,40 @@ async fn handle_connection(stream: TcpStream, peer: SocketAddr, state: SharedSta
         st.broadcast(&ServerMessage::UserLeft { client_id });
     }
     writer_handle.abort();
-    info!("Client {client_id} ({username}) getrennt");
+    match &result {
+        Ok(()) => info!("Client {client_id} ({username}) getrennt"),
+        Err(e) => info!("Client {client_id} ({username}) getrennt: {e:#}"),
+    }
     result
 }
 
 /// Empfaengt ServerMessages aus der Queue und schreibt sie auf den Stream.
-async fn writer_task(mut writer: WriteHalf<TcpStream>, mut rx: mpsc::UnboundedReceiver<ServerMessage>) {
+/// Endet bei Schreibfehler oder wenn ein Frame laenger als `WRITE_TIMEOUT`
+/// haengt. Gibt nach jedem Video-Frame dessen Bytes im Backlog frei.
+async fn writer_task(
+    mut writer: WriteHalf<TcpStream>,
+    mut rx: mpsc::UnboundedReceiver<ServerMessage>,
+    video_backlog: Arc<AtomicUsize>,
+) {
     while let Some(msg) = rx.recv().await {
-        if write_frame(&mut writer, &msg).await.is_err() {
-            break;
+        let video_len = match &msg {
+            ServerMessage::VideoFrame { data, .. } => data.len(),
+            _ => 0,
+        };
+        let res = tokio::time::timeout(WRITE_TIMEOUT, write_frame(&mut writer, &msg)).await;
+        if video_len > 0 {
+            video_backlog.fetch_sub(video_len, Ordering::Relaxed);
+        }
+        match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                debug!("Schreiben fehlgeschlagen: {e}");
+                break;
+            }
+            Err(_) => {
+                debug!("Schreiben haengt seit {WRITE_TIMEOUT:?}");
+                break;
+            }
         }
     }
 }
@@ -204,17 +261,32 @@ async fn message_loop(
                     });
                 }
             }
-            ClientMessage::VideoFrame { data } => {
+            ClientMessage::VideoFrame { kind, data } => {
                 if data.len() > MAX_MEDIA_BYTES {
                     // Uebergrosse Frames verwerfen (kein Fehler-Spam pro Frame).
                     continue;
                 }
                 let targets = st.video_targets(client_id);
                 if !targets.is_empty() {
-                    let msg = ServerMessage::VideoFrame { from_id: client_id, data };
-                    for tx in targets {
-                        let _ = tx.send(msg.clone());
+                    let len = data.len();
+                    let msg = ServerMessage::VideoFrame { from_id: client_id, kind, data };
+                    for (tx, backlog) in targets {
+                        // Zuschauer haengt hinterher -> diesen Frame auslassen.
+                        if backlog.load(Ordering::Relaxed) + len > MAX_VIDEO_BACKLOG {
+                            continue;
+                        }
+                        backlog.fetch_add(len, Ordering::Relaxed);
+                        if tx.send(msg.clone()).is_err() {
+                            backlog.fetch_sub(len, Ordering::Relaxed);
+                        }
                     }
+                }
+            }
+            ClientMessage::StopVideo { kind } => {
+                // Kommt vor einem evtl. SetSharing(false) -> Ziele noch gueltig.
+                let msg = ServerMessage::VideoStopped { from_id: client_id, kind };
+                for (tx, _) in st.video_targets(client_id) {
+                    let _ = tx.send(msg.clone());
                 }
             }
         }

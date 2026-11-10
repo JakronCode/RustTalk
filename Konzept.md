@@ -16,7 +16,7 @@
 | **Discord-Optik** | Dunkles Theme, Sidebar mit Channel-Baum, Avatare, Phosphor-Icons |
 | **TeamSpeak-Server** | Schlanker Server, dynamische Channels, keine Datenbank nötig |
 | **Channel-Typen** | Spawn (1×, Join-Log, Sprechverbot), Kategorie (Gruppierung), Sprache (Voice + Media-Chat + Video), Text (Chat) |
-| **Medien** | Bilder im Chat (persistiert); ⛔ GIPHY + Webcam/Screen-Share: kaputt, Fix in Arbeit (WIP) |
+| **Medien** | Bilder im Chat (persistiert); Bildschirm/Fenster teilen (Auswahldialog); Webcam mit Vorschau; beides gleichzeitig, 25 fps, Vollbild; ⛔ GIPHY: kaputt, Fix in Arbeit (WIP) |
 
 ### Non-Goals (MVP)
 
@@ -37,7 +37,7 @@
 | Codec | `audiopus` (Opus) | Standard für Voice (wie Discord/TeamSpeak), 48 kHz / 20 ms Frames |
 | Rauschunterdrückung | `nnnoiseless` (RNNoise) | Pure-Rust-KI-Noise-Suppression vor dem Encoder; liefert Sprach-Wahrscheinlichkeit für VAD |
 | Bilder/GIFs | `image`, `rfd` | Decoding, Datei-Dialog |
-| Video (WIP, kaputt) | `nokhwa` (Kamera), `scrap` (DXGI-Screen) | MJPEG-Ansatz funktioniert nicht – Fix ausstehend |
+| Video | `nokhwa` + Feature `input-msmf` (Kamera), `xcap` (Monitore + einzelne Fenster) | MJPEG ~25 fps (Kamera max. 960×540, Bildschirm max. 1280×720) über TCP, Protokoll v5 |
 | GIPHY (WIP, kaputt) | `ureq` + `serde_json` | Suche laeuft nicht – Fix ausstehend |
 | Async Runtime | `tokio` | TCP + UDP + Tasks |
 | (De)Serialisierung | `serde` + `bincode` | Kompaktes Binärprotokoll, performant |

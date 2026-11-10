@@ -5,6 +5,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusttalk_shared::protocol::{
@@ -15,6 +17,11 @@ use tokio::sync::mpsc;
 
 use crate::config::{ChannelKindConfig, ServerConfig};
 use crate::db::Db;
+
+/// Max. wartende Video-Bytes pro Zuschauer (~1 s Bildschirm-Stream). Darueber
+/// werden Frames fuer diesen Zuschauer verworfen: langsame oder tote
+/// Verbindungen bremsen niemanden und fressen keinen Speicher.
+pub const MAX_VIDEO_BACKLOG: usize = 3 * 1024 * 1024;
 
 /// Thread-sicher geteilter State.
 pub type SharedState = std::sync::Arc<std::sync::Mutex<State>>;
@@ -29,6 +36,9 @@ pub struct Client {
     pub sharing: bool,
     pub udp_token: u64,
     pub udp_addr: Option<SocketAddr>,
+    /// Video-Bytes, die fuer diesen Client in `tx` warten (Writer zieht ab).
+    /// Ueber `MAX_VIDEO_BACKLOG` werden Frames verworfen statt gestaut.
+    pub video_backlog: Arc<AtomicUsize>,
     /// Eingehende Nachrichten für diesen Client (vom Writer-Task gesendet).
     pub tx: mpsc::UnboundedSender<ServerMessage>,
 }
@@ -256,6 +266,7 @@ impl State {
                 sharing: false,
                 udp_token: token,
                 udp_addr: None,
+                video_backlog: Arc::new(AtomicUsize::new(0)),
                 tx,
             },
         );
@@ -417,7 +428,10 @@ impl State {
 
     /// Relay-Ziele fuer Video-Frames: Mitglieder desselben Voice-Channels
     /// (ausser dem Sender selbst). Leer, wenn der Sender nicht teilt.
-    pub fn video_targets(&self, client_id: u64) -> Vec<mpsc::UnboundedSender<ServerMessage>> {
+    pub fn video_targets(
+        &self,
+        client_id: u64,
+    ) -> Vec<(mpsc::UnboundedSender<ServerMessage>, Arc<AtomicUsize>)> {
         let Some(sender) = self.clients.get(&client_id) else { return Vec::new() };
         if !sender.sharing {
             return Vec::new();
@@ -432,7 +446,7 @@ impl State {
         self.clients
             .values()
             .filter(|c| c.id != client_id && c.channel_id == sender.channel_id)
-            .map(|c| c.tx.clone())
+            .map(|c| (c.tx.clone(), c.video_backlog.clone()))
             .collect()
     }
 
