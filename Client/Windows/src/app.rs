@@ -280,6 +280,7 @@ impl RustTalkApp {
         self.control.self_muted.store(false, Ordering::Relaxed);
         self.control.self_deafened.store(false, Ordering::Relaxed);
         self.control.noise_suppression.store(self.config.noise_suppression, Ordering::Relaxed);
+        self.control.auto_gain.store(self.config.auto_gain, Ordering::Relaxed);
         // Neuer Zaehler pro Verbindung (alte Queue ist mit der Verbindung weg).
         self.upload_backlog = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         self.cmd_tx = Some(net::connect(
@@ -2311,6 +2312,13 @@ impl RustTalkApp {
                 .store(self.config.noise_suppression, Ordering::Relaxed);
         }
         ui.weak("Filtert Hintergrundgeraeusche vor dem Senden heraus.");
+        if ui
+            .checkbox(&mut self.config.auto_gain, "Automatische Lautstaerke")
+            .changed()
+        {
+            self.control.auto_gain.store(self.config.auto_gain, Ordering::Relaxed);
+        }
+        ui.weak("Hebt leise Mikros an und daempft zu laute – andere hoeren dich gleichmaessig.");
         ui.separator();
 
         ui.label(egui::RichText::new(format!("{}  Geraete", icons::regular::SPEAKER_HIGH)).strong());

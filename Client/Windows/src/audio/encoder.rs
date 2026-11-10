@@ -5,12 +5,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use audiopus::coder::Encoder;
-use audiopus::{Application, Bitrate, Channels, SampleRate};
+use audiopus::{Application, Bitrate, Channels, SampleRate, Signal};
 use nnnoiseless::DenoiseState;
 use ringbuf::traits::Consumer;
 use ringbuf::HeapCons;
 use rusttalk_shared::audio_packet::{encode_to_vec, AudioHeader, FRAME_SAMPLES, SAMPLE_RATE};
 
+use super::dsp::{soft_limit, Agc, DcBlocker};
 use super::AudioControl;
 
 /// RMS-Schwellen-Gate mit Hangover, damit Wortenden nicht abgehackt werden.
@@ -55,7 +56,20 @@ pub fn rms(frame: &[f32]) -> f32 {
     (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt()
 }
 
-/// Encoder-Thread: 20-ms-Frames aus dem Ring-Puffer -> Denoise -> Gate -> Opus -> UDP.
+/// Opus fuer Sprache: 64 kbit/s (wie Discord-Standard), hoechste Komplexitaet,
+/// Signal "Voice". `packet_loss_perc` ist noetig, damit Opus die In-Band-FEC
+/// ueberhaupt erzeugt (ohne den Wert war `inband_fec` wirkungslos) – damit
+/// kann der Empfaenger ein verlorenes Paket aus dem naechsten rekonstruieren.
+pub fn configure_encoder(e: &mut Encoder) {
+    let _ = e.set_bitrate(Bitrate::BitsPerSecond(64_000));
+    let _ = e.set_complexity(10);
+    let _ = e.set_signal(Signal::Voice);
+    let _ = e.set_inband_fec(true);
+    let _ = e.set_packet_loss_perc(10);
+}
+
+/// Encoder-Thread: 20-ms-Frames aus dem Ring-Puffer -> DC-Filter -> Denoise
+/// -> Gate -> AGC/Limiter -> Opus -> UDP.
 pub fn run(
     mut cons: HeapCons<f32>,
     udp: std::net::UdpSocket,
@@ -65,8 +79,7 @@ pub fn run(
 ) {
     let encoder = match Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip) {
         Ok(mut e) => {
-            let _ = e.set_bitrate(Bitrate::BitsPerSecond(48_000));
-            let _ = e.set_inband_fec(true);
+            configure_encoder(&mut e);
             e
         }
         Err(e) => {
@@ -92,6 +105,9 @@ pub fn run(
     let mut ns_in = [0f32; NS_FRAME];
     let mut ns_out = [0f32; NS_FRAME];
     let mut ns_frame = [0f32; FRAME_SAMPLES];
+    let mut out = [0f32; FRAME_SAMPLES];
+    let mut dc = DcBlocker::default();
+    let mut agc = Agc::default();
 
     while !stop.load(Ordering::Relaxed) {
         while have < FRAME_SAMPLES {
@@ -109,6 +125,9 @@ pub fn run(
         }
         have = 0;
 
+        // 0) Gleichanteil entfernen (billige Mikros haben oft DC-Offset).
+        dc.process(&mut frame);
+
         // 1) KI-Rauschunterdrueckung (RNNoise). Laeuft immer, wenn aktiviert,
         //    damit das Modell einen lueckenlosen Stream sieht.
         let ns_on = control.noise_suppression.load(Ordering::Relaxed);
@@ -124,7 +143,8 @@ pub fn run(
                 for i in 0..NS_FRAME {
                     ns_in[i] = frame[s + i] * 32768.0; // RNNoise erwartet i16-Bereich
                 }
-                speech_prob = d.process_frame(&mut ns_out, &ns_in);
+                // Hoechste Sprachwahrscheinlichkeit beider 10-ms-Haelften.
+                speech_prob = speech_prob.max(d.process_frame(&mut ns_out, &ns_in));
                 for i in 0..NS_FRAME {
                     ns_frame[s + i] = ns_out[i] / 32768.0;
                 }
@@ -149,7 +169,17 @@ pub fn run(
         control.transmitting.store(send, Ordering::Relaxed);
 
         if send {
-            match encoder.encode_float(pcm, &mut opus_buf) {
+            // 3) Automatische Lautstaerke + weicher Limiter (nach dem Gate, damit
+            //    die VAD-Schwelle weiter zum Pegelmesser in den Einstellungen passt).
+            out.copy_from_slice(pcm);
+            if control.auto_gain.load(Ordering::Relaxed) {
+                let speech = if ns_on { speech_prob > 0.5 } else { level > control.vad_threshold() };
+                agc.process(&mut out, level, speech);
+                for s in out.iter_mut() {
+                    *s = soft_limit(*s);
+                }
+            }
+            match encoder.encode_float(&out[..], &mut opus_buf) {
                 Ok(len) => {
                     let pkt = encode_to_vec(&AudioHeader::new(token, seq, timestamp), &opus_buf[..len]);
                     let _ = udp.send(&pkt);

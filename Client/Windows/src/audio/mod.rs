@@ -7,6 +7,7 @@
 //! - cpal-Output-Callback -> Mixer -> Lautsprecher
 
 pub mod capture;
+pub mod dsp;
 pub mod encoder;
 pub mod jitter;
 pub mod playback;
@@ -39,6 +40,8 @@ pub struct AudioControl {
     pub self_deafened: AtomicBool,
     /// KI-Rauschunterdrueckung (RNNoise) vor dem Opus-Encoder.
     pub noise_suppression: AtomicBool,
+    /// Automatische Lautstaerke (AGC + Limiter) auf der Sendeseite.
+    pub auto_gain: AtomicBool,
     /// Aktueller Mikro-Pegel (RMS, geglaettet) – fuer die Pegel-Anzeige in den Einstellungen.
     mic_level: Arc<AtomicU32>,
     /// Wir senden gerade (Gate offen) – fuer den Selbst-Sprech-Indikator.
@@ -54,6 +57,7 @@ impl AudioControl {
             self_muted: AtomicBool::new(false),
             self_deafened: AtomicBool::new(false),
             noise_suppression: AtomicBool::new(true),
+            auto_gain: AtomicBool::new(true),
             mic_level: Arc::new(AtomicU32::new(0)),
             transmitting: AtomicBool::new(false),
         }

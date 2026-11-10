@@ -109,10 +109,20 @@ impl UserAudio {
         if let Some(exp) = self.expected_seq {
             let gap = seq.wrapping_sub(exp);
             if gap > 0 && gap <= 100 {
-                // Paketluecke: bis zu 2 Frames per PLC kaschieren.
-                for _ in 0..gap.min(2) {
-                    if self.decoder.decode_float(None::<&[u8]>, &mut frame[..], false).is_ok() {
-                        self.pcm.extend(frame);
+                // Paketluecke (max. 2 Frames auffuellen, sonst waechst die Latenz):
+                // - aeltere Fehlstellen per PLC (Opus schaetzt das Signal fort),
+                // - das Frame direkt vor diesem Paket aus dessen In-Band-FEC
+                //   rekonstruieren (echte, nur etwas groebere Sprachdaten).
+                let fill = gap.min(2);
+                for k in 0..fill {
+                    let use_fec = k + 1 == fill;
+                    let res = if use_fec {
+                        self.decoder.decode_float(Some(&payload[..]), &mut frame[..], true)
+                    } else {
+                        self.decoder.decode_float(None::<&[u8]>, &mut frame[..], false)
+                    };
+                    if let Ok(n) = res {
+                        self.pcm.extend(&frame[..n.min(FRAME_SAMPLES)]);
                     }
                 }
             }
@@ -206,6 +216,82 @@ mod tests {
         assert!(n >= FRAME_SAMPLES * 3, "Luecke nicht kaschiert: {n}");
     }
 
+    /// Echte Sprachprobe (Windows-Sprachsynthese, 16 kHz) -> mit dem
+    /// Aufnahme-Resampler auf 48 kHz -> 20-ms-Frames.
+    fn speech_frames() -> Vec<[f32; FRAME_SAMPLES]> {
+        let bytes: &[u8] = include_bytes!("../../testdata/speech16k.wav");
+        let pos = bytes.windows(4).position(|w| w == b"data").expect("data-Chunk") + 8;
+        let pcm16k: Vec<f32> = bytes[pos..]
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
+            .collect();
+        let mut pcm = Vec::new();
+        crate::audio::resample::Resampler::new(16_000, 48_000).process(&pcm16k, &mut pcm);
+        pcm.chunks_exact(FRAME_SAMPLES)
+            .map(|c| {
+                let mut f = [0f32; FRAME_SAMPLES];
+                f.copy_from_slice(c);
+                f
+            })
+            .collect()
+    }
+
+    /// Mit unserer Encoder-Konfiguration muss die In-Band-FEC verlorene
+    /// Pakete deutlich besser rekonstruieren als reine PLC (Schaetzung).
+    /// Ohne `packet_loss_perc` erzeugt Opus gar keine FEC-Daten (dann waeren
+    /// beide Fehler identisch). Gemessen: FEC ~7x kleinerer Fehler.
+    #[test]
+    fn fec_recovers_lost_packets_better_than_plc() {
+        let frames = speech_frames();
+        assert!(frames.len() > 150, "Sprachprobe zu kurz: {}", frames.len());
+        let mut encoder =
+            Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip).unwrap();
+        crate::audio::encoder::configure_encoder(&mut encoder);
+        let packets: Vec<Vec<u8>> = frames
+            .iter()
+            .map(|pcm| {
+                let mut out = [0u8; 1500];
+                let n = encoder.encode_float(pcm, &mut out).unwrap();
+                out[..n].to_vec()
+            })
+            .collect();
+
+        // mode 0 = alles da, 1 = Paket `lost` fehlt + FEC, 2 = fehlt + PLC.
+        let decode = |lost: usize, mode: u8| -> Vec<f32> {
+            let mut dec = Decoder::new(SampleRate::Hz48000, Channels::Mono).unwrap();
+            let mut pcm = Vec::new();
+            let mut fr = [0f32; FRAME_SAMPLES];
+            for (i, p) in packets.iter().enumerate() {
+                if i == lost && mode != 0 {
+                    continue;
+                }
+                if i == lost + 1 && mode != 0 {
+                    let res = if mode == 1 {
+                        dec.decode_float(Some(&p[..]), &mut fr[..], true)
+                    } else {
+                        dec.decode_float(None::<&[u8]>, &mut fr[..], false)
+                    };
+                    let n = res.unwrap();
+                    pcm.extend(&fr[..n]);
+                }
+                let n = dec.decode_float(Some(&p[..]), &mut fr[..], false).unwrap();
+                pcm.extend(&fr[..n]);
+            }
+            pcm
+        };
+        let (mut e_fec, mut e_plc) = (0f32, 0f32);
+        for lost in (10..packets.len() - 2).step_by(9) {
+            let reference = decode(lost, 0);
+            let range = lost * FRAME_SAMPLES..(lost + 1) * FRAME_SAMPLES;
+            let err = |x: &[f32]| {
+                range.clone().map(|i| (x[i] - reference[i]).powi(2)).sum::<f32>().sqrt()
+            };
+            e_fec += err(&decode(lost, 1));
+            e_plc += err(&decode(lost, 2));
+        }
+        assert!(e_fec < e_plc * 0.5, "FEC {e_fec:.2} nicht deutlich besser als PLC {e_plc:.2}");
+    }
+
     #[test]
     fn user_audio_starts_silent_until_prebuffered() {
         let encoder = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip).unwrap();
@@ -216,3 +302,4 @@ mod tests {
         assert_eq!(user.fill(&mut out), 0, "vor Prebuffering darf nichts kommen");
     }
 }
+

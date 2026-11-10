@@ -165,9 +165,10 @@ fn build_out<T: cpal::SizedSample + Send + 'static>(
                         }
                     }
                 }
-                // Hard-Clip gegen Uebersteuerung beim Summieren mehrerer Sprecher.
+                // Weicher Limiter statt Hard-Clip: mehrere laute Sprecher
+                // gleichzeitig verzerren nicht mehr.
                 for s in &mut chunk {
-                    *s = s.clamp(-1.0, 1.0);
+                    *s = super::dsp::soft_limit(*s);
                 }
                 fifo.extend(chunk);
             }

@@ -31,6 +31,9 @@ pub struct ClientConfig {
     /// KI-Rauschunterdrueckung (RNNoise) vor dem Opus-Encoder.
     #[serde(default = "default_true")]
     pub noise_suppression: bool,
+    /// Automatische Lautstaerke fuer das eigene Mikro (AGC + Limiter).
+    #[serde(default = "default_true")]
+    pub auto_gain: bool,
     /// GIPHY-API-Key (kostenlos unter developers.giphy.com).
     #[serde(default)]
     pub giphy_api_key: Option<String>,
@@ -74,6 +77,7 @@ impl Default for ClientConfig {
             voice_activation: false,
             vad_threshold: default_vad_threshold(),
             noise_suppression: true,
+            auto_gain: true,
             giphy_api_key: None,
             bookmarks: Vec::new(),
             input_device: None,
@@ -122,6 +126,7 @@ mod tests {
             voice_activation: true,
             vad_threshold: 0.05,
             noise_suppression: false,
+            auto_gain: false,
             giphy_api_key: Some("test-key".into()),
             bookmarks: vec![
                 ServerBookmark { name: "Home".into(), address: "10.69.40.101:7331".into(), password: None },
@@ -139,6 +144,7 @@ mod tests {
         assert_eq!(back.bookmarks[0].name, "Home");
         assert_eq!(back.bookmarks[1].password.as_deref(), Some("pw"));
         assert!(!back.noise_suppression);
+        assert!(!back.auto_gain);
     }
 
     #[test]
@@ -148,6 +154,7 @@ mod tests {
         assert_eq!(cfg.ptt_key, "V");
         assert!(!cfg.voice_activation);
         assert!(cfg.noise_suppression, "Rauschunterdrueckung default an");
+        assert!(cfg.auto_gain, "Auto-Lautstaerke default an (alte Configs ohne Feld)");
         assert!(cfg.bookmarks.is_empty());
         assert!(cfg.server_address.ends_with(":7331"));
     }

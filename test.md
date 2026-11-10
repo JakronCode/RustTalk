@@ -2,6 +2,31 @@
 
 > Pflichtdokumentation aller Testläufe. Neueste oben.
 
+## 2026-11-10 (13) – Voice-Qualität (kompatibel mit schlechten Mikros)
+
+**Analyse der Kette** (Mikro → Mono → Resampler → RNNoise → Gate → Opus → UDP → Jitter → Opus → Mix → Ausgabe), Schwachstellen:
+- Aufnahme-Resampler war **linear ohne Tiefpass** → Aliasing/Spiegelfrequenzen bei 16-kHz-Headsets (Bluetooth), 44,1 und 96 kHz (metallischer/kratziger Klang).
+- Opus: `inband_fec` an, aber ohne `packet_loss_perc` erzeugt Opus **keine** FEC-Daten → verlorene Pakete wurden nur geschätzt (PLC).
+- Kein Pegelausgleich: leise Mikros kommen leise an, laute verzerren; Mixer schnitt mehrere laute Sprecher hart ab.
+
+**Änderungen:**
+- Neuer Resampler: gefensterter Sinc (Blackman, Polyphasen-Tabelle), DC-normiert, Latenz < 1 ms.
+- DC-Blocker vor RNNoise (Gleichanteil billiger Mikros).
+- **Automatische Lautstärke** (AGC, Ziel −20 dBFS, −12…+16 dB, passt sich nur bei erkannter Sprache an, runter schnell/hoch langsam) + weicher Limiter; Einstellung „Automatische Lautstärke", Standard an.
+- Opus: 64 kbit/s, Komplexität 10, Signal „Voice", erwarteter Paketverlust 10 % (aktiviert FEC). Bleibt im Hybrid-Modus (SILK+CELT).
+- Empfang: letztes fehlendes Frame vor einem Paket wird aus dessen FEC rekonstruiert (davor PLC).
+- Mixer: weicher Limiter statt Hard-Clip.
+- RNNoise-Sprachwahrscheinlichkeit = Maximum beider 10-ms-Hälften (vorher nur die zweite).
+
+**Tests:** Client 48 ✅ (neu u. a. `downsampling_suppresses_aliasing` > 40 dB, `upsampling_suppresses_images`, `passband_tone_keeps_amplitude`, AGC hebt leises Mikro/zähmt lautes/ignoriert Rauschen, `fec_recovers_lost_packets_better_than_plc`), Server 27 ✅, Integration 7 ✅, Shared 12 ✅.
+**FEC-Messung** mit echter Sprache (Windows-Sprachsynthese, `Client/Windows/testdata/speech16k.wav`): Fehler eines verlorenen Pakets bei 64 kbit/s FEC 15,8 vs. PLC 114 (~7× besser). Mit synthetischen Tönen erzeugt SILK keine FEC (VAD erkennt keine Sprache) – deshalb echte Sprachprobe als Testdaten.
+
+**Kompatibilität:** kein Protokollwechsel (Server unverändert, v5). Ältere Clients hören die neuen ganz normal.
+
+**Manuell zu prüfen:** Klang mit verschiedenen Mikros (Headset, Bluetooth, Laptop), AGC-Verhalten bei leisen/lauten Sprechern.
+
+---
+
 ## 2026-11-10 (12) – Verbindungsabbruch, hängende Server-Verbindung, Auflösung
 
 **Feedback:** Gute Bildrate, aber Auflösung mau; ein Fehler mit Neuverbindung, alte Verbindung blieb auf dem Server offen.

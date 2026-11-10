@@ -11,7 +11,8 @@ Schlanker Voice-Chat in Rust — Client im Discord-Look, Server im TeamSpeak-Sti
 
 ### Funktioniert
 
-- **Voice:** Push-to-Talk + Sprachaktivierung (VAD mit RMS *und* RNNoise-Sprachwahrscheinlichkeit), Opus 48 kHz/20 ms über UDP, Jitter-Buffer mit PLC
+- **Voice:** Push-to-Talk + Sprachaktivierung (VAD mit RMS *und* RNNoise-Sprachwahrscheinlichkeit), Opus 64 kbit/s 48 kHz/20 ms über UDP mit In-Band-FEC, Jitter-Buffer mit FEC/PLC, Sinc-Resampler für beliebige Mikro-Raten
+- **Automatische Lautstärke** (AGC + Limiter): leise Mikros werden angehoben, laute gedämpft – abschaltbar
 - **KI-Rauschunterdrückung** (RNNoise via `nnnoiseless`), abschaltbar
 - **Channel-Typen:** Spawn (1×, Join-Log, Sprechverbot), Kategorie (Gruppierung), Sprache (Voice + Media-Chat), Text (Chat)
 - **Text-Chat** mit Verlauf, Bildern (PNG/JPEG/GIF), Ungelesen-Markierung
