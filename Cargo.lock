@@ -3880,7 +3880,7 @@ dependencies = [
 
 [[package]]
 name = "rusttalk-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "audiopus",
@@ -3905,13 +3905,14 @@ dependencies = [
 
 [[package]]
 name = "rusttalk-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "rand 0.9.5",
  "rusqlite",
  "rusttalk-shared",
  "serde",
+ "socket2",
  "tokio",
  "toml 0.8.23",
  "tracing",
@@ -3920,7 +3921,7 @@ dependencies = [
 
 [[package]]
 name = "rusttalk-shared"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "serde",
