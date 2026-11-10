@@ -1,0 +1,14 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Lokale Laufzeit-Artefakte
+client_config.toml
+*.db
+*.db-wal
+*.db-shm
+
+# Editor/OS
+.vscode/
+.idea/
+Thumbs.db

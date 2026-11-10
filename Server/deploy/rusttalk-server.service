@@ -1,0 +1,23 @@
+[Unit]
+Description=RustTalk Voice Server
+After=network.target
+
+[Service]
+Type=simple
+User=rusttalk
+Group=rusttalk
+ExecStart=/opt/rusttalk/server/bin/rusttalk-server /opt/rusttalk/server/server.toml
+Restart=on-failure
+RestartSec=2
+Environment=RUST_LOG=info
+
+# Härtung (MVP-tauglich):
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# Schreibzugriff nur fuer die SQLite-DB (ProtectSystem=strict macht sonst alles read-only):
+ReadWritePaths=/opt/rusttalk/server
+
+[Install]
+WantedBy=multi-user.target

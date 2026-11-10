@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["shared", "Server", "Client/Windows"]
+
+[workspace.package]
+edition = "2021"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Build-Skripte im Release-Profil mit opt-level 0 kompilieren:
+# WDAC blockiert auf diesem Rechner manche release-optimierten Build-Skripte
+# deterministisch (4551), die debug-kompilierten Varianten laufen dagegen.
+[profile.release.build-override]
+opt-level = 0

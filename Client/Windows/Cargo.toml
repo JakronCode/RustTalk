@@ -1,0 +1,30 @@
+[package]
+name = "rusttalk-client"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rusttalk"
+path = "src/main.rs"
+
+[dependencies]
+rusttalk-shared = { path = "../../shared" }
+eframe = "0.31"
+egui-phosphor = "0.9"
+nnnoiseless = "0.5"
+cpal = "0.15"
+# Medien: Bilder, Kamera, Bildschirm, GIFs
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+rfd = "0.15"
+nokhwa = "0.10"
+scrap = "0.5"
+ureq = { version = "2", features = ["json"] }
+serde_json = "1"
+audiopus = "0.2"
+ringbuf = "0.4"
+tokio = { version = "1", features = ["net", "time", "io-util", "sync", "rt", "macros"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
