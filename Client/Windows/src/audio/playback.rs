@@ -30,7 +30,7 @@ fn pick_output_device(name: Option<&str>) -> Result<cpal::Device> {
         }
         tracing::warn!("Ausgabegeraet '{want}' nicht gefunden, nutze Standardgeraet");
     }
-    host.default_output_device().context("Kein Standard-Ausgabegeraet gefunden")
+    host.default_output_device().context("No default output device found")
 }
 
 /// Pull-Resampler: liest exakt so viele 48-kHz-Samples aus der FIFO,
@@ -118,7 +118,7 @@ pub fn build_output_stream(
         cpal::SampleFormat::U16 => {
             build_out::<u16>(&device, &config, |s| (s * 32767.0 + 32768.0) as u16, mixer, control, local_muted, err_fn)?
         }
-        other => return Err(anyhow!("Nicht unterstuetztes Sample-Format: {other:?}")),
+        other => return Err(anyhow!("Unsupported sample format: {other:?}")),
     };
     Ok(stream)
 }
@@ -167,8 +167,9 @@ fn build_out<T: cpal::SizedSample + Send + 'static>(
                 }
                 // Weicher Limiter statt Hard-Clip: mehrere laute Sprecher
                 // gleichzeitig verzerren nicht mehr.
+                let vol = control.output_volume();
                 for s in &mut chunk {
-                    *s = super::dsp::soft_limit(*s);
+                    *s = super::dsp::soft_limit(*s * vol);
                 }
                 fifo.extend(chunk);
             }
@@ -187,7 +188,7 @@ fn build_out<T: cpal::SizedSample + Send + 'static>(
         None,
     )
     .context("build_output_stream")?;
-    stream.play().context("Output-Stream starten")?;
+    stream.play().context("Could not start the output stream")?;
     Ok(stream)
 }
 

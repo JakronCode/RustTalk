@@ -106,8 +106,8 @@ pub struct EncodeParams {
 impl VideoQuality {
     pub fn label(self) -> &'static str {
         match self {
-            VideoQuality::Balanced => "Ausgewogen (720p, ~2,5 MB/s)",
-            VideoQuality::High => "Hoch (1080p, ~6 MB/s)",
+            VideoQuality::Balanced => "Balanced (720p, ~2.5 MB/s)",
+            VideoQuality::High => "High (1080p, ~6 MB/s)",
         }
     }
 
@@ -229,7 +229,7 @@ pub struct CameraDevice {
 /// Alle Kameras (Media Foundation). Leere Liste, wenn keine da ist.
 pub fn list_cameras() -> Result<Vec<CameraDevice>> {
     use nokhwa::utils::{ApiBackend, CameraIndex};
-    let infos = nokhwa::query(ApiBackend::MediaFoundation).context("Kameras abfragen")?;
+    let infos = nokhwa::query(ApiBackend::MediaFoundation).context("Could not list cameras")?;
     Ok(infos
         .into_iter()
         .enumerate()
@@ -269,12 +269,12 @@ fn open_camera(index: u32) -> Result<nokhwa::Camera> {
                     tracing::info!("Kamera {index} offen: {}", cam.camera_format());
                     return Ok(cam);
                 }
-                Err(e) => last_err = Some(anyhow::anyhow!("Kamera-Stream starten: {e}")),
+                Err(e) => last_err = Some(anyhow::anyhow!("Could not start the camera stream: {e}")),
             },
-            Err(e) => last_err = Some(anyhow::anyhow!("Kamera oeffnen: {e}")),
+            Err(e) => last_err = Some(anyhow::anyhow!("Could not open the camera: {e}")),
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Keine Kamera gefunden")))
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("No camera found")))
 }
 
 /// Verstaendliche Meldung fuer Lese-Fehler der Kamera.
@@ -283,15 +283,15 @@ fn open_camera(index: u32) -> Result<nokhwa::Camera> {
 /// reinem Media Foundation ohne nokhwa auf (Blende zu, Kamera haengt, ...).
 fn camera_read_error_text(err: &str) -> String {
     if err.contains("0x800703E3") {
-        "Kamera liefert keine Bilder (Windows: Vorgang abgebrochen). Privacy-Blende/Kamera-Schalter pruefen, \
-         Kamera neu einstecken oder andere Kamera waehlen."
+        "The camera delivers no images (Windows: operation aborted). Check the privacy shutter / \
+         camera switch, re-plug the camera or pick another one."
             .to_string()
     } else if err.contains("0x80070005") {
-        "Kein Zugriff auf die Kamera: Windows-Einstellungen > Datenschutz > Kamera > \
-         \"Desktop-Apps den Zugriff erlauben\" einschalten."
+        "No access to the camera: enable Windows Settings > Privacy > Camera > \
+         \"Let desktop apps access your camera\"."
             .to_string()
     } else {
-        format!("Kamera liefert keine Bilder: {err}")
+        format!("The camera delivers no images: {err}")
     }
 }
 
@@ -322,7 +322,7 @@ where
                 let mut camera = match open_camera(index) {
                     Ok(c) => c,
                     Err(e) => {
-                        on_error(format!("Kamera-Fehler: {e:#}"));
+                        on_error(format!("Camera error: {e:#}"));
                         return;
                     }
                 };
@@ -410,8 +410,8 @@ pub fn list_share_sources() -> Vec<ShareEntry> {
                     .friendly_name()
                     .ok()
                     .filter(|n| !n.trim().is_empty())
-                    .unwrap_or_else(|| format!("Bildschirm {}", i + 1));
-                let title = if primary { format!("{name} (Hauptbildschirm)") } else { name };
+                    .unwrap_or_else(|| format!("Screen {}", i + 1));
+                let title = if primary { format!("{name} (main screen)") } else { name };
                 let subtitle = format!(
                     "{} x {}",
                     m.width().unwrap_or(0),
@@ -470,13 +470,13 @@ fn find_target(source: ShareSource) -> Result<Target> {
             .into_iter()
             .find(|m| m.id().ok() == Some(id))
             .map(Target::Monitor)
-            .context("Bildschirm nicht mehr vorhanden"),
+            .context("The screen is no longer available"),
         ShareSource::Window(id) => xcap::Window::all()
             .context("Fenster abfragen")?
             .into_iter()
             .find(|w| w.id().ok() == Some(id))
             .map(Target::Window)
-            .context("Fenster wurde geschlossen"),
+            .context("The window was closed"),
     }
 }
 
@@ -506,7 +506,7 @@ where
                 let target = match find_target(source) {
                     Ok(t) => t,
                     Err(e) => {
-                        on_error(format!("Bildschirm-Fehler: {e:#}"));
+                        on_error(format!("Screen share error: {e:#}"));
                         return;
                     }
                 };
@@ -543,7 +543,7 @@ where
                             tracing::warn!("Screen-Frame: {e}");
                             // ~2 s am Stueck keine Bilder (50 x 40 ms) -> Fenster weg o. ae.
                             if failures >= 50 {
-                                on_error(format!("Teilen beendet: {e}"));
+                                on_error(format!("Screen sharing stopped: {e}"));
                                 break;
                             }
                         }
@@ -647,8 +647,8 @@ mod tests {
 
     #[test]
     fn camera_errors_are_readable() {
-        assert!(camera_read_error_text("Could not capture frame (0x800703E3)").contains("Blende"));
-        assert!(camera_read_error_text("denied (0x80070005)").contains("Datenschutz"));
+        assert!(camera_read_error_text("Could not capture frame (0x800703E3)").contains("shutter"));
+        assert!(camera_read_error_text("denied (0x80070005)").contains("Privacy"));
         assert!(camera_read_error_text("boom").ends_with("boom"));
     }
 

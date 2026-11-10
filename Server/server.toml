@@ -1,46 +1,51 @@
-# RustTalk Server-Konfiguration
-# Wird dem Server-Binary als Argument uebergeben: rusttalk-server server.toml
+# RustTalk server configuration
+# Passed to the server binary as argument: rusttalk-server server.toml
 
-bind_address = "0.0.0.0:7331"   # TCP und UDP auf gleichem Port
-server_name = "Mein RustTalk Server"
+bind_address = "0.0.0.0:7331"   # TCP and UDP on the same port
+server_name = "RustTalk Server"
 max_clients = 32
-# password = "geheim"           # optionaler Passwort-Schutz
+# password = "secret"           # optional password protection
 
-# SQLite-Persistenz: Channels, Chat-Verlauf und Spawn-Log ueberleben Neustarts.
-# Retention: max. 10.000 Nachrichten pro Text-Channel (groessen-gedeckelt).
+# SQLite persistence: channels (incl. order), chat history and lobby log
+# survive restarts. Retention: max. 10,000 messages per text channel.
 persist_state = true
 db_path = "/opt/rusttalk/server/rusttalk.db"
 
-# Der Spawn-Channel ist optional - ohne Eintrag wird "Spawn" automatisch erstellt.
-# Genau EINER pro Server. Hier landen alle beim Verbinden (Sprechverbot, Join-Log).
+# Initial channel layout. With persistence enabled this is only used on the
+# very FIRST start (empty database). After that the database is the source of
+# truth: channels created, renamed or reordered in the app are kept.
+#
+# The lobby (kind = "spawn") is optional - without an entry "Lobby" is created
+# automatically. Exactly ONE per server. Everyone lands here when connecting
+# (no talking, join log).
 [[channels]]
-name = "Spawn"
+name = "Lobby"
 kind = "spawn"
 
 [[channels]]
-name = "Text"
+name = "Text Channels"
 kind = "category"
 
 [[channels]]
-name = "allgemein"
+name = "general"
 kind = "text"
-category = "Text"
+category = "Text Channels"
 
 [[channels]]
-name = "info"
+name = "announcements"
 kind = "text"
-category = "Text"
+category = "Text Channels"
 
 [[channels]]
-name = "Voice-Area"
+name = "Voice Channels"
 kind = "category"
 
 [[channels]]
-name = "Funkturm 116"
-kind = "voice"                  # kind darf weggelassen werden (Default: voice)
-category = "Voice-Area"
+name = "Lounge"
+kind = "voice"                  # kind may be omitted (default: voice)
+category = "Voice Channels"
 
 [[channels]]
 name = "Gaming"
 kind = "voice"
-category = "Voice-Area"
+category = "Voice Channels"

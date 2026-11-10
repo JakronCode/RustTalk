@@ -2,6 +2,30 @@
 
 > Pflichtdokumentation aller Testläufe. Neueste oben.
 
+## 2026-11-11 (14) – UI-Rework (Englisch), Channel Drag & Drop, Einstellungen (Protokoll v6)
+
+**Wünsche:** Channels per Drag & Drop verschieben, Channel-Einstellungen (vorerst visuell, WIP), Haupt-UI polieren/Icons sinnvoll anordnen, im Spawn Mikro/Kamera/Bildschirm ausgrauen, anderes Text-Channel-Icon, neutrale Standard-Channelnamen, komplette UI auf Englisch, Einstellungsmenü mit Kategorien.
+
+**Server / Protokoll v6:**
+- `ChannelInfo.position`, `ClientMessage::MoveChannel { channel_id, parent, index }` → `ServerMessage::ChannelsReordered`; `Welcome.server_name`.
+- Regeln: Lobby bleibt oben fest, Kategorien nur auf oberster Ebene, Text/Voice oben oder in Kategorien; Geschwister werden neu nummeriert und gespeichert (DB-Spalte `position`, Migration).
+- **Persistenz-Fix:** Mit Persistenz ist die DB jetzt die Quelle der Wahrheit; die Config befüllt nur beim allerersten Start. Vorher wurde die Config bei jedem Start neu angelegt und per Name abgeglichen → umbenannte Config-Channels doppelt.
+- Standard-Channels: Lobby, „Text Channels“ (general, announcements), „Voice Channels“ (Lounge, Gaming). Servertexte (Fehler, Join-Log) auf Englisch.
+
+**Client:** `app.rs` (2900 Zeilen) aufgeteilt in `app/{mod, theme, connect, sidebar, views, settings, channel_settings, media_ui}.rs`.
+- Sidebar: Server-Kopf mit Menü (Create Channel/Category, App Settings, Server Settings WIP, Disconnect), Channel-Baum mit Drag & Drop (Einfügelinie, Ghost-Label, Drop in/aus Kategorien), Hover-Zahnrad, „Voice Connected“-Panel (Leave, Camera, Screen), User-Panel unten (Mikro, Kopfhörer, Einstellungen).
+- Lobby: Mikro, Kamera und Bildschirm ausgegraut und deaktiviert; laufende Kamera/Freigabe stoppt beim Wechsel in die Lobby.
+- Text-Channel-Icon: Sprechblase statt `#`. Nachrichtenliste mit Gruppierung, Composer im Discord-Stil, Statusmeldungen als Toast.
+- Channel-Einstellungen: Overview/Permissions/Invites mit WIP-Banner; Name, Kategorie und Löschen funktionieren. Bestätigungsdialog fürs Löschen.
+- Einstellungsfenster: Kategorien My Account, Appearance, Voice & Audio, Video, Keybinds, Notifications, Advanced, About. Funktionsfähig u. a.: UI-Skalierung, Zeitstempel, Ausgabelautstärke (neu), Eingabemodus-Karten, PTT-Taste per Tastendruck aufnehmen, Standardkamera, Stream-Qualität. Platzhalter mit WIP-Badge.
+- Debug-Builds: `RUSTTALK_DEV_AUTOCONNECT`, `RUSTTALK_DEV_OPEN`, `RUSTTALK_DEV_TITLE` für automatisierte Screenshots.
+
+**Tests:** Client 50 ✅, Server 32 ✅ (neu: Reihenfolge, Verschieberegeln, Neustart, kein Duplikat nach Umbenennen, DB vor Config), Integration 7 ✅, Shared 12 ✅ – Windows und Linux-Server.
+**Visuell geprüft** (lokaler Testserver + Bots, Screenshots): Voice-Bühne mit Sprechanzeige, Lobby, Text-Chat, alle Einstellungsseiten, Channel-Einstellungen, „Create Channel“, Verbindungsbildschirm.
+**Nicht geprüft:** Drag & Drop mit echter Maus (Logik serverseitig getestet, UI-Interaktion nicht automatisiert).
+
+---
+
 ## 2026-11-10 (13) – Voice-Qualität (kompatibel mit schlechten Mikros)
 
 **Analyse der Kette** (Mikro → Mono → Resampler → RNNoise → Gate → Opus → UDP → Jitter → Opus → Mix → Ausgabe), Schwachstellen:

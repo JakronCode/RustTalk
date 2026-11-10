@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusttalk_shared::protocol::{
-    ChannelInfo, ChannelKind, ChatRecord, LogEntry, ServerMessage, UserInfo, MAX_NAME_LEN,
+    ChannelInfo, ChannelKind, ChannelPlacement, ChatRecord, LogEntry, ServerMessage, UserInfo,
+    MAX_NAME_LEN,
     SPAWN_LOG_CAP,
 };
 use tokio::sync::mpsc;
@@ -62,6 +63,8 @@ pub struct Channel {
     pub name: String,
     pub kind: ChannelKind,
     pub parent: Option<u64>,
+    /// Sortierposition unter Geschwistern (gleicher `parent`).
+    pub position: u32,
 }
 
 pub struct State {
@@ -75,6 +78,7 @@ pub struct State {
     spawn_log: VecDeque<LogEntry>,
     max_clients: usize,
     password: Option<String>,
+    server_name: String,
     /// SQLite-Persistenz (None = alles nur in Memory).
     db: Option<Db>,
 }
@@ -84,6 +88,14 @@ fn now_secs() -> u64 {
 }
 
 impl State {
+    /// Startzustand.
+    ///
+    /// Channels: Mit Persistenz ist die DB die Quelle der Wahrheit (IDs,
+    /// Namen, Kategorien, Reihenfolge bleiben exakt erhalten - Chat-Verlauf
+    /// haengt an den IDs). Die Config-Channels legen nur beim allerersten
+    /// Start (leere DB) die Grundstruktur an. Frueher wurde die Config bei
+    /// jedem Start neu angelegt und per Name mit der DB abgeglichen -
+    /// umbenannte Config-Channels tauchten dann doppelt auf.
     pub fn new(cfg: &ServerConfig) -> anyhow::Result<Self> {
         let mut state = State {
             clients: HashMap::new(),
@@ -95,67 +107,83 @@ impl State {
             spawn_log: VecDeque::new(),
             max_clients: cfg.max_clients,
             password: cfg.password.clone(),
+            server_name: cfg.server_name.clone(),
             db: None,
         };
 
-        // Spawn-Channel: aus Config oder automatisch. Genau einer!
         let spawn_entries: Vec<_> =
             cfg.channels.iter().filter(|c| c.kind == ChannelKindConfig::Spawn).collect();
         if spawn_entries.len() > 1 {
             anyhow::bail!("Config-Fehler: mehr als ein Spawn-Channel definiert");
         }
-        let spawn_name =
-            spawn_entries.first().map(|c| c.name.clone()).unwrap_or_else(|| "Spawn".to_string());
-        state.insert_channel(spawn_name, ChannelKind::Spawn, None);
 
-        // Restliche Channels (Kategorien zuerst, damit Parent-Namen aufloesbar sind).
-        let mut category_ids: HashMap<String, u64> = HashMap::new();
-        for ch in cfg.channels.iter().filter(|c| c.kind == ChannelKindConfig::Category) {
-            let id = state.insert_channel(ch.name.clone(), ChannelKind::Category, None);
-            category_ids.insert(ch.name.clone(), id);
-        }
-        for ch in cfg
-            .channels
-            .iter()
-            .filter(|c| !matches!(c.kind, ChannelKindConfig::Spawn | ChannelKindConfig::Category))
-        {
-            let parent = ch.category.as_deref().map(|name| {
-                *category_ids
-                    .get(name)
-                    .unwrap_or_else(|| panic!("Config-Fehler: unbekannte Kategorie '{name}'"))
-            });
-            state.insert_channel(ch.name.clone(), ch.kind.into(), parent);
-        }
+        let db = if cfg.persist_state {
+            Some(
+                Db::open(&cfg.db_path)
+                    .map_err(|e| anyhow::anyhow!("Persistenz ({}): {e:#}", cfg.db_path))?,
+            )
+        } else {
+            None
+        };
+        let stored = match &db {
+            Some(db) => db.load_channels()?,
+            None => Vec::new(),
+        };
 
-        // Persistenz: Channels aus der DB mit der Config vereinigen
-        // (Union per Name+Art; IDs werden gemappt), Spawn-Log laden.
-        if cfg.persist_state {
-            let db = Db::open(&cfg.db_path)
-                .map_err(|e| anyhow::anyhow!("Persistenz ({}): {e:#}", cfg.db_path))?;
-            let stored = db.load_channels()?;
-            let mut id_map: HashMap<u64, u64> = HashMap::new();
-            for s in &stored {
-                if let Some(existing) = state
-                    .channels
-                    .values()
-                    .find(|c| c.name == s.name && c.kind == s.kind)
-                {
-                    id_map.insert(s.id, existing.id);
-                } else {
-                    // Parent wird unten nachgezogen.
-                    let new_id = state.insert_channel(s.name.clone(), s.kind, None);
-                    id_map.insert(s.id, new_id);
+        if stored.is_empty() {
+            state.seed_from_config(cfg)?;
+            // Erstbefuellung sofort speichern -> ab jetzt ist die DB massgeblich.
+            if let Some(db) = &db {
+                for ch in state.channels.values() {
+                    db.upsert_channel(ch.id, &ch.name, ch.kind, ch.parent, ch.position)?;
                 }
             }
+        } else {
             for s in &stored {
-                if let (Some(&new_id), Some(old_parent)) = (id_map.get(&s.id), s.parent) {
-                    if let Some(&new_parent) = id_map.get(&old_parent) {
-                        if let Some(ch) = state.channels.get_mut(&new_id) {
-                            ch.parent = Some(new_parent);
-                        }
+                state.channels.insert(
+                    s.id,
+                    Channel {
+                        id: s.id,
+                        name: s.name.clone(),
+                        kind: s.kind,
+                        parent: s.parent,
+                        position: s.position,
+                    },
+                );
+            }
+            state.next_channel_id = stored.iter().map(|s| s.id).max().unwrap_or(0) + 1;
+            // Verwaiste Parents (Kategorie fehlt) -> oberste Ebene.
+            let ids: std::collections::HashSet<u64> = state.channels.keys().copied().collect();
+            for ch in state.channels.values_mut() {
+                if ch.parent.is_some_and(|p| !ids.contains(&p)) {
+                    ch.parent = None;
+                }
+            }
+            // Genau ein Spawn: fehlt er (alte DB), aus der Config anlegen.
+            let mut spawns: Vec<u64> = state
+                .channels
+                .values()
+                .filter(|c| c.kind == ChannelKind::Spawn)
+                .map(|c| c.id)
+                .collect();
+            spawns.sort_unstable();
+            match spawns.first() {
+                Some(&id) => state.spawn_channel_id = id,
+                None => {
+                    let name = spawn_entries
+                        .first()
+                        .map(|c| c.name.clone())
+                        .unwrap_or_else(|| "Lobby".to_string());
+                    let id = state.insert_channel(name, ChannelKind::Spawn, None);
+                    state.spawn_channel_id = id;
+                    if let (Some(db), Some(ch)) = (&db, state.channels.get(&id)) {
+                        db.upsert_channel(ch.id, &ch.name, ch.kind, ch.parent, ch.position)?;
                     }
                 }
             }
+        }
+
+        if let Some(db) = db {
             for entry in db.load_events()? {
                 if state.spawn_log.len() >= SPAWN_LOG_CAP {
                     state.spawn_log.pop_front();
@@ -165,7 +193,7 @@ impl State {
             tracing::info!(
                 "Persistenz aktiv: {} ({} Channels, {} Log-Eintraege geladen)",
                 cfg.db_path,
-                stored.len(),
+                state.channels.len(),
                 state.spawn_log.len()
             );
             state.db = Some(db);
@@ -173,11 +201,142 @@ impl State {
         Ok(state)
     }
 
+    /// Grundstruktur aus der Config (Spawn zuerst, dann Kategorien, dann
+    /// Channels - IDs und Positionen in Config-Reihenfolge).
+    fn seed_from_config(&mut self, cfg: &ServerConfig) -> anyhow::Result<()> {
+        let spawn_name = cfg
+            .channels
+            .iter()
+            .find(|c| c.kind == ChannelKindConfig::Spawn)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| "Lobby".to_string());
+        self.spawn_channel_id = self.insert_channel(spawn_name, ChannelKind::Spawn, None);
+
+        let mut category_ids: HashMap<String, u64> = HashMap::new();
+        for ch in cfg.channels.iter().filter(|c| c.kind == ChannelKindConfig::Category) {
+            let id = self.insert_channel(ch.name.clone(), ChannelKind::Category, None);
+            category_ids.insert(ch.name.clone(), id);
+        }
+        for ch in cfg
+            .channels
+            .iter()
+            .filter(|c| !matches!(c.kind, ChannelKindConfig::Spawn | ChannelKindConfig::Category))
+        {
+            let parent = match ch.category.as_deref() {
+                Some(name) => Some(*category_ids.get(name).ok_or_else(|| {
+                    anyhow::anyhow!("Config-Fehler: unbekannte Kategorie '{name}'")
+                })?),
+                None => None,
+            };
+            self.insert_channel(ch.name.clone(), ch.kind.into(), parent);
+        }
+        Ok(())
+    }
+
+    /// Neuer Channel ans Ende seiner Geschwister (Spawn: Position 0).
     fn insert_channel(&mut self, name: String, kind: ChannelKind, parent: Option<u64>) -> u64 {
         let id = self.next_channel_id;
         self.next_channel_id += 1;
-        self.channels.insert(id, Channel { id, name, kind, parent });
+        let position = if kind == ChannelKind::Spawn {
+            0
+        } else {
+            self.channels
+                .values()
+                .filter(|c| c.parent == parent && c.kind != ChannelKind::Spawn)
+                .map(|c| c.position + 1)
+                .max()
+                .unwrap_or(1)
+                .max(1)
+        };
+        self.channels.insert(id, Channel { id, name, kind, parent, position });
         id
+    }
+
+    pub fn server_name(&self) -> &str {
+        &self.server_name
+    }
+
+    /// Geschwister (gleicher Parent, ohne Spawn) in Anzeige-Reihenfolge.
+    fn sorted_siblings(&self, parent: Option<u64>) -> Vec<u64> {
+        let mut sib: Vec<&Channel> = self
+            .channels
+            .values()
+            .filter(|c| c.parent == parent && c.kind != ChannelKind::Spawn)
+            .collect();
+        sib.sort_by_key(|c| (c.position, c.id));
+        sib.into_iter().map(|c| c.id).collect()
+    }
+
+    /// Verschiebt einen Channel (Drag & Drop) an `index` unter `parent`.
+    /// Regeln: Spawn bleibt oben fest; Kategorien nur auf oberster Ebene;
+    /// Text/Voice oben oder in eine Kategorie. Nummeriert die betroffenen
+    /// Geschwister neu und speichert sie.
+    pub fn move_channel(
+        &mut self,
+        channel_id: u64,
+        parent: Option<u64>,
+        index: u32,
+    ) -> Result<Vec<ChannelPlacement>, String> {
+        let ch = self.channels.get(&channel_id).ok_or("Channel does not exist")?;
+        if ch.kind == ChannelKind::Spawn {
+            return Err("The lobby always stays at the top".to_string());
+        }
+        if ch.kind == ChannelKind::Category && parent.is_some() {
+            return Err("Categories cannot be nested".to_string());
+        }
+        if let Some(p) = parent {
+            match self.channels.get(&p) {
+                Some(pc) if pc.kind == ChannelKind::Category => {}
+                Some(_) => return Err("Target is not a category".to_string()),
+                None => return Err("Target category does not exist".to_string()),
+            }
+        }
+        let old_parent = ch.parent;
+
+        let mut siblings: Vec<u64> =
+            self.sorted_siblings(parent).into_iter().filter(|&id| id != channel_id).collect();
+        let at = (index as usize).min(siblings.len());
+        siblings.insert(at, channel_id);
+
+        if let Some(c) = self.channels.get_mut(&channel_id) {
+            c.parent = parent;
+        }
+        let mut touched: Vec<u64> = Vec::new();
+        for (i, id) in siblings.iter().enumerate() {
+            if let Some(c) = self.channels.get_mut(id) {
+                c.position = i as u32 + 1;
+                touched.push(*id);
+            }
+        }
+        if old_parent != parent {
+            for (i, id) in self.sorted_siblings(old_parent).iter().enumerate() {
+                if let Some(c) = self.channels.get_mut(id) {
+                    c.position = i as u32 + 1;
+                    touched.push(*id);
+                }
+            }
+        }
+        if let Some(db) = &self.db {
+            for id in &touched {
+                if let Some(c) = self.channels.get(id) {
+                    if let Err(e) = db.upsert_channel(c.id, &c.name, c.kind, c.parent, c.position) {
+                        tracing::warn!("Channel-Reihenfolge speichern fehlgeschlagen: {e}");
+                    }
+                }
+            }
+        }
+        Ok(self.all_placements())
+    }
+
+    /// Ort aller Channels (fuer `ChannelsReordered`).
+    pub fn all_placements(&self) -> Vec<ChannelPlacement> {
+        let mut p: Vec<ChannelPlacement> = self
+            .channels
+            .values()
+            .map(|c| ChannelPlacement { id: c.id, parent: c.parent, position: c.position })
+            .collect();
+        p.sort_by_key(|x| x.id);
+        p
     }
 
     pub fn spawn_channel_id(&self) -> u64 {
@@ -235,7 +394,7 @@ impl State {
     pub fn check_password(&self, provided: &Option<String>) -> Result<(), &'static str> {
         match &self.password {
             Some(expected) if provided.as_deref() != Some(expected.as_str()) => {
-                Err("Falsches oder fehlendes Server-Passwort")
+                Err("Wrong or missing server password")
             }
             _ => Ok(()),
         }
@@ -300,7 +459,14 @@ impl State {
             .map(|c| c.id)
             .collect();
         user_ids.sort_unstable();
-        Some(ChannelInfo { id: ch.id, name: ch.name.clone(), kind: ch.kind, parent: ch.parent, user_ids })
+        Some(ChannelInfo {
+            id: ch.id,
+            name: ch.name.clone(),
+            kind: ch.kind,
+            parent: ch.parent,
+            position: ch.position,
+            user_ids,
+        })
     }
 
     pub fn all_channels(&self) -> Vec<ChannelInfo> {
@@ -326,19 +492,19 @@ impl State {
     ) -> Result<ChannelInfo, String> {
         let name = validate_name(name)?;
         if kind == ChannelKind::Spawn {
-            return Err("Es gibt bereits einen Spawn-Channel".to_string());
+            return Err("There is already a lobby channel".to_string());
         }
         if let Some(parent_id) = parent {
             match self.channels.get(&parent_id) {
                 Some(p) if p.kind == ChannelKind::Category => {}
-                Some(_) => return Err("Parent ist keine Kategorie".to_string()),
-                None => return Err("Parent-Kategorie existiert nicht".to_string()),
+                Some(_) => return Err("Parent is not a category".to_string()),
+                None => return Err("Parent category does not exist".to_string()),
             }
         }
         let id = self.insert_channel(name.clone(), kind, parent);
         let info = self.channel_info(id).expect("frisch erstellter Channel");
         if let Some(db) = &self.db {
-            if let Err(e) = db.upsert_channel(info.id, &info.name, info.kind, info.parent) {
+            if let Err(e) = db.upsert_channel(info.id, &info.name, info.kind, info.parent, info.position) {
                 tracing::warn!("Channel-Persistenz fehlgeschlagen: {e}");
             }
         }
@@ -348,9 +514,9 @@ impl State {
     /// Löscht einen Channel. Mitglieder (Voice) wandern in den Spawn-Channel,
     /// Kinder einer Kategorie werden Top-Level. Gibt verschobene Client-IDs zurück.
     pub fn delete_channel(&mut self, id: u64) -> Result<Vec<u64>, String> {
-        let channel = self.channels.get(&id).ok_or("Channel existiert nicht")?;
+        let channel = self.channels.get(&id).ok_or("Channel does not exist")?;
         if channel.kind == ChannelKind::Spawn {
-            return Err("Der Spawn-Channel kann nicht geloescht werden".to_string());
+            return Err("The lobby cannot be deleted".to_string());
         }
         let was_category = channel.kind == ChannelKind::Category;
         self.channels.remove(&id);
@@ -379,10 +545,16 @@ impl State {
 
     pub fn rename_channel(&mut self, id: u64, name: &str) -> Result<(), String> {
         let name = validate_name(name)?;
-        let channel = self.channels.get_mut(&id).ok_or("Channel existiert nicht")?;
+        let channel = self.channels.get_mut(&id).ok_or("Channel does not exist")?;
         channel.name = name;
         if let Some(db) = &self.db {
-            if let Err(e) = db.upsert_channel(channel.id, &channel.name, channel.kind, channel.parent) {
+            if let Err(e) = db.upsert_channel(
+                channel.id,
+                &channel.name,
+                channel.kind,
+                channel.parent,
+                channel.position,
+            ) {
                 tracing::warn!("Channel-Rename-Persistenz fehlgeschlagen: {e}");
             }
         }
@@ -391,15 +563,15 @@ impl State {
 
     /// Verschiebt einen Client. Ziel muss join-bar sein (Spawn oder Voice).
     pub fn move_client(&mut self, client_id: u64, channel_id: u64) -> Result<(), String> {
-        let channel = self.channels.get(&channel_id).ok_or("Channel existiert nicht")?;
+        let channel = self.channels.get(&channel_id).ok_or("Channel does not exist")?;
         if !channel.kind.can_join() {
             return Err(match channel.kind {
-                ChannelKind::Category => "In Kategorien kann man nicht joinen".to_string(),
-                ChannelKind::Text => "Text-Channels sind nur zum Schreiben".to_string(),
-                _ => "Hier kann man nicht joinen".to_string(),
+                ChannelKind::Category => "You cannot join a category".to_string(),
+                ChannelKind::Text => "Text channels are for chatting only".to_string(),
+                _ => "You cannot join this channel".to_string(),
             });
         }
-        let client = self.clients.get_mut(&client_id).ok_or("Client existiert nicht")?;
+        let client = self.clients.get_mut(&client_id).ok_or("Client does not exist")?;
         client.channel_id = channel_id;
         Ok(())
     }
@@ -453,11 +625,11 @@ impl State {
     /// Darf in diesem Channel gechattet werden? (Text + Voice-Media-Feed)
     pub fn chat_allowed(&self, channel_id: u64) -> Result<(), String> {
         match self.channels.get(&channel_id) {
-            None => Err("Channel existiert nicht".to_string()),
+            None => Err("Channel does not exist".to_string()),
             Some(ch) if !ch.kind.has_chat() => Err(match ch.kind {
-                ChannelKind::Spawn => "Der Spawn-Channel ist nur ein Log".to_string(),
-                ChannelKind::Category => "Kategorien haben keinen Chat".to_string(),
-                _ => "Hier kann man nicht schreiben".to_string(),
+                ChannelKind::Spawn => "The lobby is a join log only".to_string(),
+                ChannelKind::Category => "Categories have no chat".to_string(),
+                _ => "You cannot write here".to_string(),
             }),
             Some(_) => Ok(()),
         }
@@ -508,10 +680,10 @@ impl State {
 fn validate_name(name: &str) -> Result<String, String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err("Name darf nicht leer sein".to_string());
+        return Err("Name must not be empty".to_string());
     }
     if name.chars().count() > MAX_NAME_LEN {
-        return Err(format!("Name zu lang (max. {MAX_NAME_LEN} Zeichen)"));
+        return Err(format!("Name too long (max. {MAX_NAME_LEN} characters)"));
     }
     Ok(name.to_string())
 }
@@ -569,7 +741,7 @@ category = "Talk"
         let state = State::new(&cfg).unwrap();
         let spawn = state.channel_info(state.spawn_channel_id()).unwrap();
         assert_eq!(spawn.kind, ChannelKind::Spawn);
-        assert_eq!(spawn.name, "Spawn");
+        assert_eq!(spawn.name, "Lobby");
     }
 
     #[test]
@@ -815,24 +987,107 @@ kind = "spawn"
         std::fs::remove_file(&path).ok();
     }
 
-    #[test]
-    fn config_channels_win_over_db_duplicates() {
-        // Gleiche Channel in Config UND DB -> kein Duplikat nach dem Start.
+    fn temp_db_cfg(tag: &str, extra: &str) -> (String, ServerConfig) {
         let path = std::env::temp_dir()
-            .join(format!("rusttalk-state-dedup-{}.db", std::process::id()))
+            .join(format!("rusttalk-state-{tag}-{}.db", std::process::id()))
             .to_string_lossy()
             .to_string();
         let _ = std::fs::remove_file(&path);
-        let toml_text = format!(
-            "persist_state = true\ndb_path = '{path}'\n[[channels]]\nname = \"Funkturm\"\nkind = \"voice\"\n"
-        );
-        let cfg: ServerConfig = toml::from_str(&toml_text).unwrap();
+        let cfg: ServerConfig =
+            toml::from_str(&format!("persist_state = true\ndb_path = '{path}'\n{extra}")).unwrap();
+        (path, cfg)
+    }
+
+    #[test]
+    fn renamed_config_channel_does_not_duplicate_after_restart() {
+        // Frueherer Bug: Config-Channel umbenannt -> nach Neustart doppelt.
+        let (path, cfg) =
+            temp_db_cfg("rename", "[[channels]]\nname = \"General\"\nkind = \"voice\"\n");
         let mut st = State::new(&cfg).unwrap();
-        st.create_channel("Funkturm", ChannelKind::Voice, None).unwrap(); // simuliert frueheren Lauf
+        let id = st.all_channels().iter().find(|c| c.name == "General").unwrap().id;
+        st.rename_channel(id, "Lounge").unwrap();
         drop(st);
         let st2 = State::new(&cfg).unwrap();
-        let count = st2.all_channels().iter().filter(|c| c.name == "Funkturm").count();
-        assert_eq!(count, 1, "kein Duplikat durch Config+DB");
+        let names: Vec<String> = st2.all_channels().into_iter().map(|c| c.name).collect();
+        assert!(names.contains(&"Lounge".to_string()));
+        assert!(!names.contains(&"General".to_string()), "kein Duplikat: {names:?}");
+        assert_eq!(st2.all_channels().iter().find(|c| c.name == "Lounge").unwrap().id, id);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn db_wins_over_changed_config_after_first_start() {
+        let (path, cfg) = temp_db_cfg("seed", "[[channels]]\nname = \"Alt\"\nkind = \"voice\"\n");
+        drop(State::new(&cfg).unwrap()); // Erststart: Config -> DB
+        let cfg2: ServerConfig = toml::from_str(&format!(
+            "persist_state = true\ndb_path = '{path}'\n[[channels]]\nname = \"Neu\"\nkind = \"voice\"\n"
+        ))
+        .unwrap();
+        let st = State::new(&cfg2).unwrap();
+        let names: Vec<String> = st.all_channels().into_iter().map(|c| c.name).collect();
+        assert!(names.contains(&"Alt".to_string()) && !names.contains(&"Neu".to_string()));
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Reihenfolge einer Geschwistergruppe als Namen.
+    fn order(st: &State, parent: Option<u64>) -> Vec<String> {
+        let mut v: Vec<ChannelInfo> = st
+            .all_channels()
+            .into_iter()
+            .filter(|c| c.parent == parent && c.kind != ChannelKind::Spawn)
+            .collect();
+        v.sort_by_key(|c| (c.position, c.id));
+        v.into_iter().map(|c| c.name).collect()
+    }
+
+    #[test]
+    fn new_channels_are_appended_in_order() {
+        let mut st = test_state();
+        let talk = st.all_channels().iter().find(|c| c.name == "Talk").unwrap().id;
+        st.create_channel("neu", ChannelKind::Text, Some(talk)).unwrap();
+        assert_eq!(order(&st, Some(talk)), vec!["Funkturm", "quasselbude", "neu"]);
+    }
+
+    #[test]
+    fn move_channel_reorders_and_changes_category() {
+        let mut st = test_state();
+        let talk = st.all_channels().iter().find(|c| c.name == "Talk").unwrap().id;
+        let text = st.all_channels().iter().find(|c| c.name == "quasselbude").unwrap().id;
+        // Innerhalb der Kategorie nach oben.
+        st.move_channel(text, Some(talk), 0).unwrap();
+        assert_eq!(order(&st, Some(talk)), vec!["quasselbude", "Funkturm"]);
+        // Raus auf die oberste Ebene, vor die Kategorie.
+        let placements = st.move_channel(text, None, 0).unwrap();
+        assert_eq!(order(&st, None), vec!["quasselbude", "Talk"]);
+        assert_eq!(order(&st, Some(talk)), vec!["Funkturm"]);
+        assert!(placements.iter().any(|p| p.id == text && p.parent.is_none()));
+    }
+
+    #[test]
+    fn move_channel_rules() {
+        let mut st = test_state();
+        let talk = st.all_channels().iter().find(|c| c.name == "Talk").unwrap().id;
+        let voice = st.all_channels().iter().find(|c| c.name == "Funkturm").unwrap().id;
+        let cat2 = st.create_channel("Mehr", ChannelKind::Category, None).unwrap().id;
+        assert!(st.move_channel(st.spawn_channel_id(), None, 3).is_err(), "Spawn fest");
+        assert!(st.move_channel(cat2, Some(talk), 0).is_err(), "keine verschachtelten Kategorien");
+        assert!(st.move_channel(voice, Some(voice), 0).is_err(), "Ziel muss Kategorie sein");
+        assert!(st.move_channel(voice, Some(cat2), 99).is_ok(), "Index wird begrenzt");
+        assert_eq!(order(&st, Some(cat2)), vec!["Funkturm"]);
+    }
+
+    #[test]
+    fn channel_order_survives_restart() {
+        let (path, cfg) = temp_db_cfg(
+            "order",
+            "[[channels]]\nname = \"A\"\nkind = \"voice\"\n[[channels]]\nname = \"B\"\nkind = \"voice\"\n",
+        );
+        let mut st = State::new(&cfg).unwrap();
+        let b = st.all_channels().iter().find(|c| c.name == "B").unwrap().id;
+        st.move_channel(b, None, 0).unwrap();
+        drop(st);
+        let st2 = State::new(&cfg).unwrap();
+        assert_eq!(order(&st2, None), vec!["B", "A"]);
         std::fs::remove_file(&path).ok();
     }
 }

@@ -1,0 +1,849 @@
+//! egui UI: Discord-style dark layout with Phosphor icons.
+//!
+//! Module layout:
+//! - `mod.rs`        state, network events, frame loop
+//! - `theme`         colors, style, shared widgets
+//! - `connect`       connect screen
+//! - `sidebar`       server header, channel tree (drag & drop), voice + user panel
+//! - `views`         channel header, text chat, voice stage, lobby
+//! - `settings`      app settings window (categories)
+//! - `channel_settings` channel settings (WIP), create/delete dialogs
+//! - `media_ui`      fullscreen, camera preview, screen picker, GIF search
+//!
+//! Channel kinds: Lobby (house, pinned, join log, no talking), Category
+//! (collapsible group), Voice (speaker, click = join), Text (speech bubble).
+
+mod channel_settings;
+mod connect;
+mod media_ui;
+mod settings;
+mod sidebar;
+mod theme;
+mod views;
+
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use eframe::egui;
+use rusttalk_shared::protocol::{
+    ChannelInfo, ChannelKind, ServerMessage, UserInfo, VideoKind, MAX_MEDIA_BYTES,
+};
+
+use crate::audio::{capture, playback, AudioControl, AudioEngine, LocalMuteSet, TalkingMap};
+use crate::config::{ClientConfig, ServerBookmark};
+use crate::logo;
+use crate::media::{self, TextureCache};
+use crate::net::{self, Command, NetEvent};
+use crate::video::{self, CameraDevice, ShareEntry, ShareSource, VideoCapture};
+
+use channel_settings::ChannelSettings;
+use settings::SettingsPage;
+
+// Phosphor icons (regular variant) as fallback font.
+mod icons {
+    pub use egui_phosphor::regular;
+}
+
+/// Max. video bytes in our own send queue (~1 s of screen stream).
+const MAX_UPLOAD_BACKLOG: usize = 3 * 1024 * 1024;
+
+enum ChatKind {
+    Message { from: String, own: bool },
+    System,
+}
+
+struct ChatLine {
+    kind: ChatKind,
+    text: String,
+    timestamp: u64,
+    /// Optionales Bild (PNG/JPEG/GIF-Bytes).
+    image: Option<Vec<u8>>,
+}
+
+/// Zustand des GIPHY-Fensters.
+#[derive(Default)]
+struct GiphyState {
+    open: bool,
+    query: String,
+    results: Vec<media::GifResult>,
+    loading: bool,
+    error: Option<String>,
+    /// Bereits angefragte Vorschau-URLs (gegen Doppel-Downloads).
+    requested: HashSet<String>,
+}
+
+/// Kamera-Dialog: Geraeteauswahl + Live-Vorschau vor dem Teilen.
+struct CamDialog {
+    devices: Vec<CameraDevice>,
+    selected: Option<u32>,
+    error: Option<String>,
+}
+
+/// Reiter im Bildschirm-Auswahldialog.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShareTab {
+    Apps,
+    Screens,
+}
+
+/// Bildschirm/Fenster-Auswahl (aehnlich Discord): Vorschaubilder werden
+/// im Hintergrund erzeugt und per Channel geliefert.
+struct ScreenPicker {
+    tab: ShareTab,
+    entries: Vec<(ShareEntry, Option<egui::TextureHandle>)>,
+    selected: Option<ShareSource>,
+    loading: bool,
+    rx: std::sync::mpsc::Receiver<Vec<ShareEntry>>,
+}
+
+impl ScreenPicker {
+    fn open() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = std::thread::Builder::new()
+            .name("share-sources".into())
+            .spawn(move || {
+                let _ = tx.send(video::list_share_sources());
+            });
+        Self { tab: ShareTab::Apps, entries: Vec::new(), selected: None, loading: true, rx }
+    }
+}
+
+/// Nachrichten aus Hintergrund-Threads (GIPHY-Suche/Downloads).
+enum GiphyMsg {
+    Results(Result<Vec<media::GifResult>, String>),
+    Preview(String, Vec<u8>),
+    Full(Vec<u8>),
+}
+
+pub struct RustTalkApp {
+    config: ClientConfig,
+    event_tx: std::sync::mpsc::Sender<NetEvent>,
+    event_rx: std::sync::mpsc::Receiver<NetEvent>,
+    cmd_tx: Option<tokio::sync::mpsc::UnboundedSender<Command>>,
+
+    // Gespiegelter Server-State
+    my_id: u64,
+    users: HashMap<u64, UserInfo>,
+    channels: HashMap<u64, ChannelInfo>,
+    chat: HashMap<u64, Vec<ChatLine>>,
+    unread: HashSet<u64>,
+    selected_channel: Option<u64>,
+    collapsed: HashMap<u64, bool>,
+
+    // UI-State
+    chat_input: String,
+    new_channel_name: String,
+    new_channel_kind: ChannelKind,
+    new_channel_parent: Option<u64>,
+    show_new_channel: bool,
+    show_settings: bool,
+    settings_page: SettingsPage,
+    /// Settings: waiting for a key press to bind push-to-talk.
+    recording_key: bool,
+    /// Camera list for the settings (lazy, `None` = reload).
+    cameras: Option<Vec<CameraDevice>>,
+    channel_settings: Option<ChannelSettings>,
+    /// Channel waiting for "really delete?" confirmation.
+    confirm_delete: Option<u64>,
+    /// Set from a menu; executed at the start of the next frame.
+    pending_disconnect: bool,
+    /// Login finished (Welcome received). `cmd_tx` alone = connecting.
+    connected: bool,
+    server_name: String,
+    status: String,
+    status_is_error: bool,
+    /// When `status` last changed (toast fade-out).
+    status_at: Instant,
+    status_seen: String,
+    input_devices: Vec<String>,
+    output_devices: Vec<String>,
+    mute_before_deafen: bool,
+
+    // Audio
+    audio: Option<AudioEngine>,
+    control: Arc<AudioControl>,
+    talking: TalkingMap,
+    local_muted: LocalMuteSet,
+    /// Pegel-Messung ohne Verbindung (Einstellungs-Fenster).
+    mic_monitor: Option<capture::MicMonitor>,
+
+    // Medien & Video
+    textures: TextureCache,
+    /// Angehaengtes, noch nicht gesendetes Bild (Name, Bytes).
+    pending_image: Option<(String, Vec<u8>)>,
+    /// Letzte Video-Frames pro (User, Art) als JPEG – Kamera und Bildschirm
+    /// eines Users sind getrennte Kacheln.
+    video_frames: HashMap<(u64, VideoKind), Vec<u8>>,
+    /// Video-Bytes in der Sende-Queue (siehe `net::connect`).
+    upload_backlog: Arc<std::sync::atomic::AtomicUsize>,
+    /// Vom Bildschirm-Thread gesetzt, wenn er wegen eines Fehlers endet.
+    screen_failed: Arc<std::sync::atomic::AtomicBool>,
+    /// Vollbild-Ansicht eines Streams (None = normale Ansicht).
+    fullscreen: Option<(u64, VideoKind)>,
+    /// egui-Kontext fuer Repaints aus Capture-/Netzwerk-Threads.
+    ctx: egui::Context,
+    /// Kamera (Vorschau oder live, siehe `VideoCapture::is_sending`).
+    cam: Option<VideoCapture>,
+    screen: Option<VideoCapture>,
+    cam_dialog: Option<CamDialog>,
+    screen_picker: Option<ScreenPicker>,
+    /// Letzter eigener Frame (auch im reinen Vorschau-Modus).
+    local_preview: Arc<Mutex<Option<Vec<u8>>>>,
+    /// Textur der eigenen Vorschau (wird pro Frame ueberschrieben).
+    local_preview_tex: Option<(u64, egui::TextureHandle)>,
+    /// Fehler aus dem Kamera-Thread fuer die Anzeige im Kamera-Dialog.
+    cam_error: Arc<Mutex<Option<String>>>,
+    giphy: GiphyState,
+    giphy_tx: std::sync::mpsc::Sender<GiphyMsg>,
+    giphy_rx: std::sync::mpsc::Receiver<GiphyMsg>,
+}
+
+impl RustTalkApp {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let mut fonts = egui::FontDefinitions::default();
+        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+        cc.egui_ctx.set_fonts(fonts);
+        theme::apply(&cc.egui_ctx);
+
+        let config = ClientConfig::load();
+        cc.egui_ctx.set_zoom_factor(config.ui_scale.clamp(0.75, 1.5));
+        let control = Arc::new(AudioControl::new(config.voice_activation, config.vad_threshold));
+        control.set_output_volume(config.output_volume);
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let (giphy_tx, giphy_rx) = std::sync::mpsc::channel::<GiphyMsg>();
+        Self {
+            control,
+            config,
+            event_tx,
+            event_rx,
+            cmd_tx: None,
+            my_id: 0,
+            users: HashMap::new(),
+            channels: HashMap::new(),
+            chat: HashMap::new(),
+            unread: HashSet::new(),
+            selected_channel: None,
+            collapsed: HashMap::new(),
+            chat_input: String::new(),
+            new_channel_name: String::new(),
+            new_channel_kind: ChannelKind::Text,
+            new_channel_parent: None,
+            show_new_channel: false,
+            show_settings: false,
+            settings_page: SettingsPage::Voice,
+            recording_key: false,
+            cameras: None,
+            channel_settings: None,
+            confirm_delete: None,
+            pending_disconnect: false,
+            connected: false,
+            server_name: String::new(),
+            status: String::new(),
+            status_is_error: false,
+            status_at: Instant::now(),
+            status_seen: String::new(),
+            input_devices: Vec::new(),
+            output_devices: Vec::new(),
+            mute_before_deafen: false,
+            audio: None,
+            talking: Arc::new(Mutex::new(HashMap::new())),
+            local_muted: Arc::new(Mutex::new(HashSet::new())),
+            mic_monitor: None,
+            textures: TextureCache::default(),
+            pending_image: None,
+            video_frames: HashMap::new(),
+            screen_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            upload_backlog: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            fullscreen: None,
+            ctx: cc.egui_ctx.clone(),
+            cam: None,
+            screen: None,
+            cam_dialog: None,
+            screen_picker: None,
+            local_preview: Arc::new(Mutex::new(None)),
+            local_preview_tex: None,
+            cam_error: Arc::new(Mutex::new(None)),
+            giphy: GiphyState::default(),
+            giphy_tx: giphy_tx.clone(),
+            giphy_rx,
+        }
+    }
+
+    /// Logged in (Welcome received).
+    fn is_connected(&self) -> bool {
+        self.cmd_tx.is_some() && self.connected
+    }
+
+    fn spawn_channel_id(&self) -> Option<u64> {
+        self.channels.values().find(|c| c.kind == ChannelKind::Spawn).map(|c| c.id)
+    }
+
+    /// Info message (toast in the main view, line on the connect screen).
+    fn set_status(&mut self, msg: impl Into<String>) {
+        self.status = msg.into();
+        self.status_is_error = false;
+        self.status_at = Instant::now();
+        self.status_seen = self.status.clone();
+    }
+
+    /// Error message (red toast).
+    fn set_error(&mut self, msg: impl Into<String>) {
+        self.set_status(msg);
+        self.status_is_error = true;
+    }
+
+    fn start_connect(&mut self) {
+        self.set_status(format!("Connecting to {}...", self.config.server_address));
+        self.control.set_vad_threshold(self.config.vad_threshold);
+        self.control
+            .voice_activation
+            .store(self.config.voice_activation, Ordering::Relaxed);
+        self.control.self_muted.store(false, Ordering::Relaxed);
+        self.control.self_deafened.store(false, Ordering::Relaxed);
+        self.control.noise_suppression.store(self.config.noise_suppression, Ordering::Relaxed);
+        self.control.auto_gain.store(self.config.auto_gain, Ordering::Relaxed);
+        // Neuer Zaehler pro Verbindung (alte Queue ist mit der Verbindung weg).
+        self.upload_backlog = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        self.cmd_tx = Some(net::connect(
+            self.config.clone(),
+            self.event_tx.clone(),
+            self.ctx.clone(),
+            self.upload_backlog.clone(),
+        ));
+        self.config.save();
+    }
+
+    fn disconnect(&mut self) {
+        if let Some(tx) = self.cmd_tx.take() {
+            let _ = tx.send(Command::Disconnect);
+        }
+        self.connected = false;
+        self.channel_settings = None;
+        self.confirm_delete = None;
+        self.show_new_channel = false;
+        self.audio = None; // stops the audio threads
+        self.users.clear();
+        self.channels.clear();
+        self.chat.clear();
+        self.unread.clear();
+        self.selected_channel = None;
+        self.talking.lock().unwrap().clear();
+        self.local_muted.lock().unwrap().clear();
+        self.control.transmitting.store(false, Ordering::Relaxed);
+        // Video stoppen + Frames rauswerfen.
+        self.cam = None;
+        self.screen = None;
+        self.cam_dialog = None;
+        self.screen_picker = None;
+        *self.local_preview.lock().unwrap() = None;
+        self.local_preview_tex = None;
+        self.video_frames.clear();
+        self.leave_fullscreen();
+        self.pending_image = None;
+    }
+
+    /// System-Meldung in die Aktivitaetsliste eines Channels schreiben.
+    fn system_line(&mut self, channel_id: u64, text: String, timestamp: u64) {
+        self.chat
+            .entry(channel_id)
+            .or_default()
+            .push(ChatLine { kind: ChatKind::System, text, timestamp, image: None });
+        if self.selected_channel != Some(channel_id) {
+            self.unread.insert(channel_id);
+        }
+    }
+
+    fn now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    fn channel_name(&self, id: u64) -> String {
+        self.channels.get(&id).map(|c| c.name.clone()).unwrap_or_else(|| "?".into())
+    }
+
+    fn channel_kind(&self, id: u64) -> Option<ChannelKind> {
+        self.channels.get(&id).map(|c| c.kind)
+    }
+
+    fn select_channel(&mut self, id: u64) {
+        self.selected_channel = Some(id);
+        self.unread.remove(&id);
+    }
+
+    fn handle_event(&mut self, ev: NetEvent) {
+        match ev {
+            NetEvent::Connected {
+                my_id,
+                server_name,
+                users,
+                channels,
+                udp_socket,
+                udp_token,
+                spawn_log,
+                chat_history,
+            } => {
+                self.connected = true;
+                self.server_name = server_name;
+                self.my_id = my_id;
+                self.channels = channels.into_iter().map(|c| (c.id, c)).collect();
+                self.users = users.into_iter().map(|u| (u.id, u)).collect();
+                // Spawn-Log in die Spawn-Ansicht laden.
+                if let Some(spawn_id) = self.spawn_channel_id() {
+                    let lines = spawn_log
+                        .into_iter()
+                        .map(|e| ChatLine {
+                            kind: ChatKind::System,
+                            text: e.text,
+                            timestamp: e.timestamp,
+                            image: None,
+                        })
+                        .collect();
+                    self.chat.insert(spawn_id, lines);
+                    self.selected_channel = Some(spawn_id);
+                }
+                // Persistierten Chat-Verlauf in die Channels laden
+                // ("eigene" Nachrichten per Name erkannt – kein Account-System).
+                for rec in chat_history {
+                    let own = rec.from_name == self.config.username;
+                    self.chat.entry(rec.channel_id).or_default().push(ChatLine {
+                        kind: ChatKind::Message { from: rec.from_name, own },
+                        text: rec.text,
+                        timestamp: rec.timestamp,
+                        image: rec.image,
+                    });
+                }
+                self.set_status(format!("Connected to {}", self.server_name));
+                if let Some(sock) = udp_socket {
+                    match AudioEngine::start(
+                        sock,
+                        udp_token,
+                        self.control.clone(),
+                        self.talking.clone(),
+                        self.local_muted.clone(),
+                        self.config.input_device.as_deref(),
+                        self.config.output_device.as_deref(),
+                    ) {
+                        Ok(engine) => self.audio = Some(engine),
+                        Err(e) => self.set_error(format!("Audio error: {e:#} (chat still works)")),
+                    }
+                }
+            }
+            NetEvent::Message(msg) => self.handle_server_message(msg),
+            NetEvent::Status(text) => self.set_error(text),
+            NetEvent::Disconnected { reason } => {
+                self.disconnect();
+                self.set_error(format!("Disconnected: {reason}"));
+            }
+        }
+    }
+
+    fn handle_server_message(&mut self, msg: ServerMessage) {
+        match msg {
+            ServerMessage::Welcome { .. } => {} // kommt nur via NetEvent::Connected
+            ServerMessage::UserJoined { user } => {
+                if let Some(ch) = self.channels.get_mut(&user.channel_id) {
+                    if !ch.user_ids.contains(&user.id) {
+                        ch.user_ids.push(user.id);
+                    }
+                }
+                self.users.insert(user.id, user);
+                // Join-Zeile kommt serverseitig via SpawnLogEntry.
+            }
+            ServerMessage::UserLeft { client_id } => {
+                self.users.remove(&client_id);
+                for ch in self.channels.values_mut() {
+                    ch.user_ids.retain(|&id| id != client_id);
+                }
+                self.clear_video_of(client_id, None);
+            }
+            ServerMessage::UserMoved { client_id, channel_id } => {
+                // Wer den Channel wechselt, schickt uns keine Frames mehr (bzw.
+                // wir bekommen keine mehr, wenn wir selbst wechseln).
+                if client_id == self.my_id {
+                    let others: Vec<u64> = self
+                        .video_frames
+                        .keys()
+                        .map(|(id, _)| *id)
+                        .filter(|id| *id != self.my_id)
+                        .collect();
+                    for id in others {
+                        self.clear_video_of(id, None);
+                    }
+                } else {
+                    self.clear_video_of(client_id, None);
+                }
+                let name = self.users.get(&client_id).map(|u| u.name.clone());
+                if let Some(u) = self.users.get_mut(&client_id) {
+                    u.channel_id = channel_id;
+                }
+                for ch in self.channels.values_mut() {
+                    if ch.id == channel_id {
+                        if !ch.user_ids.contains(&client_id) {
+                            ch.user_ids.push(client_id);
+                        }
+                    } else {
+                        ch.user_ids.retain(|&id| id != client_id);
+                    }
+                }
+                if let Some(name) = name {
+                    let line = if client_id == self.my_id {
+                        format!("You joined {}", self.channel_name(channel_id))
+                    } else {
+                        format!("{name} joined {}", self.channel_name(channel_id))
+                    };
+                    self.system_line(channel_id, line, Self::now());
+                }
+            }
+            ServerMessage::ChannelCreated { channel } => {
+                self.channels.insert(channel.id, channel);
+            }
+            ServerMessage::ChannelDeleted { channel_id } => {
+                let was_category =
+                    self.channels.get(&channel_id).is_some_and(|c| c.kind.is_group());
+                self.channels.remove(&channel_id);
+                if was_category {
+                    // Kinder der geloeschten Kategorie werden Top-Level.
+                    for ch in self.channels.values_mut() {
+                        if ch.parent == Some(channel_id) {
+                            ch.parent = None;
+                        }
+                    }
+                }
+                self.chat.remove(&channel_id);
+                self.unread.remove(&channel_id);
+                self.collapsed.remove(&channel_id);
+                if self.selected_channel == Some(channel_id) {
+                    self.selected_channel = self.spawn_channel_id();
+                }
+            }
+            ServerMessage::ChannelRenamed { channel_id, name } => {
+                if let Some(ch) = self.channels.get_mut(&channel_id) {
+                    ch.name = name;
+                }
+            }
+            ServerMessage::ChannelsReordered { placements } => {
+                for p in placements {
+                    if let Some(ch) = self.channels.get_mut(&p.id) {
+                        ch.parent = p.parent;
+                        ch.position = p.position;
+                    }
+                }
+            }
+            ServerMessage::SpawnLogEntry { entry } => {
+                if let Some(spawn_id) = self.spawn_channel_id() {
+                    self.system_line(spawn_id, entry.text, entry.timestamp);
+                }
+            }
+            ServerMessage::Chat { channel_id, from_id, from_name, text, timestamp, image } => {
+                let own = from_id == self.my_id;
+                self.chat
+                    .entry(channel_id)
+                    .or_default()
+                    .push(ChatLine {
+                        kind: ChatKind::Message { from: from_name, own },
+                        text,
+                        timestamp,
+                        image,
+                    });
+                if self.selected_channel != Some(channel_id) {
+                    self.unread.insert(channel_id);
+                }
+            }
+            ServerMessage::MuteStateChanged { client_id, muted, deafened } => {
+                if let Some(u) = self.users.get_mut(&client_id) {
+                    u.muted = muted;
+                    u.deafened = deafened;
+                }
+            }
+            ServerMessage::SharingChanged { client_id, sharing } => {
+                if let Some(u) = self.users.get_mut(&client_id) {
+                    u.sharing = sharing;
+                }
+                if !sharing {
+                    self.clear_video_of(client_id, None);
+                }
+            }
+            ServerMessage::VideoFrame { from_id, kind, data } => {
+                // Alten Frame ersetzen (Texture-Cache schont die Dekodierung).
+                let key = (from_id, kind);
+                if let Some(old) = self.video_frames.get(&key) {
+                    if old.len() == data.len() && old == &data {
+                        return; // identischer Frame, nichts tun
+                    }
+                    let old = old.clone();
+                    self.textures.remove_bytes(&old);
+                }
+                self.video_frames.insert(key, data);
+            }
+            ServerMessage::VideoStopped { from_id, kind } => {
+                self.clear_video_of(from_id, Some(kind));
+            }
+            ServerMessage::Error { message } => {
+                self.set_error(message);
+            }
+        }
+    }
+}
+
+impl eframe::App for RustTalkApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        while let Ok(ev) = self.event_rx.try_recv() {
+            self.handle_event(ev);
+        }
+        #[cfg(debug_assertions)]
+        self.dev_hooks(ctx);
+        if std::mem::take(&mut self.pending_disconnect) {
+            self.disconnect();
+            self.set_status("Disconnected");
+        }
+        // Status changed somewhere without set_status -> restart the toast.
+        if self.status != self.status_seen {
+            self.status_seen = self.status.clone();
+            self.status_at = Instant::now();
+        }
+        // Ctrl +/- zoom: remember for the next start.
+        let zoom = ctx.zoom_factor();
+        if (zoom - self.config.ui_scale).abs() > 0.001 {
+            self.config.ui_scale = zoom;
+        }
+
+        if self.is_connected() {
+            // Poll the push-to-talk key (while the window has focus).
+            let pressed = !self.recording_key
+                && key_from_name(&self.config.ptt_key).is_some_and(|k| ctx.input(|i| i.key_down(k)));
+            self.control.ptt_pressed.store(pressed, Ordering::Relaxed);
+            self.ui_connected(ctx);
+        } else {
+            self.ui_connect(ctx);
+        }
+        if self.show_settings {
+            self.ui_settings(ctx);
+        }
+        self.ui_new_channel(ctx);
+        self.ui_channel_settings(ctx);
+        self.ui_confirm_delete(ctx);
+        self.ui_giphy(ctx);
+        self.ui_camera_dialog(ctx);
+        self.ui_screen_picker(ctx);
+
+        // Mic monitor for the level meter in the settings (without a connection).
+        if self.show_settings && self.audio.is_none() && self.mic_monitor.is_none() {
+            self.mic_monitor =
+                capture::MicMonitor::start(self.config.input_device.as_deref()).ok();
+        }
+        if !self.show_settings && self.mic_monitor.is_some() {
+            self.mic_monitor = None; // Drop stoppt Stream + Thread
+        }
+        ctx.request_repaint_after(Duration::from_millis(100));
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.config.save();
+    }
+}
+
+impl RustTalkApp {
+    /// Main view while connected: sidebar + content (or fullscreen stream).
+    fn ui_connected(&mut self, ctx: &egui::Context) {
+        let cmd_tx = self.cmd_tx.clone().expect("connected");
+
+        // Screen thread ended with an error (e.g. window closed).
+        if self.screen_failed.swap(false, Ordering::Relaxed) && self.screen.is_some() {
+            self.screen = None;
+            self.after_source_stopped(VideoKind::Screen, &cmd_tx);
+        }
+        // No talking/sharing in the lobby: stop running sources when we land there.
+        if self.in_lobby() {
+            if self.cam.as_ref().is_some_and(|c| c.is_sending()) {
+                self.cam = None;
+                self.after_source_stopped(VideoKind::Camera, &cmd_tx);
+            }
+            if self.screen.is_some() {
+                self.screen = None;
+                self.after_source_stopped(VideoKind::Screen, &cmd_tx);
+            }
+        }
+
+        // Fullscreen: only the stream + member bar. Ends when the stream is gone.
+        if let Some(key) = self.fullscreen {
+            if self.video_frames.contains_key(&key) {
+                self.ui_fullscreen(ctx, key);
+                return;
+            }
+            self.leave_fullscreen();
+        }
+
+        self.ui_sidebar(ctx, &cmd_tx);
+        self.ui_main(ctx, &cmd_tx);
+        // Toast only without an open dialog (it would cover dialog buttons).
+        let dialog_open = self.channel_settings.is_some()
+            || self.show_new_channel
+            || self.confirm_delete.is_some()
+            || self.cam_dialog.is_some()
+            || self.screen_picker.is_some();
+        if !dialog_open {
+            theme::toast(ctx, &self.status, self.status_at.elapsed().as_secs_f32(), self.status_is_error);
+        }
+    }
+
+    /// Debug builds only: env-controlled shortcuts for UI screenshots/tests.
+    /// `RUSTTALK_DEV_AUTOCONNECT=1` connects at start,
+    /// `RUSTTALK_DEV_OPEN=settings:<page>|channel:<name>|new_channel|select:<name>`.
+    #[cfg(debug_assertions)]
+    fn dev_hooks(&mut self, _ctx: &egui::Context) {
+        use std::sync::atomic::AtomicU8;
+        static STAGE: AtomicU8 = AtomicU8::new(0);
+        match STAGE.load(Ordering::Relaxed) {
+            0 => {
+                STAGE.store(1, Ordering::Relaxed);
+                if std::env::var("RUSTTALK_DEV_AUTOCONNECT").is_ok() {
+                    self.start_connect();
+                }
+            }
+            1 if self.connected || std::env::var("RUSTTALK_DEV_AUTOCONNECT").is_err() => {
+                STAGE.store(2, Ordering::Relaxed);
+                let Ok(open) = std::env::var("RUSTTALK_DEV_OPEN") else { return };
+                for part in open.split(',') {
+                    let (what, arg) = part.split_once(':').unwrap_or((part, ""));
+                    let by_name = |s: &Self| s.channels.values().find(|c| c.name == arg).map(|c| c.id);
+                    match what {
+                        "settings" => {
+                            let page = match arg {
+                                "account" => SettingsPage::Account,
+                                "appearance" => SettingsPage::Appearance,
+                                "video" => SettingsPage::Video,
+                                "keybinds" => SettingsPage::Keybinds,
+                                "notifications" => SettingsPage::Notifications,
+                                "advanced" => SettingsPage::Advanced,
+                                "about" => SettingsPage::About,
+                                _ => SettingsPage::Voice,
+                            };
+                            self.open_settings(page);
+                        }
+                        "channel" => {
+                            if let Some(id) = by_name(self) {
+                                self.open_channel_settings(id);
+                            }
+                        }
+                        "select" => {
+                            if let Some(id) = by_name(self) {
+                                self.select_channel(id);
+                            }
+                        }
+                        "join" => {
+                            if let (Some(id), Some(tx)) = (by_name(self), self.cmd_tx.clone()) {
+                                let _ = tx.send(Command::JoinChannel(id));
+                                self.select_channel(id);
+                            }
+                        }
+                        "new_channel" => self.open_new_channel(None, ChannelKind::Text),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Unix timestamp -> "HH:MM" (UTC; good enough for now).
+fn format_time(ts: u64) -> String {
+    let secs = ts % 86_400;
+    format!("{:02}:{:02}", secs / 3600, (secs / 60) % 60)
+}
+
+/// Maps a config string to an egui key.
+fn key_from_name(name: &str) -> Option<egui::Key> {
+    let n = name.trim();
+    if n.chars().count() == 1 {
+        let c = n.chars().next().unwrap().to_ascii_uppercase();
+        return Some(match c {
+            'A' => egui::Key::A,
+            'B' => egui::Key::B,
+            'C' => egui::Key::C,
+            'D' => egui::Key::D,
+            'E' => egui::Key::E,
+            'F' => egui::Key::F,
+            'G' => egui::Key::G,
+            'H' => egui::Key::H,
+            'I' => egui::Key::I,
+            'J' => egui::Key::J,
+            'K' => egui::Key::K,
+            'L' => egui::Key::L,
+            'M' => egui::Key::M,
+            'N' => egui::Key::N,
+            'O' => egui::Key::O,
+            'P' => egui::Key::P,
+            'Q' => egui::Key::Q,
+            'R' => egui::Key::R,
+            'S' => egui::Key::S,
+            'T' => egui::Key::T,
+            'U' => egui::Key::U,
+            'V' => egui::Key::V,
+            'W' => egui::Key::W,
+            'X' => egui::Key::X,
+            'Y' => egui::Key::Y,
+            'Z' => egui::Key::Z,
+            '0' => egui::Key::Num0,
+            '1' => egui::Key::Num1,
+            '2' => egui::Key::Num2,
+            '3' => egui::Key::Num3,
+            '4' => egui::Key::Num4,
+            '5' => egui::Key::Num5,
+            '6' => egui::Key::Num6,
+            '7' => egui::Key::Num7,
+            '8' => egui::Key::Num8,
+            '9' => egui::Key::Num9,
+            _ => return egui::Key::from_name(n),
+        });
+    }
+    match n.to_ascii_uppercase().as_str() {
+        "SPACE" => Some(egui::Key::Space),
+        "TAB" => Some(egui::Key::Tab),
+        "ENTER" => Some(egui::Key::Enter),
+        "ESCAPE" => Some(egui::Key::Escape),
+        "F1" => Some(egui::Key::F1),
+        "F2" => Some(egui::Key::F2),
+        "F3" => Some(egui::Key::F3),
+        "F4" => Some(egui::Key::F4),
+        "F5" => Some(egui::Key::F5),
+        // Everything else by egui name (e.g. "F8", "Backtick", "PageUp").
+        _ => egui::Key::from_name(n),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_mapping_letters() {
+        assert_eq!(key_from_name("v"), Some(egui::Key::V));
+        assert_eq!(key_from_name("A"), Some(egui::Key::A));
+        assert_eq!(key_from_name("5"), Some(egui::Key::Num5));
+        assert_eq!(key_from_name("SPACE"), Some(egui::Key::Space));
+        assert_eq!(key_from_name("space"), Some(egui::Key::Space));
+        assert_eq!(key_from_name("??"), None);
+    }
+
+    #[test]
+    fn time_formatting() {
+        assert_eq!(format_time(0), "00:00");
+        assert_eq!(format_time(3_661), "01:01");
+        assert_eq!(format_time(86_399), "23:59");
+        assert_eq!(format_time(90_061), "01:01"); // next day (UTC)
+    }
+
+    #[test]
+    fn keybind_roundtrip_via_egui_names() {
+        // What the settings store (key.name()) must map back to the key.
+        for k in [egui::Key::V, egui::Key::Space, egui::Key::F8, egui::Key::Backtick, egui::Key::Num3] {
+            assert_eq!(key_from_name(k.name()), Some(k), "{}", k.name());
+        }
+    }
+}

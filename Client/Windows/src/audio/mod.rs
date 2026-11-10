@@ -42,6 +42,8 @@ pub struct AudioControl {
     pub noise_suppression: AtomicBool,
     /// Automatische Lautstaerke (AGC + Limiter) auf der Sendeseite.
     pub auto_gain: AtomicBool,
+    /// Playback volume (f32 bits, 1.0 = 100 %).
+    output_volume_bits: AtomicU32,
     /// Aktueller Mikro-Pegel (RMS, geglaettet) – fuer die Pegel-Anzeige in den Einstellungen.
     mic_level: Arc<AtomicU32>,
     /// Wir senden gerade (Gate offen) – fuer den Selbst-Sprech-Indikator.
@@ -58,6 +60,7 @@ impl AudioControl {
             self_deafened: AtomicBool::new(false),
             noise_suppression: AtomicBool::new(true),
             auto_gain: AtomicBool::new(true),
+            output_volume_bits: AtomicU32::new(1.0f32.to_bits()),
             mic_level: Arc::new(AtomicU32::new(0)),
             transmitting: AtomicBool::new(false),
         }
@@ -73,6 +76,14 @@ impl AudioControl {
 
     pub fn vad_threshold(&self) -> f32 {
         f32::from_bits(self.vad_threshold_bits.load(Ordering::Relaxed))
+    }
+
+    pub fn output_volume(&self) -> f32 {
+        f32::from_bits(self.output_volume_bits.load(Ordering::Relaxed))
+    }
+
+    pub fn set_output_volume(&self, value: f32) {
+        self.output_volume_bits.store(value.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
     }
 
     pub fn set_vad_threshold(&self, value: f32) {
@@ -130,7 +141,7 @@ impl AudioEngine {
         let rb = HeapRb::<f32>::new((SAMPLE_RATE * 2) as usize); // 2 s Puffer
         let (prod, cons) = rb.split();
         let input = capture::build_input_stream(input_device, prod, Some(control.mic_level_sink()))
-            .context("Audio-Eingabe konnte nicht gestartet werden")?;
+            .context("Could not start audio input")?;
 
         // Encoder-Thread: Ring-Puffer -> Opus -> UDP.
         std::thread::Builder::new()

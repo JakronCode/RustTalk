@@ -1,4 +1,4 @@
-﻿//! Headless CLI-Testclient fÃ¼r End-to-End-Tests und manuelle PrÃ¼fungen.
+//! Headless CLI-Testclient fÃ¼r End-to-End-Tests und manuelle PrÃ¼fungen.
 //!
 //! Beispiele:
 //!   test-client --addr 127.0.0.1:7331 --name Bob --audio-secs 5
@@ -134,7 +134,7 @@ async fn run(args: &Args) -> Result<()> {
 
     let first: Option<ServerMessage> = read_frame(&mut stream).await?;
     let (my_id, udp_token, mut join_target) = match first {
-        Some(ServerMessage::Welcome { client_id, udp_token, channels, users, spawn_log, chat_history }) => {
+        Some(ServerMessage::Welcome { client_id, udp_token, channels, users, spawn_log, chat_history, .. }) => {
             println!(
                 "WELCOME client_id={client_id} token={udp_token} channels={} users={} spawn_log={} history={}",
                 channels.len(),
@@ -249,4 +249,4 @@ async fn run(args: &Args) -> Result<()> {
     let _ = my_id;
     Ok(())
 }
-// wdac-dice: 2
+// wdac-dice: 4

@@ -72,7 +72,7 @@ async fn handle_connection(stream: TcpStream, peer: SocketAddr, state: SharedSta
     // 2. Pre-Login-Checks. Fehler werden als Error-Frame gesendet, dann beendet.
     if protocol_version != PROTOCOL_VERSION {
         let msg = format!(
-            "Protokollversion nicht unterstuetzt (Client: {protocol_version}, Server: {PROTOCOL_VERSION})"
+            "Protocol version not supported (client: {protocol_version}, server: {PROTOCOL_VERSION}) - please update RustTalk"
         );
         let _ = write_frame(&mut writer, &ServerMessage::Error { message: msg }).await;
         bail!("Protokollversion {protocol_version} abgelehnt ({peer})");
@@ -83,7 +83,7 @@ async fn handle_connection(stream: TcpStream, peer: SocketAddr, state: SharedSta
         if let Err(msg) = st.check_password(&password) {
             Some(msg.to_string())
         } else if st.is_full() {
-            Some("Server ist voll".to_string())
+            Some("Server is full".to_string())
         } else {
             None
         }
@@ -102,6 +102,7 @@ async fn handle_connection(stream: TcpStream, peer: SocketAddr, state: SharedSta
         let username = sanitize_username(&username, st.next_client_id_hint());
         let (id, token) = st.add_client(username.clone(), tx);
         let welcome = ServerMessage::Welcome {
+            server_name: st.server_name().to_string(),
             client_id: id,
             udp_token: token,
             channels: st.all_channels(),
@@ -115,7 +116,7 @@ async fn handle_connection(stream: TcpStream, peer: SocketAddr, state: SharedSta
         st.send_to(id, &welcome);
         st.broadcast(&ServerMessage::UserJoined { user });
         // Join im Spawn-Log dokumentieren (persistiert serverseitig).
-        let entry = st.push_spawn_log(format!("{username} ist erschienen"));
+        let entry = st.push_spawn_log(format!("{username} joined the server"));
         st.broadcast(&ServerMessage::SpawnLogEntry { entry });
         (id, username, video_backlog)
     };
@@ -190,7 +191,7 @@ async fn message_loop(
         match msg {
             ClientMessage::Hello { .. } => {
                 st.send_to(client_id, &ServerMessage::Error {
-                    message: "Bereits angemeldet".to_string(),
+                    message: "Already logged in".to_string(),
                 });
             }
             ClientMessage::Disconnect => return Ok(()),
@@ -214,6 +215,12 @@ async fn message_loop(
                 }
                 Err(e) => st.send_to(client_id, &ServerMessage::Error { message: e }),
             },
+            ClientMessage::MoveChannel { channel_id, parent, index } => {
+                match st.move_channel(channel_id, parent, index) {
+                    Ok(placements) => st.broadcast(&ServerMessage::ChannelsReordered { placements }),
+                    Err(e) => st.send_to(client_id, &ServerMessage::Error { message: e }),
+                }
+            }
             ClientMessage::RenameChannel { channel_id, name } => {
                 match st.rename_channel(channel_id, &name) {
                     Ok(()) => st.broadcast(&ServerMessage::ChannelRenamed { channel_id, name }),
@@ -224,15 +231,15 @@ async fn message_loop(
                 let img_len = image.as_ref().map(|i| i.len()).unwrap_or(0);
                 if text.chars().count() > MAX_CHAT_LEN {
                     st.send_to(client_id, &ServerMessage::Error {
-                        message: format!("Nachricht zu lang (max. {MAX_CHAT_LEN} Zeichen)"),
+                        message: format!("Message too long (max. {MAX_CHAT_LEN} characters)"),
                     });
                 } else if text.trim().is_empty() && image.is_none() {
                     st.send_to(client_id, &ServerMessage::Error {
-                        message: "Leere Nachricht".to_string(),
+                        message: "Empty message".to_string(),
                     });
                 } else if img_len > MAX_MEDIA_BYTES {
                     st.send_to(client_id, &ServerMessage::Error {
-                        message: format!("Bild zu gross (max. {} MiB)", MAX_MEDIA_BYTES / 1024 / 1024),
+                        message: format!("Image too large (max. {} MiB)", MAX_MEDIA_BYTES / 1024 / 1024),
                     });
                 } else if let Err(e) = st.chat_allowed(channel_id) {
                     st.send_to(client_id, &ServerMessage::Error { message: e });
@@ -257,7 +264,7 @@ async fn message_loop(
                     st.broadcast(&ServerMessage::SharingChanged { client_id, sharing });
                 } else {
                     st.send_to(client_id, &ServerMessage::Error {
-                        message: "Teilen nur in Sprach-Channels moeglich".to_string(),
+                        message: "Sharing is only possible in voice channels".to_string(),
                     });
                 }
             }

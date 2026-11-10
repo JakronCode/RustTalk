@@ -116,7 +116,7 @@ async fn handshake_spawn_und_join_log() {
     assert_eq!(wa.client_id, 1);
     assert_eq!(wa.channels.len(), 1, "nur der Spawn-Channel");
     assert_eq!(wa.channels[0].kind, ChannelKind::Spawn);
-    assert_eq!(wa.channels[0].name, "Spawn");
+    assert_eq!(wa.channels[0].name, "Lobby");
     assert_eq!(wa.users.len(), 1);
     assert_eq!(wa.users[0].channel_id, wa.channels[0].id, "landet im Spawn");
 
@@ -327,7 +327,7 @@ async fn passwort_schutz() {
     let (mut r, _w) = tokio::io::split(stream);
     match read_frame(&mut r).await.unwrap() {
         Some(ServerMessage::Error { message }) => {
-            assert!(message.contains("Passwort"), "unerwartete Fehlermeldung: {message}")
+            assert!(message.contains("password"), "unerwartete Fehlermeldung: {message}")
         }
         other => panic!("Error erwartet, bekam: {other:?}"),
     }

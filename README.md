@@ -14,7 +14,8 @@ Schlanker Voice-Chat in Rust — Client im Discord-Look, Server im TeamSpeak-Sti
 - **Voice:** Push-to-Talk + Sprachaktivierung (VAD mit RMS *und* RNNoise-Sprachwahrscheinlichkeit), Opus 64 kbit/s 48 kHz/20 ms über UDP mit In-Band-FEC, Jitter-Buffer mit FEC/PLC, Sinc-Resampler für beliebige Mikro-Raten
 - **Automatische Lautstärke** (AGC + Limiter): leise Mikros werden angehoben, laute gedämpft – abschaltbar
 - **KI-Rauschunterdrückung** (RNNoise via `nnnoiseless`), abschaltbar
-- **Channel-Typen:** Spawn (1×, Join-Log, Sprechverbot), Kategorie (Gruppierung), Sprache (Voice + Media-Chat), Text (Chat)
+- **Channel-Typen:** Lobby (1×, Join-Log, Sprechen/Video aus), Kategorie (Gruppierung), Sprache (Voice + Media-Chat), Text (Chat); Reihenfolge per **Drag & Drop** (serverseitig gespeichert)
+- **Englische Oberfläche** im Discord-Stil: Server-Menü, Voice-Panel, User-Panel, Einstellungen mit Kategorien, Channel-Einstellungen (teils WIP)
 - **Text-Chat** mit Verlauf, Bildern (PNG/JPEG/GIF), Ungelesen-Markierung
 - **SQLite-Persistenz** (Server): Channels, Chat-Verlauf (Retention 10k/Channel), Spawn-Log überleben Neustarts
 - **Client-UI:** Dark-Mode (fest), prozedurales Logo, Lesezeichen für Server, Einstellungen als eigenes Fenster, Mikro-Pegel-Meter, Avatare mit Talking-Ring, lokale Stummschaltung pro User (Rechtsklick)
@@ -51,7 +52,7 @@ Client (Windows)                          Server (Debian)
                                             └──────────────┘
 ```
 
-- **TCP:** Login, Channels, Chat (Text + Bilder), Events, Video-Frames (Kamera/Bildschirm, v5)
+- **TCP:** Login, Channels, Chat (Text + Bilder), Events, Video-Frames (Kamera/Bildschirm), Channel-Reihenfolge (v6)
 - **UDP:** nur Opus-Audio (20 ms Frames, Token+Sequence-Header), Server relayed 1:1 innerhalb des Voice-Channels
 - **Spawn-Channel:** alle landen dort beim Verbinden; Sprechen serverseitig blockiert; Join-Log
 
@@ -113,12 +114,13 @@ bash Server/Test_Scripts/e2e_local.sh
 ## Projektstruktur
 
 ```
-├── shared/            # Protokoll (v5), Framing, UDP-Paketformat
+├── shared/            # Protokoll (v6), Framing, UDP-Paketformat
 ├── Server/            # Linux-Server (+ test_client CLI, Integrationstests, deploy/, Test_Scripts/)
 │   └── src/           #   main, config, state (RAM), db (SQLite), tcp, udp
 └── Client/Windows/    # egui-Client
     └── src/           #   app (UI), net, audio/ (capture, encoder+RNNoise, playback, jitter,
-                       #   resample), media (Bilder/GIPHY), video (Kamera/Bildschirm/Fenster), config, logo
+                       #   resample), media (Bilder/GIPHY), video (Kamera/Bildschirm/Fenster), config, logo,
+                       #   app/ (theme, connect, sidebar, views, settings, channel_settings, media_ui)
 ```
 
 ## Bekannte Einschränkungen

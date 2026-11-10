@@ -12,11 +12,13 @@
 //! v4: Bilder im Chat, Video-Frames (JPEG), Sharing-Status.
 //! v5: Video-Frames mit Art (Kamera/Bildschirm) -> beide gleichzeitig teilbar;
 //!     `StopVideo`/`VideoStopped` beendet einen einzelnen Stream.
+//! v6: Channel-Reihenfolge (`position`, `MoveChannel`/`ChannelsReordered`),
+//!     Servername im `Welcome`.
 
 use serde::{Deserialize, Serialize};
 
 /// Aktuelle Protokollversion. Client und Server müssen übereinstimmen.
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 
 /// Art eines Video-Streams. Ein User kann beide gleichzeitig senden.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -97,8 +99,18 @@ pub struct ChannelInfo {
     pub kind: ChannelKind,
     /// Zugehoerige Kategorie (None = Top-Level).
     pub parent: Option<u64>,
+    /// Sortierposition unter Geschwistern (gleicher `parent`), aufsteigend.
+    pub position: u32,
     /// Belegte User (nur bei Voice/Spawn sinnvoll befuellt).
     pub user_ids: Vec<u64>,
+}
+
+/// Ort eines Channels im Baum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelPlacement {
+    pub id: u64,
+    pub parent: Option<u64>,
+    pub position: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,6 +144,13 @@ pub enum ClientMessage {
     },
     DeleteChannel {
         channel_id: u64,
+    },
+    /// Channel verschieben (Drag & Drop): neue Kategorie (None = oberste
+    /// Ebene) und Index unter den neuen Geschwistern.
+    MoveChannel {
+        channel_id: u64,
+        parent: Option<u64>,
+        index: u32,
     },
     RenameChannel {
         channel_id: u64,
@@ -169,6 +188,8 @@ pub enum ClientMessage {
 pub enum ServerMessage {
     /// Antwort auf `Hello`. Enthält den kompletten Anfangszustand.
     Welcome {
+        /// Anzeigename des Servers (aus `server.toml`).
+        server_name: String,
         client_id: u64,
         /// Token, mit dem sich der Client per UDP beim Server registriert.
         udp_token: u64,
@@ -194,6 +215,10 @@ pub enum ServerMessage {
     },
     ChannelDeleted {
         channel_id: u64,
+    },
+    /// Neue Anordnung aller Channels nach einem `MoveChannel`.
+    ChannelsReordered {
+        placements: Vec<ChannelPlacement>,
     },
     ChannelRenamed {
         channel_id: u64,
@@ -282,6 +307,7 @@ mod tests {
             },
             ClientMessage::DeleteChannel { channel_id: 7 },
             ClientMessage::RenameChannel { channel_id: 7, name: "Neu".into() },
+            ClientMessage::MoveChannel { channel_id: 7, parent: Some(2), index: 1 },
             ClientMessage::Chat { channel_id: 1, text: "Hallo Welt".into(), image: None },
             ClientMessage::Chat { channel_id: 1, text: String::new(), image: Some(vec![0xFF, 0xD8]) },
             ClientMessage::SetMuteState { muted: true, deafened: false },
@@ -312,6 +338,7 @@ mod tests {
             name: "Spawn".into(),
             kind: ChannelKind::Spawn,
             parent: None,
+            position: 0,
             user_ids: vec![1],
         };
         let entry = LogEntry { timestamp: 1_763_000_000, text: "alice ist erschienen".into() };
@@ -324,6 +351,7 @@ mod tests {
         };
         let msgs = vec![
             ServerMessage::Welcome {
+                server_name: "Test".into(),
                 client_id: 1,
                 udp_token: u64::MAX,
                 channels: vec![channel.clone()],
@@ -337,6 +365,9 @@ mod tests {
             ServerMessage::ChannelCreated { channel },
             ServerMessage::ChannelDeleted { channel_id: 2 },
             ServerMessage::ChannelRenamed { channel_id: 1, name: "Lobby".into() },
+            ServerMessage::ChannelsReordered {
+                placements: vec![ChannelPlacement { id: 3, parent: None, position: 2 }],
+            },
             ServerMessage::SpawnLogEntry { entry },
             ServerMessage::Chat {
                 channel_id: 1,

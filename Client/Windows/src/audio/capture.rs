@@ -29,7 +29,7 @@ fn pick_input_device(name: Option<&str>) -> Result<cpal::Device> {
         }
         tracing::warn!("Eingabegeraet '{want}' nicht gefunden, nutze Standardgeraet");
     }
-    host.default_input_device().context("Kein Standard-Eingabegeraet gefunden")
+    host.default_input_device().context("No default input device found")
 }
 
 pub fn build_input_stream(
@@ -56,7 +56,7 @@ pub fn build_input_stream(
         cpal::SampleFormat::U16 => {
             build_in::<u16>(&device, &config, |s| (s as f32 - 32768.0) / 32768.0, producer, level_sink, err_fn)?
         }
-        other => return Err(anyhow!("Nicht unterstuetztes Sample-Format: {other:?}")),
+        other => return Err(anyhow!("Unsupported sample format: {other:?}")),
     };
     Ok(stream)
 }
@@ -147,6 +147,6 @@ fn build_in<T: cpal::SizedSample + Send + 'static>(
         None,
     )
     .context("build_input_stream")?;
-    stream.play().context("Input-Stream starten")?;
+    stream.play().context("Could not start the input stream")?;
     Ok(stream)
 }

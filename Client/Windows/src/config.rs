@@ -49,6 +49,15 @@ pub struct ClientConfig {
     /// Qualitaet gesendeter Video-Streams (Kamera + Bildschirm).
     #[serde(default)]
     pub video_quality: crate::video::VideoQuality,
+    /// UI zoom (1.0 = 100 %).
+    #[serde(default = "default_one")]
+    pub ui_scale: f32,
+    /// Show the time next to chat messages.
+    #[serde(default = "default_true")]
+    pub show_timestamps: bool,
+    /// Playback volume for everyone (1.0 = 100 %, max 2.0).
+    #[serde(default = "default_one")]
+    pub output_volume: f32,
 }
 
 fn default_username() -> String {
@@ -62,6 +71,9 @@ fn default_ptt_key() -> String {
 }
 fn default_vad_threshold() -> f32 {
     0.02
+}
+fn default_one() -> f32 {
+    1.0
 }
 fn default_true() -> bool {
     true
@@ -84,6 +96,9 @@ impl Default for ClientConfig {
             output_device: None,
             camera: None,
             video_quality: crate::video::VideoQuality::default(),
+            ui_scale: 1.0,
+            show_timestamps: true,
+            output_volume: 1.0,
         }
     }
 }
@@ -136,6 +151,9 @@ mod tests {
             output_device: None,
             camera: None,
             video_quality: crate::video::VideoQuality::default(),
+            ui_scale: 1.0,
+            show_timestamps: true,
+            output_volume: 1.0,
         };
         let text = toml::to_string_pretty(&cfg).unwrap();
         let back: ClientConfig = toml::from_str(&text).unwrap();

@@ -26,6 +26,7 @@ pub struct StoredChannel {
     pub name: String,
     pub kind: ChannelKind,
     pub parent: Option<u64>,
+    pub position: u32,
 }
 
 pub struct Db {
@@ -59,7 +60,8 @@ impl Db {
                 id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
                 kind TEXT NOT NULL,
-                parent INTEGER
+                parent INTEGER,
+                position INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,6 +85,17 @@ impl Db {
         if !has_image {
             conn.execute("ALTER TABLE messages ADD COLUMN image BLOB", [])?;
         }
+        // Migration (v6): Sortierposition der Channels nachruesten.
+        let has_position = conn
+            .prepare("PRAGMA table_info(channels)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .any(|c| c.map(|name| name == "position").unwrap_or(false));
+        if !has_position {
+            conn.execute(
+                "ALTER TABLE channels ADD COLUMN position INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
         Ok(Self { conn })
     }
 
@@ -91,23 +104,31 @@ impl Db {
     pub fn load_channels(&self) -> Result<Vec<StoredChannel>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, name, kind, parent FROM channels ORDER BY id")?;
+            .prepare("SELECT id, name, kind, parent, position FROM channels ORDER BY id")?;
         let rows = stmt.query_map([], |r| {
             Ok(StoredChannel {
                 id: r.get::<_, i64>(0)? as u64,
                 name: r.get(1)?,
                 kind: parse_kind(&r.get::<_, String>(2)?),
                 parent: r.get::<_, Option<i64>>(3)?.map(|p| p as u64),
+                position: r.get::<_, i64>(4)?.max(0) as u32,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn upsert_channel(&self, id: u64, name: &str, kind: ChannelKind, parent: Option<u64>) -> Result<()> {
+    pub fn upsert_channel(
+        &self,
+        id: u64,
+        name: &str,
+        kind: ChannelKind,
+        parent: Option<u64>,
+        position: u32,
+    ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO channels (id, name, kind, parent) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(id) DO UPDATE SET name = ?2, kind = ?3, parent = ?4",
-            params![id as i64, name, kind_str(kind), parent.map(|p| p as i64)],
+            "INSERT INTO channels (id, name, kind, parent, position) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET name = ?2, kind = ?3, parent = ?4, position = ?5",
+            params![id as i64, name, kind_str(kind), parent.map(|p| p as i64), position as i64],
         )?;
         Ok(())
     }
@@ -216,9 +237,9 @@ mod tests {
     fn channels_roundtrip_and_delete() {
         let path = temp_db("channels");
         let db = Db::open(&path).unwrap();
-        db.upsert_channel(1, "Spawn", ChannelKind::Spawn, None).unwrap();
-        db.upsert_channel(2, "Talk", ChannelKind::Category, None).unwrap();
-        db.upsert_channel(3, "Funkturm", ChannelKind::Voice, Some(2)).unwrap();
+        db.upsert_channel(1, "Spawn", ChannelKind::Spawn, None, 0).unwrap();
+        db.upsert_channel(2, "Talk", ChannelKind::Category, None, 1).unwrap();
+        db.upsert_channel(3, "Funkturm", ChannelKind::Voice, Some(2), 0).unwrap();
 
         let channels = db.load_channels().unwrap();
         assert_eq!(channels.len(), 3);
@@ -226,9 +247,10 @@ mod tests {
         assert_eq!(channels[2].parent, Some(2));
 
         // Umbenennen via upsert:
-        db.upsert_channel(3, "Funkturm 116", ChannelKind::Voice, Some(2)).unwrap();
+        db.upsert_channel(3, "Funkturm 116", ChannelKind::Voice, Some(2), 4).unwrap();
         let channels = db.load_channels().unwrap();
         assert_eq!(channels[2].name, "Funkturm 116");
+        assert_eq!(channels[2].position, 4, "Position wird gespeichert");
 
         // Kategorie loeschen -> Kind wird Top-Level:
         db.delete_channel(2).unwrap();

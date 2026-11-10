@@ -23,6 +23,7 @@ pub enum Command {
     CreateChannel { name: String, kind: ChannelKind, parent: Option<u64> },
     DeleteChannel(u64),
     RenameChannel(u64, String),
+    MoveChannel { channel_id: u64, parent: Option<u64>, index: u32 },
     SendChat { channel_id: u64, text: String, image: Option<Vec<u8>> },
     SetMute { muted: bool, deafened: bool },
     SetSharing(bool),
@@ -37,6 +38,7 @@ pub enum NetEvent {
     /// Login erfolgreich; enthaelt den initialen Server-State und den UDP-Socket.
     Connected {
         my_id: u64,
+        server_name: String,
         users: Vec<UserInfo>,
         channels: Vec<ChannelInfo>,
         udp_socket: Option<std::net::UdpSocket>,
@@ -101,7 +103,7 @@ async fn run(
     let addr = normalize_addr(&cfg.server_address);
     let stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr))
         .await
-        .map_err(|_| anyhow::anyhow!("Zeitueberschreitung beim Verbinden mit {addr}"))??;
+        .map_err(|_| anyhow::anyhow!("Timeout while connecting to {addr}"))??;
     stream.set_nodelay(true).ok();
     let peer = stream.peer_addr()?;
     let (mut reader, mut writer) = tokio::io::split(stream);
@@ -118,13 +120,13 @@ async fn run(
 
     let first: Option<ServerMessage> = timeout(CONNECT_TIMEOUT, read_frame(&mut reader))
         .await
-        .map_err(|_| anyhow::anyhow!("Zeitueberschreitung beim Warten auf Welcome"))??;
-    let (client_id, udp_token, channels, users, spawn_log, chat_history) = match first {
-        Some(ServerMessage::Welcome { client_id, udp_token, channels, users, spawn_log, chat_history }) => {
-            (client_id, udp_token, channels, users, spawn_log, chat_history)
+        .map_err(|_| anyhow::anyhow!("Timeout while waiting for the server"))??;
+    let (client_id, server_name, udp_token, channels, users, spawn_log, chat_history) = match first {
+        Some(ServerMessage::Welcome { client_id, udp_token, channels, users, spawn_log, chat_history, server_name }) => {
+            (client_id, server_name, udp_token, channels, users, spawn_log, chat_history)
         }
         Some(ServerMessage::Error { message }) => anyhow::bail!("{message}"),
-        other => anyhow::bail!("Unerwartete Server-Antwort: {other:?}"),
+        other => anyhow::bail!("Unexpected server response: {other:?}"),
     };
 
     // UDP-Socket (std) fuer die Audio-Threads vorbereiten.
@@ -132,6 +134,7 @@ async fn run(
     udp.connect(peer)?;
     let _ = event_tx.send(NetEvent::Connected {
         my_id: client_id,
+        server_name,
         users,
         channels,
         udp_socket: Some(udp),
@@ -156,8 +159,8 @@ async fn run(
                         }
                         ctx.request_repaint();
                     }
-                    Ok(None) => anyhow::bail!("Server hat die Verbindung geschlossen"),
-                    Err(e) => anyhow::bail!("Netzwerkfehler: {e}"),
+                    Ok(None) => anyhow::bail!("The server closed the connection"),
+                    Err(e) => anyhow::bail!("Network error: {e}"),
                 }
             }
         }
@@ -168,7 +171,7 @@ async fn run(
             res = &mut reader_task => {
                 return match res {
                     Ok(r) => r,
-                    Err(e) => Err(anyhow::anyhow!("Empfangs-Task: {e}")),
+                    Err(e) => Err(anyhow::anyhow!("Receive task: {e}")),
                 };
             }
             cmd = cmd_rx.recv() => {
@@ -185,6 +188,9 @@ async fn run(
                                 ClientMessage::CreateChannel { name, kind, parent }
                             }
                             Command::DeleteChannel(channel_id) => ClientMessage::DeleteChannel { channel_id },
+                            Command::MoveChannel { channel_id, parent, index } => {
+                                ClientMessage::MoveChannel { channel_id, parent, index }
+                            }
                             Command::RenameChannel(channel_id, name) => {
                                 ClientMessage::RenameChannel { channel_id, name }
                             }
@@ -209,7 +215,7 @@ async fn run(
                         upload_backlog.fetch_sub(video_len, Ordering::Relaxed);
                         if let Err(e) = res {
                             reader_task.abort();
-                            anyhow::bail!("Netzwerkfehler beim Senden: {e}");
+                            anyhow::bail!("Network error while sending: {e}");
                         }
                     }
                 }
@@ -241,6 +247,7 @@ mod tests {
             }
         });
         let welcome = ServerMessage::Welcome {
+            server_name: "Fake".into(),
             client_id: 1,
             udp_token: 7,
             channels: vec![],
