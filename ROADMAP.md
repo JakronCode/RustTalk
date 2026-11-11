@@ -1,6 +1,6 @@
 # RustTalk – Roadmap
 
-Checklist of planned features, by priority. Status as of 2026-11-11 (v0.5.0, protocol v11). Categories A, B and C done.
+Checklist of planned features, by priority. Status as of 2026-11-11 (v0.6.0, protocol v12). Categories A, B, C done; D1-D3 done.
 
 ## A – Quick wins (WIP spots already visible in the UI)
 
@@ -28,7 +28,7 @@ Checklist of planned features, by priority. Status as of 2026-11-11 (v0.5.0, pro
 
 - [ ] Keine Portable mehr haben, sprich installieren und dann persistenten client haben
 	-> dazu natürlich auch die update function die sich die akutelleste version vom repo zieht
-- [ ] **D1 Echo cancellation (AEC)** – e.g. `webrtc-audio-processing`
-- [ ] **D2 Share audio with screen** – WASAPI loopback
-- [ ] **D3 Encryption** – QUIC (`quinn`) or TLS
+- [x] **D1 Echo cancellation (AEC)** – WebRTC AEC3 (pure Rust port `aec3`), switchable in Voice & Audio
+- [x] **D2 Share audio with screen** – WASAPI loopback, own RustTalk playback removed by a second AEC3, Opus music mode
+- [x] **D3 Encryption** – TLS (self-signed server certificate, pinned on first use) + ChaCha20-Poly1305 for audio packets
 - [ ] **D4 More efficient video** – H.264 / hardware encoding instead of MJPEG

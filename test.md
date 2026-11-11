@@ -2,6 +2,19 @@
 
 > Pflichtdokumentation aller Testläufe. Neueste oben.
 
+## 2026-11-11 (22) – D1–D3: Echo-Unterdrückung, Bildschirmton, Verschlüsselung (Protokoll v12, v0.6.0)
+
+**Client / Server:**
+- **D1 Echo-Unterdrückung** (`audio/aec.rs`): WebRTC AEC3 als reiner Rust-Port (`aec3`, kein C++-Build). Die Wiedergabe gibt jeden gemischten 48-kHz-Sample per lock-freiem Ring an den Encoder; pro 10 ms werden Mikrofon und Referenz durch Hochpass + AEC3 geschickt (eigenes RNNoise/AGC bleiben). Schalter „Echo cancellation“ (Standard an). Rechenzeit ~1,5 % (8 s Audio in 0,12 s).
+- **D2 Bildschirmton** (`audio/screen_audio.rs`): WASAPI-Loopback des Ausgabegeräts (cpal), eine zweite AEC3-Instanz entfernt die eigene RustTalk-Wiedergabe (sonst hörten alle die anderen Stimmen doppelt), Opus Musikmodus 96 kbit/s, Stille wird nicht gesendet. UDP-Flag `FLAG_SCREEN_AUDIO` (Server leitet unverändert weiter); Empfänger: eigener Decoder pro Person+Stream, Mute/Lautstärke pro Person gelten, kein Sprech-Indikator. Schalter „Share audio“ im Bildschirm-Dialog + Einstellungen (Standard an).
+- **D3 Verschlüsselung** (`shared/secure.rs`, `Server/tls.rs`): TCP über TLS (`rustls`, ring-Backend → nur C-Compiler nötig). Server erzeugt beim ersten Start ein selbstsigniertes Zertifikat neben der DB, loggt den Fingerprint; Client pinnt ihn beim ersten Verbinden (`known_servers`), ein anderes Zertifikat wird verweigert („The identity of … changed“, Button „Trust the new identity“), kein Auto-Reconnect in diesem Fall. Audio: Header v2 (28 Byte, 64-Bit-Zähler), ChaCha20-Poly1305 mit Sitzungsschlüssel aus dem `Welcome`; Server öffnet mit dem Schlüssel des Senders und versiegelt pro Empfänger neu; die UDP-Adresse wird erst nach gültigem Tag gelernt (vorher konnte ein gefälschtes Token die Audio-Adresse umbiegen). Settings > Advanced: Verschlüsselungsstatus, Fingerprint, bekannte Server („Forget“).
+
+**Tests:** Client 80 ✅ (neu: AEC entfernt ≥15 dB eines 40-ms-Echos und lässt Sprache ohne Wiedergabe durch, Mixer-Keys, verweigertes geändertes Zertifikat; manuell: Loopback öffnet ✅), Server 50 ✅ (neu: Zertifikat bleibt über Neustarts gleich), Integration 15 ✅ (alle jetzt über TLS + verschlüsseltes Audio-Relay; neu: Klartext-Client bekommt kein Welcome), Shared 16 ✅ (neu: Pakete verschlüsseln/manipulieren, Fingerprints).
+**Live geprüft:** Testserver + `test_client` + Debug-Client über TLS: „Connected encrypted“, Fingerprint = Server-Log, Server in `known_servers` gespeichert (Screenshot).
+**Nicht geprüft:** Echo-Unterdrückung und Bildschirmton mit echten Lautsprechern/Ton (hätte Testtöne auf deinem Rechner abgespielt), Zertifikatswarnung per Screenshot.
+
+---
+
 ## 2026-11-11 (21) – Kategorie C: Identitäten, Rollen, Kick/Ban/Verschieben, Invites, Audit-Log (Protokoll v11, v0.5.0)
 
 **Entscheidungen (Rückfrage):** Identitäten wie bei TeamSpeak statt nur Admin-Passwort; ohne Admin bleibt der Server offen wie bisher.
