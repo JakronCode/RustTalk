@@ -1,6 +1,6 @@
 [package]
 name = "rusttalk-server"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 
 [[bin]]
@@ -23,6 +23,8 @@ anyhow = "1"
 # GIF search (GIPHY) – the key stays on the server
 ureq = { version = "2", features = ["json"] }
 serde_json = "1"
+# Identity hashes
+sha2 = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

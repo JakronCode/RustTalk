@@ -120,7 +120,11 @@ impl RustTalkApp {
     fn connect_form(&mut self, ui: &mut egui::Ui) {
         let w = ui.available_width();
         theme::caption(ui, "Server address");
-        ui.add_sized([w, 32.0], egui::TextEdit::singleline(&mut self.config.server_address).hint_text("host or host:port"));
+        ui.add_sized([w, 32.0], egui::TextEdit::singleline(&mut self.config.server_address).hint_text("host, host:port or invite link"));
+        if let Some((_, code)) = super::moderation_ui::parse_invite_link(&self.config.server_address) {
+            let text = if code.is_some() { "Invite link - no password needed" } else { "RustTalk link" };
+            ui.label(egui::RichText::new(format!("{}  {text}", icons::regular::LINK)).size(12.0).color(theme::GREEN));
+        }
         ui.add_space(4.0);
         theme::caption(ui, "Username");
         ui.add_sized([w, 32.0], egui::TextEdit::singleline(&mut self.config.username));

@@ -76,13 +76,25 @@ struct Welcome {
     chat_history: Vec<ChatRecord>,
     settings: ServerSettings,
     gif_search: bool,
+    open_permissions: bool,
+}
+
+/// Stable test identity per name (64 hex chars).
+fn identity_for(name: &str) -> String {
+    let hex: String = name.bytes().map(|b| format!("{b:02x}")).collect();
+    format!("{hex:0<64}").chars().take(64).collect()
 }
 
 async fn connect(port: u16, name: &str, password: Option<String>) -> (Conn, Welcome) {
+    connect_with(port, name, password, None).await.expect("login")
+}
+
+/// Login; `Err(message)` if the server refuses.
+async fn connect_with(port: u16, name: &str, password: Option<String>, invite: Option<String>) -> Result<(Conn, Welcome), String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).await.expect("TCP connect");
     write_frame(
         &mut stream,
-        &ClientMessage::Hello { username: name.to_string(), protocol_version: PROTOCOL_VERSION, password },
+        &ClientMessage::Hello { username: name.to_string(), protocol_version: PROTOCOL_VERSION, password, identity: identity_for(name), invite },
     )
     .await
     .unwrap();
@@ -90,9 +102,10 @@ async fn connect(port: u16, name: &str, password: Option<String>) -> (Conn, Welc
     let mut conn = (reader, writer);
     let first: ServerMessage = read_frame(&mut conn.0).await.unwrap().expect("erste Nachricht");
     match first {
-        ServerMessage::Welcome { client_id, channels, users, spawn_log, chat_history, settings, gif_search, .. } => {
-            (conn, Welcome { client_id, channels, users, spawn_log, chat_history, settings, gif_search })
+        ServerMessage::Welcome { client_id, channels, users, spawn_log, chat_history, settings, gif_search, open_permissions, .. } => {
+            Ok((conn, Welcome { client_id, channels, users, spawn_log, chat_history, settings, gif_search, open_permissions }))
         }
+        ServerMessage::Error { message } => Err(message),
         other => panic!("kein Welcome erhalten: {other:?}"),
     }
 }
@@ -609,6 +622,126 @@ async fn gif_key_is_checked_and_search_is_cached() {
     assert!(wc.gif_search);
 }
 
+/// Waits for a message matching `pred` (skips others).
+async fn expect<F: Fn(&ServerMessage) -> bool>(conn: &mut Conn, what: &str, pred: F) -> ServerMessage {
+    for _ in 0..30 {
+        match recv(conn, 3000).await {
+            Some(m) if pred(&m) => return m,
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    panic!("{what} nicht erhalten");
+}
+
+#[tokio::test]
+async fn roles_kick_ban_and_audit() {
+    let port = free_port();
+    let _server = spawn_server(port, "");
+    wait_for_port(port);
+    let (mut a, wa) = connect(port, "alice", None).await;
+    let (mut b, _) = connect(port, "bob", None).await;
+    let (mut c, wc) = connect(port, "carol", None).await;
+    assert!(wa.open_permissions, "no admin yet: open");
+    let (alice, bob, carol) = (wa.client_id, wa.client_id + 1, wc.client_id);
+    for conn in [&mut a, &mut b, &mut c] {
+        drain(conn, 300).await;
+    }
+
+    // alice becomes the first admin -> everyone learns it, the server is closed now.
+    send(&mut a, &ClientMessage::ClaimAdmin { password: None }).await;
+    for conn in [&mut a, &mut b] {
+        expect(conn, "UserRoleChanged", |m| matches!(m, ServerMessage::UserRoleChanged { client_id, role: Role::Admin } if *client_id == alice)).await;
+        expect(conn, "PermissionsChanged", |m| matches!(m, ServerMessage::PermissionsChanged { open: false })).await;
+    }
+    drain(&mut c, 300).await;
+    // bob cannot claim (no admin_password) and may not manage channels anymore.
+    send(&mut b, &ClientMessage::ClaimAdmin { password: None }).await;
+    expect(&mut b, "Error", |m| matches!(m, ServerMessage::Error { .. })).await;
+    send(&mut b, &ClientMessage::CreateChannel { name: "x".into(), kind: ChannelKind::Text, parent: None }).await;
+    match expect(&mut b, "Error", |m| matches!(m, ServerMessage::Error { .. })).await {
+        ServerMessage::Error { message } => assert!(message.contains("Admin"), "{message}"),
+        _ => unreachable!(),
+    }
+
+    // bob -> moderator; he may kick carol but not alice.
+    send(&mut a, &ClientMessage::SetRole { client_id: bob, role: Role::Moderator }).await;
+    expect(&mut b, "bob Moderator", |m| matches!(m, ServerMessage::UserRoleChanged { client_id, role: Role::Moderator } if *client_id == bob)).await;
+    send(&mut b, &ClientMessage::Kick { client_id: alice, reason: String::new() }).await;
+    expect(&mut b, "Error (higher role)", |m| matches!(m, ServerMessage::Error { .. })).await;
+    send(&mut b, &ClientMessage::Kick { client_id: carol, reason: "spam".into() }).await;
+    match expect(&mut c, "Removed", |m| matches!(m, ServerMessage::Removed { .. })).await {
+        ServerMessage::Removed { reason, banned } => {
+            assert!(!banned);
+            assert!(reason.contains("bob") && reason.contains("spam"), "{reason}");
+        }
+        _ => unreachable!(),
+    }
+    expect(&mut a, "UserLeft carol", |m| matches!(m, ServerMessage::UserLeft { client_id } if *client_id == carol)).await;
+    assert!(recv(&mut c, 2000).await.is_none(), "carol's connection is closed");
+
+    // alice bans bob for 60 min -> he cannot come back until unbanned.
+    send(&mut a, &ClientMessage::Ban { client_id: bob, reason: "trolling".into(), minutes: Some(60) }).await;
+    expect(&mut b, "Removed (ban)", |m| matches!(m, ServerMessage::Removed { banned: true, .. })).await;
+    let err = connect_with(port, "bob", None, None).await.err().expect("banned");
+    assert!(err.contains("banned") && err.contains("trolling"), "{err}");
+
+    // Admin data: ban + audit log.
+    drain(&mut a, 300).await;
+    send(&mut a, &ClientMessage::RequestAdminData).await;
+    let ban_id = match expect(&mut a, "AdminData", |m| matches!(m, ServerMessage::AdminData { .. })).await {
+        ServerMessage::AdminData { roles, bans, audit, .. } => {
+            assert!(roles.iter().any(|r| r.name == "bob" && r.role == Role::Moderator), "{roles:?}");
+            assert_eq!(bans.len(), 1);
+            assert_eq!(bans[0].name, "bob");
+            let actions: Vec<String> = audit.iter().map(|e| format!("{}: {}", e.actor, e.action)).collect();
+            for want in ["alice: became admin", "bob: kicked carol (spam)", "alice: banned bob for 60 min (trolling)"] {
+                assert!(actions.iter().any(|a| a == want), "{want} fehlt in {actions:?}");
+            }
+            bans[0].id
+        }
+        _ => unreachable!(),
+    };
+    send(&mut a, &ClientMessage::Unban { ban_id }).await;
+    expect(&mut a, "AdminData after unban", |m| matches!(m, ServerMessage::AdminData { bans, .. } if bans.is_empty())).await;
+    // bob is back - and still moderator (the role hangs on his identity, not the session).
+    let (_b2, wb) = connect_with(port, "bob", None, None).await.expect("unbanned");
+    assert!(wb.users.iter().any(|u| u.name == "bob" && u.role == Role::Moderator));
+    assert!(!wb.open_permissions);
+}
+
+#[tokio::test]
+async fn invites_replace_the_password_and_admin_password_works() {
+    let port = free_port();
+    let _server = spawn_server(port, "password = \"pw\"
+admin_password = \"boss\"
+");
+    wait_for_port(port);
+    let (mut a, wa) = connect(port, "alice", Some("pw".into())).await;
+    drain(&mut a, 300).await;
+    send(&mut a, &ClientMessage::ClaimAdmin { password: None }).await; // open -> works
+    expect(&mut a, "admin", |m| matches!(m, ServerMessage::UserRoleChanged { client_id, role: Role::Admin } if *client_id == wa.client_id)).await;
+
+    send(&mut a, &ClientMessage::CreateInvite { max_uses: Some(1), hours: Some(24) }).await;
+    let code = match expect(&mut a, "InviteCreated", |m| matches!(m, ServerMessage::InviteCreated { .. })).await {
+        ServerMessage::InviteCreated { invite } => invite.code,
+        _ => unreachable!(),
+    };
+    // Invite instead of password - once.
+    let (_d, _) = connect_with(port, "dave", None, Some(code.to_lowercase())).await.expect("invite works");
+    let err = connect_with(port, "erin", None, Some(code.clone())).await.err().expect("used up");
+    assert!(err.contains("invite"), "{err}");
+    assert!(connect_with(port, "erin", None, None).await.is_err(), "no password");
+
+    // admin_password from server.toml makes erin admin even though alice already is.
+    let (mut e, we) = connect(port, "erin", Some("pw".into())).await;
+    drain(&mut e, 300).await;
+    send(&mut e, &ClientMessage::ClaimAdmin { password: Some("wrong".into()) }).await;
+    expect(&mut e, "Error", |m| matches!(m, ServerMessage::Error { .. })).await;
+    send(&mut e, &ClientMessage::ClaimAdmin { password: Some("boss".into()) }).await;
+    expect(&mut e, "erin admin", |m| matches!(m, ServerMessage::UserRoleChanged { client_id, role: Role::Admin } if *client_id == we.client_id)).await;
+}
+
 #[tokio::test]
 async fn passwort_schutz() {
     let port = free_port();
@@ -623,6 +756,8 @@ async fn passwort_schutz() {
             username: "eve".into(),
             protocol_version: PROTOCOL_VERSION,
             password: Some("falsch".into()),
+            identity: identity_for("eve"),
+            invite: None,
         },
     )
     .await

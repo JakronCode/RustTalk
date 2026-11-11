@@ -128,6 +128,8 @@ async fn run(args: &Args) -> Result<()> {
             username: args.name.clone(),
             protocol_version: PROTOCOL_VERSION,
             password: args.password.clone(),
+            identity: format!("{:032x}{:032x}", rand::random::<u128>(), rand::random::<u128>()),
+            invite: None,
         },
     )
     .await?;

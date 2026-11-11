@@ -20,6 +20,8 @@ pub const APP_NAME: &str = "RustTalk";
 const EXE_NAME: &str = "rusttalk.exe";
 const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\RustTalk";
 const AUMID_KEY: &str = r"Software\Classes\AppUserModelId\RustTalk.Client";
+/// `rusttalk://` links (invites) open the installed app.
+const PROTOCOL_KEY: &str = r"Software\Classes\rusttalk";
 
 /// How this exe runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +121,7 @@ pub fn install(desktop_shortcut: bool) -> Result<PathBuf> {
     }
     register_uninstall(&dir, &target, &ico)?;
     register_aumid(&png)?;
+    register_protocol(&target, &ico)?;
     Ok(target)
 }
 
@@ -128,6 +131,7 @@ pub fn uninstall(keep_settings: bool) -> Result<()> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let _ = hkcu.delete_subkey_all(UNINSTALL_KEY);
     let _ = hkcu.delete_subkey_all(AUMID_KEY);
+    let _ = hkcu.delete_subkey_all(PROTOCOL_KEY);
     for dir in [start_menu_dir(), desktop_dir()].into_iter().flatten() {
         let _ = std::fs::remove_file(dir.join("RustTalk.lnk"));
     }
@@ -158,6 +162,7 @@ pub fn refresh_installed() {
     let _ = std::fs::remove_file(dir.join("rusttalk.old.exe"));
     if let Ok((png, ico)) = write_icons(&dir) {
         let _ = register_aumid(&png);
+        let _ = register_protocol(&dir.join(EXE_NAME), &ico);
         let _ = register_uninstall(&dir, &dir.join(EXE_NAME), &ico);
     }
 }
@@ -211,6 +216,18 @@ fn register_uninstall(dir: &Path, exe: &Path, ico: &Path) -> Result<()> {
     key.set_value("NoModify", &1u32)?;
     key.set_value("NoRepair", &1u32)?;
     key.set_value("EstimatedSize", &size_kb)?;
+    Ok(())
+}
+
+fn register_protocol(exe: &Path, ico: &Path) -> Result<()> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (key, _) = hkcu.create_subkey(PROTOCOL_KEY)?;
+    key.set_value("", &"URL:RustTalk Protocol")?;
+    key.set_value("URL Protocol", &"")?;
+    let (icon, _) = hkcu.create_subkey(format!(r"{PROTOCOL_KEY}\DefaultIcon"))?;
+    icon.set_value("", &ico.to_string_lossy().to_string())?;
+    let (cmd, _) = hkcu.create_subkey(format!(r"{PROTOCOL_KEY}\shell\open\command"))?;
+    cmd.set_value("", &format!("\"{}\" \"%1\"", exe.display()))?;
     Ok(())
 }
 

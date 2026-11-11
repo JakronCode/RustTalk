@@ -17,6 +17,7 @@ mod channel_settings;
 mod connect;
 mod lifecycle;
 mod media_ui;
+mod moderation_ui;
 mod server_settings;
 mod settings;
 mod sidebar;
@@ -319,6 +320,16 @@ pub struct RustTalkApp {
     /// Fehler aus dem Kamera-Thread fuer die Anzeige im Kamera-Dialog.
     cam_error: Arc<Mutex<Option<String>>>,
     giphy: GifPicker,
+    /// No admin on the server yet: everyone may do everything.
+    open_permissions: bool,
+    /// Roles, bans, invites, audit log (Server Settings, admins).
+    admin: moderation_ui::AdminData,
+    /// Kick / ban dialog.
+    mod_dialog: Option<moderation_ui::ModDialog>,
+    /// We were kicked/banned: no automatic reconnect, show this reason.
+    removed: Option<String>,
+    /// Started via an invite link: connect right away.
+    connect_on_start: bool,
     /// Not installed yet: the whole window is the install screen.
     install_screen: Option<lifecycle::InstallScreen>,
     update: lifecycle::UpdateState,
@@ -345,6 +356,13 @@ impl RustTalkApp {
 
         let config = ClientConfig::load();
         cc.egui_ctx.set_zoom_factor(config.ui_scale.clamp(0.75, 1.5));
+        let mut config = config;
+        let launch_link = std::env::args().skip(1).find_map(|a| moderation_ui::parse_invite_link(&a));
+        let connect_on_start = launch_link.is_some();
+        if let Some((addr, code)) = launch_link {
+            config.server_address = addr;
+            config.invite = code;
+        }
         let control = Arc::new(AudioControl::new(config.voice_activation, config.vad_threshold));
         control.set_output_volume(config.output_volume);
         control.set_input_volume(config.input_volume);
@@ -418,6 +436,11 @@ impl RustTalkApp {
             local_preview_tex: None,
             cam_error: Arc::new(Mutex::new(None)),
             giphy: GifPicker::default(),
+            open_permissions: true,
+            admin: Default::default(),
+            mod_dialog: None,
+            removed: None,
+            connect_on_start,
             install_screen: (crate::install::mode() == crate::install::Mode::NotInstalled).then(lifecycle::InstallScreen::new),
             update: lifecycle::UpdateState::new(),
             toast_tx,
@@ -455,6 +478,11 @@ impl RustTalkApp {
     }
 
     fn start_connect(&mut self) {
+        // An invite link in the address field: address + invite code.
+        if let Some((addr, code)) = moderation_ui::parse_invite_link(&self.config.server_address) {
+            self.config.server_address = addr;
+            self.config.invite = code;
+        }
         self.set_status(format!("Connecting to {}...", self.config.server_address));
         self.control.set_vad_threshold(self.config.vad_threshold);
         self.control
@@ -498,6 +526,9 @@ impl RustTalkApp {
         self.chat_action = None;
         self.close_gif_picker();
         self.gif_available = false;
+        self.admin = Default::default();
+        self.mod_dialog = None;
+        self.open_permissions = true;
         self.gif_target = None;
         self.talking.lock().unwrap().clear();
         self.local_muted.lock().unwrap().clear();
@@ -558,6 +589,13 @@ impl RustTalkApp {
     /// Network thread ended. After a successful login this starts the
     /// automatic reconnect; a failed reconnect attempt schedules the next one.
     fn on_connection_lost(&mut self, reason: String) {
+        // Kicked or banned: no automatic reconnect.
+        if let Some(why) = self.removed.take() {
+            self.reconnect = None;
+            self.disconnect();
+            self.set_error(why);
+            return;
+        }
         let was_connected = self.connected;
         if was_connected && self.reconnect.is_none() {
             let me = self.users.get(&self.my_id);
@@ -744,12 +782,15 @@ impl RustTalkApp {
                 spawn_log,
                 chat_history,
                 gif_search,
+                open_permissions,
             } => {
                 if self.cmd_tx.is_none() {
                     return; // attempt was cancelled meanwhile; the net thread ends on its own
                 }
                 self.connected = true;
                 self.gif_available = gif_search;
+                self.open_permissions = open_permissions;
+                self.config.invite = None; // used
                 self.server_settings = settings;
                 self.my_id = my_id;
                 self.channels = channels.into_iter().map(|c| (c.id, c)).collect();
@@ -954,6 +995,29 @@ impl RustTalkApp {
                 }
             }
             ServerMessage::GifResults { query, offset, results, error } => self.on_gif_results(query, offset, results, error),
+            ServerMessage::UserRoleChanged { client_id, role } => {
+                if let Some(u) = self.users.get_mut(&client_id) {
+                    u.role = role;
+                }
+                if client_id == self.my_id {
+                    self.set_status(format!("You are now {}", role.label()));
+                    self.request_admin_data();
+                }
+            }
+            ServerMessage::PermissionsChanged { open } => {
+                self.open_permissions = open;
+                self.request_admin_data();
+            }
+            ServerMessage::Removed { reason, banned: _ } => {
+                self.removed = Some(reason);
+            }
+            ServerMessage::AdminData { roles, bans, invites, audit } => {
+                self.admin = moderation_ui::AdminData { roles, bans, invites, audit, loaded: true };
+            }
+            ServerMessage::InviteCreated { invite } => {
+                self.set_status(format!("Invite {} created - copy it under Server Settings > Invites", invite.code));
+                self.request_admin_data();
+            }
             ServerMessage::GifSearchChanged { available } => {
                 self.gif_available = available;
                 self.giphy.shown_query = None; // reload the picker
@@ -1028,6 +1092,9 @@ impl eframe::App for RustTalkApp {
             return;
         }
         self.poll_background(ctx);
+        if std::mem::take(&mut self.connect_on_start) && self.cmd_tx.is_none() {
+            self.start_connect();
+        }
         // Installed app: look for an update once per start.
         static CHECKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if self.config.check_updates
@@ -1081,6 +1148,7 @@ impl eframe::App for RustTalkApp {
         self.ui_server_settings(ctx);
         self.ui_confirm_delete(ctx);
         self.ui_confirm_delete_message(ctx);
+        self.ui_mod_dialog(ctx);
         self.ui_gif_picker(ctx);
         self.ui_camera_dialog(ctx);
         self.ui_screen_picker(ctx);
@@ -1141,6 +1209,7 @@ impl RustTalkApp {
             || self.show_new_channel
             || self.confirm_delete.is_some()
             || self.confirm_delete_msg.is_some()
+            || self.mod_dialog.is_some()
             || self.cam_dialog.is_some()
             || self.screen_picker.is_some();
         if !dialog_open {
@@ -1200,6 +1269,16 @@ impl RustTalkApp {
                         }
                         "new_channel" => self.open_new_channel(None, ChannelKind::Text),
                         "gif" => self.open_gif_picker(),
+                        "claim_admin" => {
+                            if let Some(tx) = &self.cmd_tx {
+                                let _ = tx.send(Command::Raw(rusttalk_shared::protocol::ClientMessage::ClaimAdmin { password: None }));
+                            }
+                        }
+                        "invite" => {
+                            if let Some(tx) = &self.cmd_tx {
+                                let _ = tx.send(Command::Raw(rusttalk_shared::protocol::ClientMessage::CreateInvite { max_uses: Some(5), hours: Some(24 * 7) }));
+                            }
+                        }
                         // Message actions on the last own / last other message of the selected channel.
                         "edit" | "delete" | "reply" => {
                             let want_own = what != "reply";
@@ -1219,6 +1298,10 @@ impl RustTalkApp {
                             "afk" => server_settings::ServerTab::Afk,
                             "messages" => server_settings::ServerTab::Messages,
                             "integrations" => server_settings::ServerTab::Integrations,
+                            "roles" => server_settings::ServerTab::Roles,
+                            "bans" => server_settings::ServerTab::Bans,
+                            "invites" => server_settings::ServerTab::Invites,
+                            "audit" => server_settings::ServerTab::AuditLog,
                             _ => server_settings::ServerTab::Overview,
                         }),
                         _ => {}

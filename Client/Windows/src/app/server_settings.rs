@@ -26,10 +26,10 @@ impl ServerTab {
         (ServerTab::Afk, icons::regular::MOON, "AFK", false),
         (ServerTab::Messages, icons::regular::CHAT_CENTERED_TEXT, "Messages", false),
         (ServerTab::Integrations, icons::regular::PLUGS_CONNECTED, "Integrations", false),
-        (ServerTab::Roles, icons::regular::SHIELD_CHECK, "Roles", true),
-        (ServerTab::Bans, icons::regular::PROHIBIT, "Bans", true),
-        (ServerTab::Invites, icons::regular::LINK, "Invites", true),
-        (ServerTab::AuditLog, icons::regular::LIST_MAGNIFYING_GLASS, "Audit Log", true),
+        (ServerTab::Roles, icons::regular::SHIELD_CHECK, "Roles", false),
+        (ServerTab::Bans, icons::regular::PROHIBIT, "Bans", false),
+        (ServerTab::Invites, icons::regular::LINK, "Invites", false),
+        (ServerTab::AuditLog, icons::regular::LIST_MAGNIFYING_GLASS, "Audit Log", false),
     ];
 }
 
@@ -40,12 +40,23 @@ pub(super) struct ServerSettingsDialog {
     error: Option<String>,
     /// Input for a new GIPHY key (sent on its own, not with "Save Changes").
     gif_key: String,
+    /// Admin password input (Roles tab).
+    admin_pw: String,
+    invite_form: super::moderation_ui::InviteForm,
 }
 
 impl RustTalkApp {
     pub(super) fn open_server_settings(&mut self, tab: ServerTab) {
         self.server_settings_dialog =
-            Some(ServerSettingsDialog { tab, draft: self.server_settings.clone(), error: None, gif_key: String::new() });
+            Some(ServerSettingsDialog {
+                tab,
+                draft: self.server_settings.clone(),
+                error: None,
+                gif_key: String::new(),
+                admin_pw: String::new(),
+                invite_form: Default::default(),
+            });
+        self.request_admin_data();
     }
 
     pub(super) fn ui_server_settings(&mut self, ctx: &egui::Context) {
@@ -82,6 +93,7 @@ impl RustTalkApp {
                             }
                             if resp.clicked() {
                                 dlg.tab = tab;
+                                self.request_admin_data();
                             }
                         }
                     });
@@ -97,16 +109,20 @@ impl RustTalkApp {
                                 ServerTab::Afk => self.server_afk(ui, &mut dlg),
                                 ServerTab::Messages => self.server_messages(ui, &mut dlg),
                                 ServerTab::Integrations => self.server_integrations(ui, &mut dlg),
-                                ServerTab::Roles => server_wip(ui, "Roles", "Create roles like Admin or Moderator and decide who may manage channels, move users or change these settings."),
-                                ServerTab::Bans => server_wip(ui, "Bans", "Ban users by name or address and see the ban list."),
-                                ServerTab::Invites => server_wip(ui, "Invites", "Create invite links that open RustTalk and connect directly to this server."),
-                                ServerTab::AuditLog => server_wip(ui, "Audit Log", "See who changed channels, settings or moved users."),
+                                ServerTab::Roles => self.server_roles(ui, &mut dlg.admin_pw),
+                                ServerTab::Bans => self.server_bans(ui),
+                                ServerTab::Invites => self.server_invites(ui, &mut dlg.invite_form),
+                                ServerTab::AuditLog => self.server_audit(ui),
                             }
                         });
                         if let Some(e) = &dlg.error {
                             ui.label(egui::RichText::new(e).color(theme::RED));
                         }
-                        let changed = dlg.draft != self.server_settings;
+                        let admin = self.can(rusttalk_shared::protocol::Role::Admin);
+                        let changed = admin && dlg.draft != self.server_settings;
+                        if !admin {
+                            ui.label(egui::RichText::new(format!("{}  Only admins can change server settings.", icons::regular::LOCK)).color(theme::MUTED));
+                        }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let save = ui.add_enabled(
                                 changed,
@@ -354,18 +370,6 @@ fn message_field(ui: &mut egui::Ui, label: &str, desc: &str, hint: &str, value: 
     ui.add(egui::TextEdit::singleline(value).hint_text(hint).char_limit(max).desired_width(f32::INFINITY));
 }
 
-fn server_wip(ui: &mut egui::Ui, title: &str, text: &str) {
-    theme::wip_banner(ui, &format!("{title} are not implemented yet."));
-    card(ui, |ui| {
-        ui.vertical_centered(|ui| {
-            ui.add_space(20.0);
-            ui.label(egui::RichText::new(icons::regular::WRENCH).size(40.0).color(theme::MUTED));
-            ui.label(egui::RichText::new(title).size(18.0).strong().color(theme::HEADER));
-            ui.label(egui::RichText::new(text).color(theme::MUTED));
-            ui.add_space(20.0);
-        });
-    });
-}
 
 /// Choose an image, crop to a square, scale to 128x128, encode as PNG.
 fn pick_icon() -> Result<Option<Vec<u8>>, String> {

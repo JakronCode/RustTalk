@@ -3933,7 +3933,7 @@ dependencies = [
 
 [[package]]
 name = "rusttalk-client"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "audiopus",
@@ -3941,6 +3941,7 @@ dependencies = [
  "device_query",
  "eframe",
  "egui-phosphor",
+ "getrandom 0.3.4",
  "image",
  "mslnk",
  "nnnoiseless",
@@ -3963,7 +3964,7 @@ dependencies = [
 
 [[package]]
 name = "rusttalk-server"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -3972,6 +3973,7 @@ dependencies = [
  "rusttalk-shared",
  "serde",
  "serde_json",
+ "sha2",
  "socket2",
  "tokio",
  "toml 0.8.23",
@@ -3982,7 +3984,7 @@ dependencies = [
 
 [[package]]
 name = "rusttalk-shared"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bincode",
  "serde",

@@ -2,6 +2,26 @@
 
 > Pflichtdokumentation aller Testläufe. Neueste oben.
 
+## 2026-11-11 (21) – Kategorie C: Identitäten, Rollen, Kick/Ban/Verschieben, Invites, Audit-Log (Protokoll v11, v0.5.0)
+
+**Entscheidungen (Rückfrage):** Identitäten wie bei TeamSpeak statt nur Admin-Passwort; ohne Admin bleibt der Server offen wie bisher.
+
+**Server** (`moderation.rs`, Persistenz als bincode-Blobs in der `settings`-Tabelle):
+- **Identität:** Client sendet im `Hello` ein 256-Bit-Geheimnis (hex), der Server speichert nur SHA-256 davon („uid“). Rollen und Bans hängen an der uid, Bans zusätzlich an der IP.
+- **Rollen:** Member / Moderator (verschieben, kicken, fremde Nachrichten löschen) / Admin (Channels, Einstellungen, GIF-Key, Rollen, Bans, Invites, Audit-Log). Prüfung zentral vor jeder Aktion (`required_role`), Ziel muss eine niedrigere Rolle haben, nicht man selbst; letzter Admin kann nicht entfernt werden.
+- **Offener Modus:** solange niemand Admin ist, darf jeder alles (Verhalten wie v0.4). „Become admin“ (`ClaimAdmin`) macht den ersten Admin; danach nur noch mit `admin_password` aus `server.toml`.
+- **Kick/Ban:** Ziel bekommt `Removed { reason, banned }`, Verbindung wird geschlossen; Ban mit Dauer (1 h … permanent) und Grund, Login meldet „You are banned … for N more minute(s): Grund“. Abgelaufene Bans fallen automatisch weg.
+- **Invites:** 8-stelliger Code, max. Nutzungen + Ablauf, ersetzt das Server-Passwort.
+- **Audit-Log:** Channels anlegen/löschen/umbenennen, Einstellungen, GIF-Key, Rollen, Kick, Ban, Unban, Verschieben, Invites (max. 500 Einträge).
+
+**Client:** Identität wird beim ersten Start erzeugt (`client_config.toml`), Rollen-Schild neben Namen, Rechtsklick auf Nutzer: Move to / Kick… / Ban… (Grund + Dauer) / Role, Server-Settings-Tabs **Roles** (offener Modus + „Become admin“, Admin-Login, Rollenliste), **Bans** (Unban), **Invites** (erstellen, kopieren, löschen), **Audit Log**. Nicht-Admins: Channel-Anlegen und „Save Changes“ gesperrt. Nach Kick/Ban kein Auto-Reconnect, Grund wird angezeigt. Invite-Links ins Adressfeld einfügen oder per `rusttalk://` öffnen (Installer registriert das Protokoll).
+
+**Tests:** Client 76 ✅ (neu: Identität, Invite-Links, Datumsformat), Server 49 ✅ (neu: uid-Hash, offener Modus/letzter Admin, Bans uid/IP/Ablauf, Invites, Audit-Cap, **Neustart behält Rollen/Bans/Invites/Audit**), Integration 14 ✅ (neu: `roles_kick_ban_and_audit`, `invites_replace_the_password_and_admin_password_works`), Shared 13 ✅.
+**Live geprüft (Testserver 7444 + `test_client` „Bob“, Screenshots):** Roles-Tab offen, „Become admin“ + Invite (Link `rusttalk://127.0.0.1:7444/…`), Audit-Log, Admin-Rolle nach Client-Neustart erhalten (Identität).
+**Nicht geprüft:** Rechtsklick-Menü/Kick-/Ban-Dialog per Maus, `rusttalk://`-Registrierung in einer echten Installation (Testlauf mit Deinstallation wurde vom Sicherheits-Check blockiert, da er Einstellungen löscht), Öffnen eines Links aus dem Browser.
+
+---
+
 ## 2026-11-11 (20) – Windows-Toasts, Installation statt portabel, Updater (v0.4.0)
 
 **Wünsche:** Desktop-Pop-ups (Windows-Toasts); keine portable Version mehr, sondern installieren + persistenter Client; Update-Funktion, die sich die aktuellste Version aus dem Repo holt.

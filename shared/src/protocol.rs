@@ -22,11 +22,14 @@
 //!     messages only, by name) -> `ChatEdited`/`ChatDeleted`.
 //! v10: GIF search through the server (`GifSearch` -> `GifResults`); the
 //!     GIPHY key is set per server (`SetGifKey`) and never sent to clients.
+//! v11: Identities (secret per client, server keeps a hash), roles
+//!     (Member/Moderator/Admin), kick/ban/move users, invites, audit log.
+//!     Without any admin the server is "open" (everyone may do everything).
 
 use serde::{Deserialize, Serialize};
 
 /// Aktuelle Protokollversion. Client und Server müssen übereinstimmen.
-pub const PROTOCOL_VERSION: u16 = 10;
+pub const PROTOCOL_VERSION: u16 = 11;
 
 /// Art eines Video-Streams. Ein User kann beide gleichzeitig senden.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -222,7 +225,79 @@ pub struct UserInfo {
     pub deafened: bool,
     /// Teilt gerade Kamera/Bildschirm.
     pub sharing: bool,
+    pub role: Role,
 }
+
+/// Role of an identity on a server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
+pub enum Role {
+    /// Chat, talk, join channels.
+    #[default]
+    Member,
+    /// + move and kick users, delete any message.
+    Moderator,
+    /// + channels, server settings, roles, bans, invites, audit log.
+    Admin,
+}
+
+impl Role {
+    pub fn label(self) -> &'static str {
+        match self {
+            Role::Member => "Member",
+            Role::Moderator => "Moderator",
+            Role::Admin => "Admin",
+        }
+    }
+}
+
+/// Length of the client identity secret (hex characters, 256 bit).
+pub const IDENTITY_HEX_LEN: usize = 64;
+
+/// Stored role of an identity (also for people who are offline).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleEntry {
+    /// Public id = hash of the identity secret.
+    pub uid: String,
+    /// Last known name.
+    pub name: String,
+    pub role: Role,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BanInfo {
+    pub id: u64,
+    pub name: String,
+    pub uid: Option<String>,
+    pub ip: Option<String>,
+    pub reason: String,
+    /// Unix seconds.
+    pub created: u64,
+    /// Unix seconds; None = permanent.
+    pub until: Option<u64>,
+    pub by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InviteInfo {
+    pub code: String,
+    pub created: u64,
+    /// Unix seconds; None = never expires.
+    pub expires: Option<u64>,
+    /// None = unlimited.
+    pub max_uses: Option<u32>,
+    pub uses: u32,
+    pub by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditEntry {
+    pub timestamp: u64,
+    pub actor: String,
+    pub action: String,
+}
+
+/// Max. length of a kick/ban reason.
+pub const MAX_REASON_LEN: usize = 200;
 
 /// Client -> Server
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,6 +307,10 @@ pub enum ClientMessage {
         username: String,
         protocol_version: u16,
         password: Option<String>,
+        /// Secret identity (hex, `IDENTITY_HEX_LEN`). The server stores only a hash.
+        identity: String,
+        /// Invite code (replaces the server password).
+        invite: Option<String>,
     },
     JoinChannel {
         channel_id: u64,
@@ -286,6 +365,50 @@ pub enum ClientMessage {
     SetGifKey {
         key: Option<String>,
     },
+    /// Become admin: works without password while the server has no admin,
+    /// otherwise with `admin_password` from server.toml.
+    ClaimAdmin {
+        password: Option<String>,
+    },
+    /// Admin: set the role of a connected user.
+    SetRole {
+        client_id: u64,
+        role: Role,
+    },
+    /// Admin: set the role of a stored identity (also offline).
+    SetRoleByUid {
+        uid: String,
+        role: Role,
+    },
+    /// Moderator: move a user into a channel.
+    MoveUser {
+        client_id: u64,
+        channel_id: u64,
+    },
+    /// Moderator: disconnect a user.
+    Kick {
+        client_id: u64,
+        reason: String,
+    },
+    /// Admin: ban identity + IP of a user (minutes: None = permanent).
+    Ban {
+        client_id: u64,
+        reason: String,
+        minutes: Option<u32>,
+    },
+    Unban {
+        ban_id: u64,
+    },
+    /// Admin: new invite (hours: None = no expiry).
+    CreateInvite {
+        max_uses: Option<u32>,
+        hours: Option<u32>,
+    },
+    DeleteInvite {
+        code: String,
+    },
+    /// Admin: roles, bans, invites and audit log (-> `AdminData`).
+    RequestAdminData,
     SetMuteState {
         muted: bool,
         deafened: bool,
@@ -325,6 +448,8 @@ pub enum ServerMessage {
         chat_history: Vec<ChatRecord>,
         /// The server has a GIPHY key (GIF button works).
         gif_search: bool,
+        /// No admin yet: everyone may do everything.
+        open_permissions: bool,
     },
     UserJoined {
         user: UserInfo,
@@ -385,6 +510,29 @@ pub enum ServerMessage {
     /// GIF search was switched on/off (key set or removed).
     GifSearchChanged {
         available: bool,
+    },
+    UserRoleChanged {
+        client_id: u64,
+        role: Role,
+    },
+    /// First admin exists (false) / last admin gone (true).
+    PermissionsChanged {
+        open: bool,
+    },
+    /// You were kicked or banned; the connection closes right after.
+    Removed {
+        reason: String,
+        banned: bool,
+    },
+    AdminData {
+        roles: Vec<RoleEntry>,
+        bans: Vec<BanInfo>,
+        invites: Vec<InviteInfo>,
+        audit: Vec<AuditEntry>,
+    },
+    /// Answer to `CreateInvite` (only to the creator).
+    InviteCreated {
+        invite: InviteInfo,
     },
     MuteStateChanged {
         client_id: u64,
@@ -450,11 +598,15 @@ mod tests {
                 username: "jb".into(),
                 protocol_version: PROTOCOL_VERSION,
                 password: Some("geheim".into()),
+                identity: "a".repeat(IDENTITY_HEX_LEN),
+                invite: None,
             },
             ClientMessage::Hello {
                 username: "ohne passwort".into(),
                 protocol_version: PROTOCOL_VERSION,
                 password: None,
+                identity: String::new(),
+                invite: Some("CODE".into()),
             },
             ClientMessage::JoinChannel { channel_id: 42 },
             ClientMessage::CreateChannel {
@@ -472,6 +624,16 @@ mod tests {
             ClientMessage::GifSearch { query: "cat".into(), offset: 24 },
             ClientMessage::SetGifKey { key: Some("abc".into()) },
             ClientMessage::SetGifKey { key: None },
+            ClientMessage::ClaimAdmin { password: Some("pw".into()) },
+            ClientMessage::SetRole { client_id: 2, role: Role::Moderator },
+            ClientMessage::SetRoleByUid { uid: "ab".into(), role: Role::Member },
+            ClientMessage::MoveUser { client_id: 2, channel_id: 3 },
+            ClientMessage::Kick { client_id: 2, reason: "afk".into() },
+            ClientMessage::Ban { client_id: 2, reason: "spam".into(), minutes: Some(60) },
+            ClientMessage::Unban { ban_id: 1 },
+            ClientMessage::CreateInvite { max_uses: Some(5), hours: None },
+            ClientMessage::DeleteInvite { code: "XYZ".into() },
+            ClientMessage::RequestAdminData,
             ClientMessage::SetMuteState { muted: true, deafened: false },
             ClientMessage::SetSharing { sharing: true },
             ClientMessage::VideoFrame { kind: VideoKind::Camera, data: vec![1, 2, 3] },
@@ -489,6 +651,7 @@ mod tests {
     #[test]
     fn server_message_roundtrip() {
         let user = UserInfo {
+            role: Role::Moderator,
             id: 1,
             name: "alice".into(),
             channel_id: 1,
@@ -525,6 +688,7 @@ mod tests {
                 spawn_log: vec![entry.clone()],
                 chat_history: vec![record],
                 gif_search: true,
+                open_permissions: false,
             },
             ServerMessage::UserJoined { user: user.clone() },
             ServerMessage::UserLeft { client_id: 1 },
@@ -562,6 +726,27 @@ mod tests {
                 error: None,
             },
             ServerMessage::GifSearchChanged { available: true },
+            ServerMessage::UserRoleChanged { client_id: 1, role: Role::Admin },
+            ServerMessage::PermissionsChanged { open: false },
+            ServerMessage::Removed { reason: "spam".into(), banned: true },
+            ServerMessage::AdminData {
+                roles: vec![RoleEntry { uid: "ab".into(), name: "anna".into(), role: Role::Admin }],
+                bans: vec![BanInfo {
+                    id: 1,
+                    name: "eve".into(),
+                    uid: Some("cd".into()),
+                    ip: Some("10.0.0.9".into()),
+                    reason: "spam".into(),
+                    created: 5,
+                    until: None,
+                    by: "anna".into(),
+                }],
+                invites: vec![InviteInfo { code: "XYZ".into(), created: 1, expires: Some(9), max_uses: Some(3), uses: 1, by: "anna".into() }],
+                audit: vec![AuditEntry { timestamp: 1, actor: "anna".into(), action: "kicked eve".into() }],
+            },
+            ServerMessage::InviteCreated {
+                invite: InviteInfo { code: "XYZ".into(), created: 1, expires: None, max_uses: None, uses: 0, by: "anna".into() },
+            },
             ServerMessage::MuteStateChanged { client_id: 1, muted: true, deafened: true },
             ServerMessage::SharingChanged { client_id: 1, sharing: true },
             ServerMessage::VideoFrame { from_id: 1, kind: VideoKind::Screen, data: vec![9, 8, 7] },

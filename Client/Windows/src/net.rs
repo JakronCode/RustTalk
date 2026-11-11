@@ -32,6 +32,8 @@ pub enum Command {
     GifSearch { query: String, offset: u32 },
     /// Set / remove the server's GIPHY key.
     SetGifKey(Option<String>),
+    /// Any other client message (moderation, roles, invites).
+    Raw(ClientMessage),
     SetMute { muted: bool, deafened: bool },
     SetSharing(bool),
     VideoFrame(VideoKind, Vec<u8>),
@@ -54,6 +56,8 @@ pub enum NetEvent {
         chat_history: Vec<ChatRecord>,
         /// The server offers GIF search.
         gif_search: bool,
+        /// No admin on the server yet: everyone may do everything.
+        open_permissions: bool,
     },
     Message(ServerMessage),
     /// Fehler/Infos aus lokalen Hintergrund-Threads (z. B. Kamera).
@@ -123,6 +127,8 @@ async fn run(
             username: cfg.username.clone(),
             protocol_version: PROTOCOL_VERSION,
             password: cfg.server_password.clone(),
+            identity: cfg.identity.clone(),
+            invite: cfg.invite.clone(),
         },
     )
     .await?;
@@ -130,9 +136,9 @@ async fn run(
     let first: Option<ServerMessage> = timeout(CONNECT_TIMEOUT, read_frame(&mut reader))
         .await
         .map_err(|_| anyhow::anyhow!("Timeout while waiting for the server"))??;
-    let (client_id, settings, udp_token, channels, users, spawn_log, chat_history, gif_search) = match first {
-        Some(ServerMessage::Welcome { client_id, udp_token, channels, users, spawn_log, chat_history, settings, gif_search }) => {
-            (client_id, settings, udp_token, channels, users, spawn_log, chat_history, gif_search)
+    let (client_id, settings, udp_token, channels, users, spawn_log, chat_history, gif_search, open_permissions) = match first {
+        Some(ServerMessage::Welcome { client_id, udp_token, channels, users, spawn_log, chat_history, settings, gif_search, open_permissions }) => {
+            (client_id, settings, udp_token, channels, users, spawn_log, chat_history, gif_search, open_permissions)
         }
         Some(ServerMessage::Error { message }) => anyhow::bail!("{message}"),
         other => anyhow::bail!("Unexpected server response: {other:?}"),
@@ -151,6 +157,7 @@ async fn run(
         spawn_log,
         chat_history,
         gif_search,
+        open_permissions,
     });
 
     // Lesen in eigenem Task: `read_frame` ist NICHT abbruchsicher. Lief es
@@ -214,6 +221,7 @@ async fn run(
                             Command::DeleteChat(message_id) => ClientMessage::DeleteChat { message_id },
                             Command::GifSearch { query, offset } => ClientMessage::GifSearch { query, offset },
                             Command::SetGifKey(key) => ClientMessage::SetGifKey { key },
+                            Command::Raw(msg) => msg,
                             Command::SetMute { muted, deafened } => {
                                 ClientMessage::SetMuteState { muted, deafened }
                             }
@@ -272,6 +280,7 @@ mod tests {
             spawn_log: vec![],
             chat_history: vec![],
             gif_search: false,
+            open_permissions: true,
         };
         write_frame(&mut w, &welcome).await.unwrap();
         for i in 0..N {

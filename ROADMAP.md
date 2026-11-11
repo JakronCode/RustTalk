@@ -1,6 +1,6 @@
 # RustTalk – Roadmap
 
-Checklist of planned features, by priority. Status as of 2026-11-11 (v0.4.0, protocol v10). Categories A and B done.
+Checklist of planned features, by priority. Status as of 2026-11-11 (v0.5.0, protocol v11). Categories A, B and C done.
 
 ## A – Quick wins (WIP spots already visible in the UI)
 
@@ -20,9 +20,9 @@ Checklist of planned features, by priority. Status as of 2026-11-11 (v0.4.0, pro
 
 ## C – Moderation & permissions
 
-- [ ] **C1 Roles & permissions** – at minimum an admin password from `server.toml`
-- [ ] **C2 Kick / ban / move users** – incl. ban list and audit log
-- [ ] **C3 Invite links** – `rusttalk://` URL handler
+- [x] **C1 Roles & permissions** – identities (secret per client, hash on the server), Member / Moderator / Admin, open server until the first admin, `admin_password` in `server.toml`
+- [x] **C2 Kick / ban / move users** – right-click menu, bans by identity + IP with duration and reason, ban list, audit log
+- [x] **C3 Invite links** – `rusttalk://host:port/CODE` (uses/expiry, replaces the server password), URL handler registered by the installer
 
 ## D – Larger projects
 

@@ -20,6 +20,7 @@ Lightweight voice chat in Rust — a Discord-style client with a TeamSpeak-style
 - **GIF picker (GIPHY), Discord style:** trending on open, search while typing, two-column grid, click = send. One GIPHY key per **server** (Server Settings > Integrations) – members enter nothing; the server searches and caches, the key never leaves it
 - **Notifications:** Windows pop-ups (toasts) for new messages while RustTalk is in the background (click opens the channel, text can be hidden), sounds for join/leave/messages/mute, taskbar flash
 - **Installer + updater:** the downloaded exe installs itself per user; in-app updates from the GitHub releases
+- **Roles & moderation (TeamSpeak-style identities):** every client has a secret identity (the server only stores its hash); roles Member / Moderator / Admin hang on it, not on the name. Right-click a user: move, kick, ban (identity + IP, with duration and reason), set role. Server Settings: roles, bans, **invites** (`rusttalk://host:port/CODE`, limited uses/expiry, replace the server password), **audit log**. Without any admin the server stays open (everyone may do everything); the first admin is made via "Become admin" or `admin_password` in `server.toml`
 - **SQLite persistence** (server): channels (incl. order), chat history (retention 10k per channel) and the lobby log survive restarts
 - **Client UI:** dark mode, procedural logo, saved servers, settings in a separate window, mic level meter, avatars with talking ring, per-user local mute and **per-user volume** 0–200 % (right click, remembered by name), **input volume**, UI scaling
 - **Auto-reconnect:** on connection loss the client retries with backoff (1 s … 30 s) and rejoins the last voice channel with the same mute state
@@ -30,7 +31,7 @@ Lightweight voice chat in Rust — a Discord-style client with a TeamSpeak-style
 
 ### Not yet (WIP)
 
-- Toggle-mute/deafen hotkeys, roles/bans/invites — see [ROADMAP.md](ROADMAP.md)
+- Toggle-mute/deafen hotkeys and more — see [ROADMAP.md](ROADMAP.md)
 
 ---
 
@@ -60,7 +61,7 @@ Client (Windows)                          Server (Debian)
                                             └──────────────┘
 ```
 
-- **TCP:** login, channels, chat (text + images), events, video frames (camera/screen), channel order, server settings, chat edits/replies, GIF search (protocol v10)
+- **TCP:** login, channels, chat (text + images), events, video frames (camera/screen), channel order, server settings, chat edits/replies, GIF search, roles/moderation/invites (protocol v11)
 - **UDP:** Opus audio only (20 ms frames, token + sequence header); the server relays 1:1 within the voice channel
 - **Lobby:** everyone lands here when connecting; talking is blocked on the server; join log
 
@@ -144,7 +145,7 @@ bash Server/Test_Scripts/e2e_local.sh
 ## Project structure
 
 ```
-├── shared/            # protocol (v10), framing, UDP packet format
+├── shared/            # protocol (v11), framing, UDP packet format
 ├── Server/            # Linux server (+ test_client CLI, integration tests, deploy/, Test_Scripts/)
 │   └── src/           #   main, config, state (RAM), db (SQLite), tcp, udp
 └── Client/Windows/    # egui client
@@ -156,7 +157,7 @@ bash Server/Test_Scripts/e2e_local.sh
 
 ## Known limitations
 
-- No encryption/authentication apart from the optional server password (meant for LAN use)
+- No encryption (meant for LAN use): passwords and the identity are sent in plain text
 - No echo cancellation → headphones recommended
 - GIFs need one free GIPHY API key per server (developers.giphy.com), entered under Server Settings > Integrations
 - Video is MJPEG over TCP: "High" needs ~5–6 MB/s per screen stream and viewer — meant for LAN (pick "Balanced" on Wi-Fi). On very large monitors (3440×1440) "High" reaches ~19 fps

@@ -5,6 +5,7 @@
 mod config;
 mod db;
 mod gif;
+mod moderation;
 mod state;
 mod tcp;
 mod udp;

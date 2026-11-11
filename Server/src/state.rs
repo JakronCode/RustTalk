@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rusttalk_shared::protocol::{
+use rusttalk_shared::protocol::{AuditEntry, BanInfo, InviteInfo, Role, RoleEntry,
     ChannelInfo, ChannelKind, ChannelPlacement, ChatRecord, LogEntry, ServerMessage, UserInfo,
     ServerSettings, MAX_CHAT_LEN, MAX_ICON_BYTES, MAX_NAME_LEN, MAX_SERVER_MESSAGE_LEN, MAX_WELCOME_LEN,
     SPAWN_LOG_CAP, DEFAULT_AFK_NOTICE, fill_template,
@@ -47,6 +47,10 @@ pub struct Client {
     pub video_backlog: Arc<AtomicUsize>,
     /// Eingehende Nachrichten für diesen Client (vom Writer-Task gesendet).
     pub tx: mpsc::UnboundedSender<ServerMessage>,
+    /// Public id (hash of the identity secret).
+    pub uid: String,
+    pub ip: Option<String>,
+    pub role: Role,
 }
 
 impl Client {
@@ -58,6 +62,7 @@ impl Client {
             muted: self.muted,
             deafened: self.deafened,
             sharing: self.sharing,
+            role: self.role,
         }
     }
 }
@@ -94,6 +99,8 @@ pub struct State {
     /// GIPHY key for the GIF search (None = GIF button off for everyone).
     gif_key: Option<String>,
     gif_cache: crate::gif::GifCache,
+    moderation: crate::moderation::Moderation,
+    admin_password: Option<String>,
 }
 
 fn now_secs() -> u64 {
@@ -126,6 +133,8 @@ impl State {
             next_message_id: 1 << 48,
             gif_key: None,
             gif_cache: Default::default(),
+            moderation: Default::default(),
+            admin_password: cfg.admin_password.clone().filter(|p| !p.is_empty()),
         };
 
         let spawn_entries: Vec<_> =
@@ -206,6 +215,12 @@ impl State {
                 state.settings = saved;
             }
             state.gif_key = db.load_gif_key()?;
+            state.moderation = crate::moderation::Moderation::load(
+                db.load_blob::<Vec<RoleEntry>>("mod_roles")?.unwrap_or_default(),
+                db.load_blob::<Vec<BanInfo>>("mod_bans")?.unwrap_or_default(),
+                db.load_blob::<Vec<InviteInfo>>("mod_invites")?.unwrap_or_default(),
+                db.load_blob::<Vec<AuditEntry>>("mod_audit")?.unwrap_or_default(),
+            );
             if state.settings.afk_channel.is_some_and(|id| !state.is_afk_target(id)) {
                 state.settings.afk_channel = None;
             }
@@ -615,8 +630,13 @@ impl State {
     }
 
     /// Deletes an own message. Returns its channel.
-    pub fn delete_message(&mut self, editor: &str, id: u64) -> Result<u64, String> {
-        let channel_id = self.own_message(editor, id)?;
+    /// Deletes an own message (`any`: moderators may delete every message).
+    pub fn delete_message(&mut self, editor: &str, id: u64, any: bool) -> Result<u64, String> {
+        let channel_id = if any {
+            self.message_meta(id).map(|(ch, _)| ch).ok_or("Message does not exist (anymore)")?
+        } else {
+            self.own_message(editor, id)?
+        };
         if let Some(db) = &self.db {
             db.delete_message(id).map_err(|e| format!("Could not delete the message: {e}"))?;
         }
@@ -645,9 +665,25 @@ impl State {
         self.clients.len() >= self.max_clients
     }
 
+    /// Like [`add_client_identified`](Self::add_client_identified) with an anonymous identity (tests).
+    pub fn add_client(&mut self, name: String, tx: mpsc::UnboundedSender<ServerMessage>) -> (u64, u64) {
+        let uid = format!("anon-{}", self.next_client_id);
+        self.add_client_identified(name, tx, uid, None)
+    }
+
     /// Registriert einen neuen Client und bringt ihn in den Spawn-Channel.
     /// Gibt (client_id, udp_token) zurück.
-    pub fn add_client(&mut self, name: String, tx: mpsc::UnboundedSender<ServerMessage>) -> (u64, u64) {
+    pub fn add_client_identified(
+        &mut self,
+        name: String,
+        tx: mpsc::UnboundedSender<ServerMessage>,
+        uid: String,
+        ip: Option<String>,
+    ) -> (u64, u64) {
+        let role = self.moderation.role_of(&uid);
+        if self.moderation.touch_name(&uid, &name).is_some() {
+            self.save_moderation();
+        }
         let id = self.next_client_id;
         self.next_client_id += 1;
         let mut token = rand::random::<u64>();
@@ -669,9 +705,223 @@ impl State {
                 muted_since: None,
                 video_backlog: Arc::new(AtomicUsize::new(0)),
                 tx,
+                uid,
+                ip,
+                role,
             },
         );
         (id, token)
+    }
+
+    // --- Permissions, roles, kick/ban, invites, audit ---
+
+    fn save_moderation(&self) {
+        if let Some(db) = &self.db {
+            let now = now_secs();
+            let m = &self.moderation;
+            let res = db
+                .save_blob("mod_roles", &m.roles())
+                .and_then(|_| db.save_blob("mod_bans", &m.bans()))
+                .and_then(|_| db.save_blob("mod_invites", &m.invites(now)))
+                .and_then(|_| db.save_blob("mod_audit", &m.audit().into_iter().rev().collect::<Vec<_>>()));
+            if let Err(e) = res {
+                tracing::warn!("Moderation speichern fehlgeschlagen: {e}");
+            }
+        }
+    }
+
+    /// No admin yet: everyone may do everything.
+    pub fn permissions_open(&self) -> bool {
+        self.moderation.is_open()
+    }
+
+    pub fn can(&self, client_id: u64, need: Role) -> bool {
+        self.clients.get(&client_id).is_some_and(|c| self.moderation.allowed(c.role, need))
+    }
+
+    /// Ban, then server password (an invite code replaces it).
+    pub fn check_login(&mut self, uid: &str, ip: Option<&str>, password: &Option<String>, invite: Option<&str>) -> Result<(), String> {
+        let now = now_secs();
+        let (ban, expired) = self.moderation.find_ban(uid, ip, now);
+        if !expired.is_empty() {
+            self.save_moderation();
+        }
+        if let Some(b) = ban {
+            let until = match b.until {
+                Some(t) => format!(" for {} more minute(s)", (t.saturating_sub(now) + 59) / 60),
+                None => " permanently".to_string(),
+            };
+            let reason = if b.reason.is_empty() { String::new() } else { format!(": {}", b.reason) };
+            return Err(format!("You are banned from this server{until}{reason}"));
+        }
+        let invite_ok = invite.filter(|c| !c.trim().is_empty()).is_some_and(|code| {
+            let used = self.moderation.use_invite(code, now).is_some();
+            if used {
+                self.save_moderation();
+            }
+            used
+        });
+        if invite_ok {
+            return Ok(());
+        }
+        if invite.is_some_and(|c| !c.trim().is_empty()) && self.password.is_some() {
+            return Err("Invalid or expired invite".to_string());
+        }
+        self.check_password(password).map_err(str::to_string)
+    }
+
+    fn name_of(&self, client_id: u64) -> String {
+        self.clients.get(&client_id).map(|c| c.name.clone()).unwrap_or_else(|| "?".into())
+    }
+
+    /// Adds an audit log entry written by `client_id`.
+    pub fn audit(&mut self, client_id: u64, action: String) {
+        let actor = self.name_of(client_id);
+        self.moderation.log(&actor, action, now_secs());
+        self.save_moderation();
+    }
+
+    /// Applies a role to the stored identity and all connected clients with it.
+    /// Returns the changed clients and the new "open" state if it flipped.
+    fn apply_role(&mut self, uid: &str, name: &str, role: Role) -> Result<(Vec<(u64, Role)>, Option<bool>), String> {
+        let was_open = self.moderation.is_open();
+        self.moderation.set_role(uid, name, role)?;
+        let mut changed = Vec::new();
+        for c in self.clients.values_mut().filter(|c| c.uid == uid) {
+            c.role = role;
+            changed.push((c.id, role));
+        }
+        self.save_moderation();
+        let now_open = self.moderation.is_open();
+        Ok((changed, (was_open != now_open).then_some(now_open)))
+    }
+
+    /// Become admin: free while nobody is admin, else with `admin_password`.
+    pub fn claim_admin(&mut self, client_id: u64, password: Option<&str>) -> Result<(Vec<(u64, Role)>, Option<bool>), String> {
+        let c = self.clients.get(&client_id).ok_or("Client does not exist")?;
+        if c.role == Role::Admin {
+            return Err("You are already an admin".to_string());
+        }
+        let ok = self.moderation.is_open() || (self.admin_password.is_some() && password == self.admin_password.as_deref());
+        if !ok {
+            return Err(if self.admin_password.is_some() { "Wrong admin password" } else { "This server already has an admin" }.to_string());
+        }
+        let (uid, name) = (c.uid.clone(), c.name.clone());
+        let res = self.apply_role(&uid, &name, Role::Admin)?;
+        self.audit(client_id, "became admin".to_string());
+        Ok(res)
+    }
+
+    /// Admin: role of a connected user.
+    pub fn set_role_of_client(&mut self, actor: u64, target: u64, role: Role) -> Result<(Vec<(u64, Role)>, Option<bool>), String> {
+        let t = self.clients.get(&target).ok_or("User is not online")?;
+        let (uid, name) = (t.uid.clone(), t.name.clone());
+        let res = self.apply_role(&uid, &name, role)?;
+        self.audit(actor, format!("set the role of {name} to {}", role.label()));
+        Ok(res)
+    }
+
+    /// Admin: role of a stored identity (Roles list, also offline).
+    pub fn set_role_of_uid(&mut self, actor: u64, uid: &str, role: Role) -> Result<(Vec<(u64, Role)>, Option<bool>), String> {
+        let name = self
+            .moderation
+            .roles()
+            .into_iter()
+            .find(|r| r.uid == uid)
+            .map(|r| r.name)
+            .or_else(|| self.clients.values().find(|c| c.uid == uid).map(|c| c.name.clone()))
+            .ok_or("Unknown user")?;
+        let res = self.apply_role(uid, &name, role)?;
+        self.audit(actor, format!("set the role of {name} to {}", role.label()));
+        Ok(res)
+    }
+
+    /// May `actor` act on `target` with an action that needs `need`?
+    /// (Not on yourself, not on someone with the same or a higher role – unless the server is open.)
+    pub fn check_target(&self, actor: u64, target: u64, need: Role) -> Result<(), String> {
+        if actor == target {
+            return Err("You cannot do that to yourself".to_string());
+        }
+        let a = self.clients.get(&actor).ok_or("Client does not exist")?;
+        let t = self.clients.get(&target).ok_or("User is not online")?;
+        if !self.moderation.allowed(a.role, need) {
+            return Err(format!("You need the {} role for that", need.label()));
+        }
+        if !self.moderation.is_open() && t.role >= a.role {
+            return Err(format!("{} has the same or a higher role", t.name));
+        }
+        Ok(())
+    }
+
+    /// Moderator: move a user. Returns (target name, channel name).
+    pub fn move_user(&mut self, actor: u64, target: u64, channel_id: u64) -> Result<(String, String), String> {
+        self.check_target(actor, target, Role::Moderator)?;
+        self.move_client(target, channel_id)?;
+        let (who, ch) = (self.name_of(target), self.channels.get(&channel_id).map(|c| c.name.clone()).unwrap_or_default());
+        self.audit(actor, format!("moved {who} to {ch}"));
+        Ok((who, ch))
+    }
+
+    /// Moderator: kick. Sends `Removed` and drops the connection.
+    pub fn kick(&mut self, actor: u64, target: u64, reason: &str) -> Result<(), String> {
+        self.check_target(actor, target, Role::Moderator)?;
+        let reason = clamp_reason(reason);
+        let who = self.name_of(target);
+        let by = self.name_of(actor);
+        let text = if reason.is_empty() { format!("Kicked by {by}") } else { format!("Kicked by {by}: {reason}") };
+        self.send_to(target, &ServerMessage::Removed { reason: text, banned: false });
+        self.remove_client(target); // drops the sender -> the connection closes after the message
+        self.audit(actor, if reason.is_empty() { format!("kicked {who}") } else { format!("kicked {who} ({reason})") });
+        Ok(())
+    }
+
+    /// Admin: ban identity + IP, then kick.
+    pub fn ban(&mut self, actor: u64, target: u64, reason: &str, minutes: Option<u32>) -> Result<BanInfo, String> {
+        self.check_target(actor, target, Role::Admin)?;
+        let reason = clamp_reason(reason);
+        let t = self.clients.get(&target).ok_or("User is not online")?;
+        let (name, uid, ip) = (t.name.clone(), t.uid.clone(), t.ip.clone());
+        let by = self.name_of(actor);
+        let ban = self.moderation.add_ban(&name, Some(uid), ip, &reason, minutes, &by, now_secs());
+        let dur = match minutes {
+            Some(m) => format!("for {m} min"),
+            None => "permanently".to_string(),
+        };
+        let text = if reason.is_empty() { format!("Banned {dur} by {by}") } else { format!("Banned {dur} by {by}: {reason}") };
+        self.send_to(target, &ServerMessage::Removed { reason: text, banned: true });
+        self.remove_client(target);
+        self.audit(actor, format!("banned {name} {dur}{}", if reason.is_empty() { String::new() } else { format!(" ({reason})") }));
+        Ok(ban)
+    }
+
+    pub fn unban(&mut self, actor: u64, ban_id: u64) -> Result<(), String> {
+        let ban = self.moderation.unban(ban_id).ok_or("Ban does not exist")?;
+        self.audit(actor, format!("unbanned {}", ban.name));
+        Ok(())
+    }
+
+    pub fn create_invite(&mut self, actor: u64, max_uses: Option<u32>, hours: Option<u32>) -> InviteInfo {
+        let by = self.name_of(actor);
+        let inv = self.moderation.create_invite(max_uses.map(|m| m.min(10_000)), hours.map(|h| h.min(24 * 365)), &by, now_secs());
+        self.audit(actor, format!("created invite {}", inv.code));
+        inv
+    }
+
+    pub fn delete_invite(&mut self, actor: u64, code: &str) -> Result<(), String> {
+        if !self.moderation.delete_invite(code) {
+            return Err("Invite does not exist".to_string());
+        }
+        self.audit(actor, format!("deleted invite {code}"));
+        Ok(())
+    }
+
+    pub fn admin_data(&self) -> ServerMessage {
+        ServerMessage::AdminData {
+            roles: self.moderation.roles(),
+            bans: self.moderation.bans(),
+            invites: self.moderation.invites(now_secs()),
+            audit: self.moderation.audit(),
+        }
     }
 
     pub fn remove_client(&mut self, id: u64) -> Option<Client> {
@@ -1260,6 +1510,37 @@ kind = "spawn"
     }
 
     #[test]
+    fn roles_bans_invites_and_audit_survive_restart() {
+        let (path, cfg) = temp_db_cfg("moderation", "");
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx2, _rx2) = mpsc::unbounded_channel();
+        {
+            let mut st = State::new(&cfg).unwrap();
+            let (a, _) = st.add_client_identified("anna".into(), tx, "uid-anna".into(), Some("10.0.0.1".into()));
+            let (e, _) = st.add_client_identified("eve".into(), tx2, "uid-eve".into(), Some("10.0.0.9".into()));
+            st.claim_admin(a, None).unwrap();
+            st.ban(a, e, "spam", None).unwrap();
+            st.create_invite(a, Some(3), None);
+        } // restart
+        let mut st = State::new(&cfg).unwrap();
+        assert!(!st.permissions_open(), "admin is remembered");
+        let (tx3, _rx3) = mpsc::unbounded_channel();
+        let (id, _) = st.add_client_identified("Anna".into(), tx3, "uid-anna".into(), None);
+        assert_eq!(st.client(id).unwrap().role, Role::Admin, "role by identity, new name is fine");
+        assert!(st.check_login("uid-eve", None, &None, None).unwrap_err().contains("banned"));
+        assert!(st.check_login("someone", Some("10.0.0.9"), &None, None).is_err(), "IP ban too");
+        match st.admin_data() {
+            ServerMessage::AdminData { roles, invites, audit, .. } => {
+                assert_eq!(roles[0].name, "Anna", "name updated");
+                assert_eq!(invites.len(), 1);
+                assert!(audit.iter().any(|e| e.action.starts_with("banned eve")));
+            }
+            _ => unreachable!(),
+        }
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn renamed_config_channel_does_not_duplicate_after_restart() {
         // Frueherer Bug: Config-Channel umbenannt -> nach Neustart doppelt.
         let (path, cfg) =
@@ -1414,9 +1695,9 @@ kind = "spawn"
         assert_eq!(st.edit_message("anna", a, "  hi!  ").unwrap(), (text, "hi!".to_string()));
         assert!(st.edit_message("anna", a, "   ").is_err(), "empty");
         assert!(st.edit_message("anna", a, &"x".repeat(MAX_CHAT_LEN + 1)).is_err());
-        assert!(st.delete_message("anna", b).is_err(), "not own");
-        assert_eq!(st.delete_message("anna", a).unwrap(), text);
-        assert!(st.delete_message("anna", a).is_err(), "already gone");
+        assert!(st.delete_message("anna", b, false).is_err(), "not own");
+        assert_eq!(st.delete_message("anna", a, false).unwrap(), text);
+        assert!(st.delete_message("anna", a, false).is_err(), "already gone");
         assert_eq!(st.valid_reply(text, Some(a)), None, "deleted");
     }
 
@@ -1511,4 +1792,9 @@ kind = "spawn"
         assert_eq!(st2.settings(), &s);
         std::fs::remove_file(&path).ok();
     }
+}
+
+/// Kick/ban reasons: trimmed, one line, max. `MAX_REASON_LEN` characters.
+fn clamp_reason(reason: &str) -> String {
+    reason.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(rusttalk_shared::protocol::MAX_REASON_LEN).collect()
 }

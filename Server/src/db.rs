@@ -159,6 +159,26 @@ impl Db {
         Ok(())
     }
 
+    // --- Moderation lists (roles, bans, invites, audit) as bincode blobs ---
+
+    pub fn load_blob<T: serde::de::DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
+        let row = self.conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get::<_, Vec<u8>>(0));
+        match row {
+            Ok(bytes) => Ok(bincode::deserialize(&bytes).ok()),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn save_blob<T: serde::Serialize>(&self, key: &str, value: &T) -> Result<()> {
+        let blob = bincode::serialize(value)?;
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
+            params![key, blob],
+        )?;
+        Ok(())
+    }
+
     // --- GIPHY key (stored apart from ServerSettings: never sent to clients) ---
 
     pub fn load_gif_key(&self) -> Result<Option<String>> {

@@ -73,6 +73,10 @@ pub struct ServerConfig {
     /// Optionales Server-Passwort (MVP: Klartext in der Config, LAN-Einsatz).
     #[serde(default)]
     pub password: Option<String>,
+    /// Makes whoever enters it (Server Settings > Roles) an admin. Optional;
+    /// without any admin the server is open (everyone may do everything).
+    #[serde(default)]
+    pub admin_password: Option<String>,
     /// SQLite-Persistenz fuer Channels, Chat-Verlauf und Spawn-Log.
     #[serde(default)]
     pub persist_state: bool,

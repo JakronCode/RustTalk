@@ -65,9 +65,10 @@ async fn handle_connection(stream: TcpStream, peer: SocketAddr, state: SharedSta
     let hello: Option<ClientMessage> = tokio::time::timeout(HELLO_TIMEOUT, read_frame(&mut reader))
         .await
         .context("Hello-Timeout")??;
-    let Some(ClientMessage::Hello { username, protocol_version, password }) = hello else {
+    let Some(ClientMessage::Hello { username, protocol_version, password, identity, invite }) = hello else {
         bail!("erste Nachricht war kein Hello");
     };
+    let ip = peer.ip().to_string();
 
     // 2. Pre-Login-Checks. Fehler werden als Error-Frame gesendet, dann beendet.
     if protocol_version != PROTOCOL_VERSION {
@@ -77,11 +78,16 @@ async fn handle_connection(stream: TcpStream, peer: SocketAddr, state: SharedSta
         let _ = write_frame(&mut writer, &ServerMessage::Error { message: msg }).await;
         bail!("Protokollversion {protocol_version} abgelehnt ({peer})");
     }
+    let Some(uid) = crate::moderation::uid_from_identity(&identity) else {
+        let msg = "Invalid identity - please update RustTalk".to_string();
+        let _ = write_frame(&mut writer, &ServerMessage::Error { message: msg }).await;
+        bail!("Ungueltige Identitaet ({peer})");
+    };
     // MutexGuard vor dem await wieder fallen lassen (Send-Safety).
     let login_error: Option<String> = {
-        let st = state.lock().unwrap();
-        if let Err(msg) = st.check_password(&password) {
-            Some(msg.to_string())
+        let mut st = state.lock().unwrap();
+        if let Err(msg) = st.check_login(&uid, Some(&ip), &password, invite.as_deref()) {
+            Some(msg)
         } else if st.is_full() {
             Some("Server is full".to_string())
         } else {
@@ -100,7 +106,7 @@ async fn handle_connection(stream: TcpStream, peer: SocketAddr, state: SharedSta
     let (client_id, username, video_backlog) = {
         let mut st = state.lock().unwrap();
         let username = sanitize_username(&username, st.next_client_id_hint());
-        let (id, token) = st.add_client(username.clone(), tx);
+        let (id, token) = st.add_client_identified(username.clone(), tx, uid, Some(ip));
         let welcome = ServerMessage::Welcome {
             settings: st.settings().clone(),
             client_id: id,
@@ -110,6 +116,7 @@ async fn handle_connection(stream: TcpStream, peer: SocketAddr, state: SharedSta
             spawn_log: st.spawn_log(),
             chat_history: st.chat_history(),
             gif_search: st.gif_available(),
+            open_permissions: st.permissions_open(),
         };
         let client = st.client(id).expect("frisch registrierter Client");
         let user = client.info();
@@ -215,9 +222,71 @@ async fn message_loop(
 
         // Lock nur fuer die State-Aenderung halten (Sends sind synchron, kein await).
         let mut st = state.lock().unwrap();
+        if let Some(need) = required_role(&msg) {
+            if !st.can(client_id, need) {
+                st.send_to(client_id, &ServerMessage::Error { message: format!("You need the {} role for that", need.label()) });
+                continue;
+            }
+        }
         match msg {
             // Handled above (outside the lock).
             ClientMessage::GifSearch { .. } | ClientMessage::SetGifKey { .. } => {}
+            ClientMessage::ClaimAdmin { password } => match st.claim_admin(client_id, password.as_deref()) {
+                Ok(change) => broadcast_roles(&st, change),
+                Err(e) => st.send_to(client_id, &ServerMessage::Error { message: e }),
+            },
+            ClientMessage::SetRole { client_id: target, role } => match st.set_role_of_client(client_id, target, role) {
+                Ok(change) => broadcast_roles(&st, change),
+                Err(e) => st.send_to(client_id, &ServerMessage::Error { message: e }),
+            },
+            ClientMessage::SetRoleByUid { uid, role } => match st.set_role_of_uid(client_id, &uid, role) {
+                Ok(change) => {
+                    broadcast_roles(&st, change);
+                    let data = st.admin_data();
+                    st.send_to(client_id, &data);
+                }
+                Err(e) => st.send_to(client_id, &ServerMessage::Error { message: e }),
+            },
+            ClientMessage::MoveUser { client_id: target, channel_id } => match st.move_user(client_id, target, channel_id) {
+                Ok((_, channel)) => {
+                    st.broadcast(&ServerMessage::UserMoved { client_id: target, channel_id });
+                    let by = st.client(client_id).map(|c| c.name.clone()).unwrap_or_default();
+                    st.send_to(target, &ServerMessage::Notice { message: format!("{by} moved you to {channel}") });
+                }
+                Err(e) => st.send_to(client_id, &ServerMessage::Error { message: e }),
+            },
+            ClientMessage::Kick { client_id: target, reason } => {
+                if let Err(e) = st.kick(client_id, target, &reason) {
+                    st.send_to(client_id, &ServerMessage::Error { message: e });
+                }
+            }
+            ClientMessage::Ban { client_id: target, reason, minutes } => {
+                if let Err(e) = st.ban(client_id, target, &reason, minutes) {
+                    st.send_to(client_id, &ServerMessage::Error { message: e });
+                }
+            }
+            ClientMessage::Unban { ban_id } => match st.unban(client_id, ban_id) {
+                Ok(()) => {
+                    let data = st.admin_data();
+                    st.send_to(client_id, &data);
+                }
+                Err(e) => st.send_to(client_id, &ServerMessage::Error { message: e }),
+            },
+            ClientMessage::CreateInvite { max_uses, hours } => {
+                let invite = st.create_invite(client_id, max_uses, hours);
+                st.send_to(client_id, &ServerMessage::InviteCreated { invite });
+            }
+            ClientMessage::DeleteInvite { code } => match st.delete_invite(client_id, &code) {
+                Ok(()) => {
+                    let data = st.admin_data();
+                    st.send_to(client_id, &data);
+                }
+                Err(e) => st.send_to(client_id, &ServerMessage::Error { message: e }),
+            },
+            ClientMessage::RequestAdminData => {
+                let data = st.admin_data();
+                st.send_to(client_id, &data);
+            }
             ClientMessage::Hello { .. } => {
                 st.send_to(client_id, &ServerMessage::Error {
                     message: "Already logged in".to_string(),
@@ -230,12 +299,16 @@ async fn message_loop(
             },
             ClientMessage::CreateChannel { name, kind, parent } => {
                 match st.create_channel(&name, kind, parent) {
-                    Ok(channel) => st.broadcast(&ServerMessage::ChannelCreated { channel }),
+                    Ok(channel) => {
+                        st.audit(client_id, format!("created channel {}", channel.name));
+                        st.broadcast(&ServerMessage::ChannelCreated { channel });
+                    }
                     Err(e) => st.send_to(client_id, &ServerMessage::Error { message: e }),
                 }
             }
             ClientMessage::DeleteChannel { channel_id } => match st.delete_channel(channel_id) {
                 Ok(moved) => {
+                    st.audit(client_id, format!("deleted channel #{channel_id}"));
                     let spawn_id = st.spawn_channel_id();
                     for uid in moved {
                         st.broadcast(&ServerMessage::UserMoved { client_id: uid, channel_id: spawn_id });
@@ -251,12 +324,18 @@ async fn message_loop(
                 }
             }
             ClientMessage::UpdateServerSettings { settings } => match st.update_settings(settings) {
-                Ok(settings) => st.broadcast(&ServerMessage::ServerSettingsChanged { settings }),
+                Ok(settings) => {
+                    st.audit(client_id, "changed the server settings".to_string());
+                    st.broadcast(&ServerMessage::ServerSettingsChanged { settings });
+                }
                 Err(e) => st.send_to(client_id, &ServerMessage::Error { message: e }),
             },
             ClientMessage::RenameChannel { channel_id, name } => {
                 match st.rename_channel(channel_id, &name) {
-                    Ok(()) => st.broadcast(&ServerMessage::ChannelRenamed { channel_id, name }),
+                    Ok(()) => {
+                        st.audit(client_id, format!("renamed a channel to {name}"));
+                        st.broadcast(&ServerMessage::ChannelRenamed { channel_id, name });
+                    }
                     Err(e) => st.send_to(client_id, &ServerMessage::Error { message: e }),
                 }
             }
@@ -305,7 +384,8 @@ async fn message_loop(
             }
             ClientMessage::DeleteChat { message_id } => {
                 let name = st.client(client_id).map(|c| c.name.clone()).unwrap_or_default();
-                match st.delete_message(&name, message_id) {
+                let any = st.can(client_id, Role::Moderator);
+                match st.delete_message(&name, message_id, any) {
                     Ok(channel_id) => st.broadcast(&ServerMessage::ChatDeleted { channel_id, message_id }),
                     Err(e) => st.send_to(client_id, &ServerMessage::Error { message: e }),
                 }
@@ -409,10 +489,18 @@ fn spawn_gif_search(state: SharedState, client_id: u64, query: String, offset: u
 
 /// Sets or removes the GIPHY key. A new key is tested with one request first.
 fn spawn_set_gif_key(state: SharedState, client_id: u64, key: Option<String>) {
+    {
+        let st = state.lock().unwrap();
+        if !st.can(client_id, Role::Admin) {
+            st.send_to(client_id, &ServerMessage::Error { message: "You need the Admin role for that".to_string() });
+            return;
+        }
+    }
     let key = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
     let Some(key) = key else {
         let mut st = state.lock().unwrap();
         st.set_gif_key(None);
+        st.audit(client_id, "removed the GIPHY key".to_string());
         info!("GIF-Suche deaktiviert (Client {client_id})");
         st.broadcast(&ServerMessage::GifSearchChanged { available: false });
         return;
@@ -432,6 +520,7 @@ fn spawn_set_gif_key(state: SharedState, client_id: u64, key: Option<String>) {
             Ok(trending) => {
                 st.set_gif_key(Some(key));
                 st.gif_store("", 0, trending);
+                st.audit(client_id, "set the GIPHY key".to_string());
                 info!("GIF-Suche aktiviert (Client {client_id})");
                 st.broadcast(&ServerMessage::GifSearchChanged { available: true });
                 st.send_to(client_id, &ServerMessage::Notice { message: "GIF search is now active for everyone".to_string() });
@@ -439,4 +528,35 @@ fn spawn_set_gif_key(state: SharedState, client_id: u64, key: Option<String>) {
             Err(e) => st.send_to(client_id, &ServerMessage::Error { message: format!("Key not saved: {e}") }),
         }
     });
+}
+
+/// Role a message needs (None = everyone).
+fn required_role(msg: &ClientMessage) -> Option<Role> {
+    use ClientMessage as M;
+    match msg {
+        M::CreateChannel { .. }
+        | M::DeleteChannel { .. }
+        | M::MoveChannel { .. }
+        | M::RenameChannel { .. }
+        | M::UpdateServerSettings { .. }
+        | M::SetRole { .. }
+        | M::SetRoleByUid { .. }
+        | M::Ban { .. }
+        | M::Unban { .. }
+        | M::CreateInvite { .. }
+        | M::DeleteInvite { .. }
+        | M::RequestAdminData => Some(Role::Admin),
+        M::MoveUser { .. } | M::Kick { .. } => Some(Role::Moderator),
+        _ => None,
+    }
+}
+
+/// Tells everyone about changed roles (and the open/closed switch).
+fn broadcast_roles(st: &crate::state::State, (changed, open): (Vec<(u64, Role)>, Option<bool>)) {
+    for (client_id, role) in changed {
+        st.broadcast(&ServerMessage::UserRoleChanged { client_id, role });
+    }
+    if let Some(open) = open {
+        st.broadcast(&ServerMessage::PermissionsChanged { open });
+    }
 }

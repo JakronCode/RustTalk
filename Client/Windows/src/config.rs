@@ -55,6 +55,13 @@ pub struct ClientConfig {
     /// Playback volume for everyone (1.0 = 100 %, max 2.0).
     #[serde(default = "default_one")]
     pub output_volume: f32,
+    /// Secret identity (64 hex chars, created on first start). Roles and bans
+    /// on servers hang on it - keep it private, don't share this file.
+    #[serde(default)]
+    pub identity: String,
+    /// Invite code for the next connect (from an invite link; not saved).
+    #[serde(skip)]
+    pub invite: Option<String>,
     /// Windows pop-up for new messages while RustTalk is in the background.
     #[serde(default = "default_true")]
     pub desktop_notifications: bool,
@@ -128,6 +135,8 @@ impl Default for ClientConfig {
             ui_scale: 1.0,
             show_timestamps: true,
             output_volume: 1.0,
+            identity: String::new(),
+            invite: None,
             desktop_notifications: true,
             notification_preview: true,
             check_updates: true,
@@ -152,10 +161,32 @@ impl ClientConfig {
 
     /// Laedt die Config; bei fehlender/kaputter Datei: Defaults.
     pub fn load() -> Self {
-        std::fs::read_to_string(Self::path())
+        let mut cfg: Self = std::fs::read_to_string(Self::path())
             .ok()
             .and_then(|text| toml::from_str(&text).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if cfg.ensure_identity() {
+            cfg.save();
+        }
+        cfg
+    }
+
+    /// Creates the identity secret if missing. Returns true if it was created.
+    pub fn ensure_identity(&mut self) -> bool {
+        let valid = self.identity.len() == rusttalk_shared::protocol::IDENTITY_HEX_LEN && self.identity.chars().all(|c| c.is_ascii_hexdigit());
+        if valid {
+            return false;
+        }
+        let mut bytes = [0u8; 32];
+        if getrandom::fill(&mut bytes).is_err() {
+            // Practically impossible; fall back to time + address entropy.
+            let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+            for (i, b) in bytes.iter_mut().enumerate() {
+                *b = ((seed >> ((i % 16) * 8)) as u8) ^ (i as u8).wrapping_mul(97);
+            }
+        }
+        self.identity = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        true
     }
 
     /// Speichert die Config (Fehler werden nur geloggt).
@@ -201,6 +232,8 @@ mod tests {
             ui_scale: 1.0,
             show_timestamps: true,
             output_volume: 1.0,
+            identity: "ab".repeat(32),
+            invite: Some("NOT-SAVED".into()),
             desktop_notifications: false,
             notification_preview: false,
             check_updates: false,
@@ -227,7 +260,22 @@ mod tests {
         assert!(!back.animate_gifs);
         assert!(!back.flash_taskbar && !back.sound_leave && back.sound_join);
         assert!(!back.desktop_notifications && !back.notification_preview && !back.check_updates);
+        assert_eq!(back.identity, "ab".repeat(32));
+        assert_eq!(back.invite, None, "invite codes are not saved");
         assert_eq!(back.user_volumes.get("anna"), Some(&1.5));
+    }
+
+    #[test]
+    fn identity_is_created_once() {
+        let mut cfg = ClientConfig::default();
+        assert!(cfg.ensure_identity());
+        assert_eq!(cfg.identity.len(), 64);
+        let first = cfg.identity.clone();
+        assert!(!cfg.ensure_identity(), "kept");
+        assert_eq!(cfg.identity, first);
+        let mut other = ClientConfig::default();
+        other.ensure_identity();
+        assert_ne!(other.identity, first, "random");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "rusttalk-client"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 
 [[bin]]
@@ -30,6 +30,8 @@ tauri-winrt-notification = "0.8"
 winreg = "0.55"
 mslnk = "0.1"
 sha2 = "0.10"
+# Identity secret
+getrandom = "0.3"
 audiopus = "0.2"
 ringbuf = "0.4"
 tokio = { version = "1", features = ["net", "time", "io-util", "sync", "rt", "macros"] }

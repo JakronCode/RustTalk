@@ -138,12 +138,15 @@ impl RustTalkApp {
                     self.open_server_settings(server_settings::ServerTab::Overview);
                 }
                 ui.separator();
-                if menu_item(ui, icons::regular::PLUS_CIRCLE, "Create Channel", theme::TEXT).clicked() {
-                    self.open_new_channel(None, ChannelKind::Text);
-                }
-                if menu_item(ui, icons::regular::FOLDER_PLUS, "Create Category", theme::TEXT).clicked() {
-                    self.open_new_channel(None, ChannelKind::Category);
-                }
+                let admin = self.can(rusttalk_shared::protocol::Role::Admin);
+                ui.add_enabled_ui(admin, |ui| {
+                    if menu_item(ui, icons::regular::PLUS_CIRCLE, "Create Channel", theme::TEXT).on_disabled_hover_text("Only admins").clicked() {
+                        self.open_new_channel(None, ChannelKind::Text);
+                    }
+                    if menu_item(ui, icons::regular::FOLDER_PLUS, "Create Category", theme::TEXT).on_disabled_hover_text("Only admins").clicked() {
+                        self.open_new_channel(None, ChannelKind::Category);
+                    }
+                });
                 ui.separator();
                 if menu_item(ui, icons::regular::GEAR_SIX, "App Settings", theme::TEXT).clicked() {
                     self.open_settings(SettingsPage::Voice);
@@ -621,6 +624,9 @@ impl RustTalkApp {
         if user.sharing {
             icon_at(icons::regular::BROADCAST, theme::GREEN, "Live (camera or screen)");
         }
+        if user.role != rusttalk_shared::protocol::Role::Member {
+            icon_at(icons::regular::SHIELD_CHECK, super::moderation_ui::role_color(user.role), user.role.label());
+        }
 
         if !me {
             resp.context_menu(|ui| {
@@ -653,6 +659,7 @@ impl RustTalkApp {
                 if (pct - 100.0).abs() > 0.5 && ui.small_button("Reset to 100 %").clicked() {
                     self.set_user_volume(user.id, &user.name, 1.0);
                 }
+                self.moderation_menu(ui, user);
             });
         }
     }
