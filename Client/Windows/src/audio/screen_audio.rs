@@ -17,7 +17,8 @@ use audiopus::{Application, Bitrate, Channels, SampleRate, Signal};
 use cpal::traits::DeviceTrait;
 use ringbuf::traits::{Consumer, Split};
 use ringbuf::{HeapProd, HeapRb};
-use rusttalk_shared::audio_packet::{encode_to_vec, AudioHeader, FLAG_SCREEN_AUDIO, FRAME_SAMPLES, SAMPLE_RATE};
+use rusttalk_shared::audio_packet::{seal_packet, AudioHeader, FLAG_SCREEN_AUDIO, FRAME_SAMPLES, SAMPLE_RATE};
+use rusttalk_shared::secure::{PacketCipher, DIR_TO_SERVER};
 
 use super::aec::{EchoCanceller, AEC_FRAME};
 use super::encoder::rms;
@@ -45,7 +46,7 @@ impl Drop for ScreenAudio {
 }
 
 impl ScreenAudio {
-    pub fn start(udp: UdpSocket, token: u64, output_device: Option<&str>, tap: RenderTap) -> Result<Self> {
+    pub fn start(udp: UdpSocket, token: u64, cipher: Arc<PacketCipher>, output_device: Option<&str>, tap: RenderTap) -> Result<Self> {
         let device = super::playback::pick_output_device(output_device)?;
         let supported = device.default_output_config().context("Output device has no format")?;
         let config = supported.config();
@@ -61,7 +62,7 @@ impl ScreenAudio {
             .name("screen-audio".into())
             .spawn({
                 let stop = stop.clone();
-                move || encode_loop(cons, render_cons, udp, token, stop)
+                move || encode_loop(cons, render_cons, udp, token, cipher, stop)
             })
             .context("screen audio thread")?;
         Ok(Self { _stream: stream, stop, tap })
@@ -73,6 +74,7 @@ fn encode_loop(
     mut render: ringbuf::HeapCons<f32>,
     udp: UdpSocket,
     token: u64,
+    cipher: Arc<PacketCipher>,
     stop: Arc<AtomicBool>,
 ) {
     let encoder = match Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Audio) {
@@ -119,7 +121,7 @@ fn encode_loop(
         if let Ok(len) = encoder.encode_float(&frame[..], &mut opus) {
             let mut header = AudioHeader::new(token, seq, ts);
             header.flags |= FLAG_SCREEN_AUDIO;
-            let _ = udp.send(&encode_to_vec(&header, &opus[..len]));
+            let _ = udp.send(&seal_packet(&header, &cipher, DIR_TO_SERVER, &opus[..len]));
             seq = seq.wrapping_add(1);
         }
     }

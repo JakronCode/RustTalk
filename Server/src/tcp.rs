@@ -41,13 +41,25 @@ fn configure_socket(stream: &TcpStream) {
     }
 }
 
-pub async fn run_listener(state: SharedState, bind: &str) -> Result<()> {
+/// The TLS stream of one client.
+type Conn = tokio_rustls::server::TlsStream<TcpStream>;
+
+pub async fn run_listener(state: SharedState, bind: &str, tls: Arc<rustls::ServerConfig>) -> Result<()> {
     let listener = TcpListener::bind(bind).await.with_context(|| format!("TCP-Bind an {bind}"))?;
-    info!("TCP-Steuerkanal lauscht auf {bind}");
+    let acceptor = tokio_rustls::TlsAcceptor::from(tls);
+    info!("TCP-Steuerkanal (TLS) lauscht auf {bind}");
     loop {
         let (stream, peer) = listener.accept().await?;
         let state = state.clone();
+        let acceptor = acceptor.clone();
         tokio::spawn(async move {
+            stream.set_nodelay(true).ok();
+            configure_socket(&stream);
+            let stream = match tokio::time::timeout(HELLO_TIMEOUT, acceptor.accept(stream)).await {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => return debug!("TLS-Handshake {peer} fehlgeschlagen: {e}"),
+                Err(_) => return debug!("TLS-Handshake {peer}: Timeout"),
+            };
             match handle_connection(stream, peer, state).await {
                 Ok(()) => debug!("Verbindung {peer} beendet"),
                 Err(e) => debug!("Verbindung {peer} beendet: {e:#}"),
@@ -56,9 +68,7 @@ pub async fn run_listener(state: SharedState, bind: &str) -> Result<()> {
     }
 }
 
-async fn handle_connection(stream: TcpStream, peer: SocketAddr, state: SharedState) -> Result<()> {
-    stream.set_nodelay(true).ok();
-    configure_socket(&stream);
+async fn handle_connection(stream: Conn, peer: SocketAddr, state: SharedState) -> Result<()> {
     let (mut reader, mut writer) = tokio::io::split(stream);
 
     // 1. Hello mit Timeout erwarten.
@@ -117,10 +127,15 @@ async fn handle_connection(stream: TcpStream, peer: SocketAddr, state: SharedSta
             chat_history: st.chat_history(),
             gif_search: st.gif_available(),
             open_permissions: st.permissions_open(),
+            udp_key: Vec::new(), // filled below
         };
         let client = st.client(id).expect("frisch registrierter Client");
         let user = client.info();
         let video_backlog = client.video_backlog.clone();
+        let mut welcome = welcome;
+        if let ServerMessage::Welcome { udp_key, .. } = &mut welcome {
+            *udp_key = st.client(id).map(|c| c.udp_key.clone()).unwrap_or_default();
+        }
         st.send_to(id, &welcome);
         st.broadcast(&ServerMessage::UserJoined { user });
         // Join im Spawn-Log dokumentieren (persistiert serverseitig).
@@ -171,7 +186,7 @@ async fn handle_connection(stream: TcpStream, peer: SocketAddr, state: SharedSta
 /// Endet bei Schreibfehler oder wenn ein Frame laenger als `WRITE_TIMEOUT`
 /// haengt. Gibt nach jedem Video-Frame dessen Bytes im Backlog frei.
 async fn writer_task(
-    mut writer: WriteHalf<TcpStream>,
+    mut writer: WriteHalf<Conn>,
     mut rx: mpsc::UnboundedReceiver<ServerMessage>,
     video_backlog: Arc<AtomicUsize>,
 ) {
@@ -199,7 +214,7 @@ async fn writer_task(
 }
 
 async fn message_loop(
-    reader: &mut ReadHalf<TcpStream>,
+    reader: &mut ReadHalf<Conn>,
     state: &SharedState,
     client_id: u64,
 ) -> Result<()> {

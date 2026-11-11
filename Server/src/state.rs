@@ -51,6 +51,9 @@ pub struct Client {
     pub uid: String,
     pub ip: Option<String>,
     pub role: Role,
+    /// Session key for the audio packets (opens what the client sends, seals what it gets).
+    pub udp_cipher: Arc<rusttalk_shared::secure::PacketCipher>,
+    pub udp_key: Vec<u8>,
 }
 
 impl Client {
@@ -686,6 +689,8 @@ impl State {
         }
         let id = self.next_client_id;
         self.next_client_id += 1;
+        let udp_key = rusttalk_shared::secure::PacketCipher::random_key();
+        let udp_cipher = Arc::new(rusttalk_shared::secure::PacketCipher::new(&udp_key).expect("32 byte key"));
         let mut token = rand::random::<u64>();
         while self.token_index.contains_key(&token) {
             token = rand::random::<u64>();
@@ -708,6 +713,8 @@ impl State {
                 uid,
                 ip,
                 role,
+                udp_cipher,
+                udp_key,
             },
         );
         (id, token)
@@ -1166,6 +1173,27 @@ impl State {
     /// Audio wird NUR gerelayed, wenn der Sprecher in einem Voice-Channel ist
     /// (Spawn = Sprechverbot). Ziele: alle anderen Clients im selben Channel,
     /// die nicht „taub" sind und bereits eine UDP-Adresse haben.
+    /// Key of the client with this UDP token (to open its packets).
+    pub fn udp_cipher(&self, token: u64) -> Option<Arc<rusttalk_shared::secure::PacketCipher>> {
+        let id = self.token_index.get(&token)?;
+        self.clients.get(id).map(|c| c.udp_cipher.clone())
+    }
+
+    /// Like [`udp_targets`](Self::udp_targets), with each receiver's key.
+    #[allow(clippy::type_complexity)]
+    pub fn udp_relay_targets(
+        &mut self,
+        token: u64,
+        from: SocketAddr,
+    ) -> Option<(u64, Vec<(SocketAddr, Arc<rusttalk_shared::secure::PacketCipher>)>)> {
+        let (speaker, addrs) = self.udp_targets(token, from)?;
+        let targets = addrs
+            .into_iter()
+            .filter_map(|a| self.clients.values().find(|c| c.udp_addr == Some(a)).map(|c| (a, c.udp_cipher.clone())))
+            .collect();
+        Some((speaker, targets))
+    }
+
     pub fn udp_targets(&mut self, token: u64, from: SocketAddr) -> Option<(u64, Vec<SocketAddr>)> {
         let speaker_id = *self.token_index.get(&token)?;
         let channel_id = {

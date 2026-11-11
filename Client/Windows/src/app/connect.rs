@@ -48,6 +48,41 @@ impl RustTalkApp {
                         });
                 });
 
+                if let Some((addr, fp)) = self.cert_warning.clone() {
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(((avail.x - 560.0) / 2.0).max(0.0));
+                        egui::Frame::default()
+                            .fill(theme::RED.gamma_multiply(0.15))
+                            .stroke(egui::Stroke::new(1.0_f32, theme::RED))
+                            .corner_radius(10.0)
+                            .inner_margin(egui::Margin::same(14))
+                            .show(ui, |ui| {
+                                ui.set_width(530.0);
+                                ui.label(egui::RichText::new(format!("{}  The identity of {addr} changed", icons::regular::WARNING)).strong().size(15.0).color(theme::RED));
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Its encryption certificate is not the one RustTalk saw before. That is expected after the server \
+                                         was reinstalled or its data folder was reset. Otherwise someone may be listening in - ask the \
+                                         server owner whether the fingerprint below matches the one in the server log.",
+                                    )
+                                    .color(theme::TEXT),
+                                );
+                                ui.label(egui::RichText::new(&fp).monospace().size(11.0).color(theme::MUTED));
+                                ui.horizontal(|ui| {
+                                    if theme::danger_button(ui, "Trust the new identity and connect").clicked() {
+                                        self.config.known_servers.insert(addr.clone(), fp.clone());
+                                        self.config.save();
+                                        self.cert_warning = None;
+                                        self.start_connect();
+                                    }
+                                    if ui.button("Cancel").clicked() {
+                                        self.cert_warning = None;
+                                    }
+                                });
+                            });
+                    });
+                }
                 if let Some(r) = self.update.available.clone() {
                     ui.add_space(12.0);
                     ui.vertical_centered(|ui| {

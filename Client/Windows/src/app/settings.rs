@@ -502,6 +502,35 @@ impl RustTalkApp {
 
     fn page_advanced(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
+            caption(ui, "Encryption");
+            if self.is_connected() && !self.server_fingerprint.is_empty() {
+                ui.label(egui::RichText::new(format!("{}  Connected encrypted (TLS + encrypted voice)", icons::regular::LOCK)).color(theme::GREEN));
+                ui.label(egui::RichText::new(format!("Server fingerprint: {}", self.server_fingerprint)).monospace().size(11.0).color(theme::MUTED));
+                ui.separator();
+            }
+            ui.label(egui::RichText::new("Known servers (their certificate is checked on every connect):").size(12.0).color(theme::MUTED));
+            if self.config.known_servers.is_empty() {
+                ui.label(egui::RichText::new("None yet.").color(theme::MUTED));
+            }
+            let mut forget = None;
+            for (addr, fp) in &self.config.known_servers {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(addr).color(theme::HEADER));
+                    let short: String = fp.chars().take(23).collect();
+                    ui.label(egui::RichText::new(format!("{short}...")).monospace().size(11.0).color(theme::MUTED)).on_hover_text(fp);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Forget").on_hover_text("Trust whatever certificate it has on the next connect").clicked() {
+                            forget = Some(addr.clone());
+                        }
+                    });
+                });
+            }
+            if let Some(a) = forget {
+                self.config.known_servers.remove(&a);
+                self.config.save();
+            }
+        });
+        card(ui, |ui| {
             caption(ui, "Data");
             let path = std::path::absolute(ClientConfig::path()).unwrap_or_else(|_| ClientConfig::path());
             setting_row(ui, "Settings file", Some(&path.display().to_string()), false, |ui| {

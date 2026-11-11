@@ -65,6 +65,9 @@ pub struct ClientConfig {
     /// on servers hang on it - keep it private, don't share this file.
     #[serde(default)]
     pub identity: String,
+    /// TLS certificate fingerprints of servers we connected to ("host:port" -> SHA-256).
+    #[serde(default)]
+    pub known_servers: std::collections::BTreeMap<String, String>,
     /// Invite code for the next connect (from an invite link; not saved).
     #[serde(skip)]
     pub invite: Option<String>,
@@ -144,6 +147,7 @@ impl Default for ClientConfig {
             show_timestamps: true,
             output_volume: 1.0,
             identity: String::new(),
+            known_servers: Default::default(),
             invite: None,
             desktop_notifications: true,
             notification_preview: true,
@@ -243,6 +247,7 @@ mod tests {
             show_timestamps: true,
             output_volume: 1.0,
             identity: "ab".repeat(32),
+            known_servers: [("10.0.0.5:7331".to_string(), "AB:CD".to_string())].into_iter().collect(),
             invite: Some("NOT-SAVED".into()),
             desktop_notifications: false,
             notification_preview: false,
@@ -273,6 +278,7 @@ mod tests {
         assert!(!back.desktop_notifications && !back.notification_preview && !back.check_updates);
         assert_eq!(back.identity, "ab".repeat(32));
         assert_eq!(back.invite, None, "invite codes are not saved");
+        assert_eq!(back.known_servers.get("10.0.0.5:7331").map(String::as_str), Some("AB:CD"));
         assert_eq!(back.user_volumes.get("anna"), Some(&1.5));
     }
 

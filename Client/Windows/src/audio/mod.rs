@@ -143,6 +143,7 @@ pub struct AudioEngine {
     /// For "share audio": own UDP socket clone + token, playback tap.
     udp: UdpSocket,
     token: u64,
+    cipher: Arc<rusttalk_shared::secure::PacketCipher>,
     render_tap: screen_audio::RenderTap,
 }
 
@@ -154,6 +155,7 @@ impl AudioEngine {
     pub fn start(
         udp: UdpSocket,
         token: u64,
+        cipher: Arc<rusttalk_shared::secure::PacketCipher>,
         control: Arc<AudioControl>,
         talking: TalkingMap,
         local_muted: LocalMuteSet,
@@ -176,7 +178,8 @@ impl AudioEngine {
                 let mixer = mixer.clone();
                 let talking = talking.clone();
                 let stop = stop.clone();
-                move || recv_loop(recv_udp, mixer, talking, stop)
+                let cipher = cipher.clone();
+                move || recv_loop(recv_udp, mixer, talking, stop, cipher)
             })
             .context("Empfangsthread starten")?;
 
@@ -194,7 +197,8 @@ impl AudioEngine {
             .spawn({
                 let stop = stop.clone();
                 let control = control.clone();
-                move || encoder::run(cons, udp, token, control, stop, render_cons)
+                let cipher = cipher.clone();
+                move || encoder::run(cons, udp, token, cipher, control, stop, render_cons)
             })
             .context("Encoder-Thread starten")?;
 
@@ -202,13 +206,13 @@ impl AudioEngine {
         let output = playback::build_output_stream(output_device, mixer, control, local_muted, user_volumes, sfx, render_prod, render_tap.clone())
             .context("Audio-Ausgabe konnte nicht gestartet werden")?;
 
-        Ok(Self { _input: input, _output: output, stop, udp: share_udp, token, render_tap })
+        Ok(Self { _input: input, _output: output, stop, udp: share_udp, token, cipher, render_tap })
     }
 
     /// Starts sending the computer audio (screen share with sound).
     pub fn start_screen_audio(&self, output_device: Option<&str>) -> Result<screen_audio::ScreenAudio> {
         let udp = self.udp.try_clone().context("UDP-Socket klonen")?;
-        screen_audio::ScreenAudio::start(udp, self.token, output_device, self.render_tap.clone())
+        screen_audio::ScreenAudio::start(udp, self.token, self.cipher.clone(), output_device, self.render_tap.clone())
     }
 
     pub fn stop(&self) {
@@ -223,12 +227,17 @@ impl Drop for AudioEngine {
 }
 
 /// Empfangsschleife: UDP-Pakete in die Jitter-Buffer der Sprecher einsortieren.
-fn recv_loop(udp: UdpSocket, mixer: SharedMixer, talking: TalkingMap, stop: Arc<AtomicBool>) {
+fn recv_loop(udp: UdpSocket, mixer: SharedMixer, talking: TalkingMap, stop: Arc<AtomicBool>, cipher: Arc<rusttalk_shared::secure::PacketCipher>) {
     let mut buf = [0u8; rusttalk_shared::audio_packet::MAX_PACKET_LEN];
     while !stop.load(Ordering::Relaxed) {
         match udp.recv(&mut buf) {
             Ok(n) => {
-                let Some((header, payload)) = decode(&buf[..n]) else { continue };
+                let Some((header, _)) = decode(&buf[..n]) else { continue };
+                // Forged or foreign packets fail the tag check and are dropped.
+                let Some(payload) = rusttalk_shared::audio_packet::open_packet(&header, &buf[..n], &cipher, rusttalk_shared::secure::DIR_TO_CLIENT) else {
+                    continue;
+                };
+                let payload = payload.as_slice();
                 if payload.is_empty() {
                     continue; // Registrierungs-Ping o. ae.
                 }

@@ -66,7 +66,17 @@ fn wait_for_port(port: u16) {
     panic!("Server hat Port {port} nicht geoeffnet");
 }
 
-type Conn = (ReadHalf<TcpStream>, WriteHalf<TcpStream>);
+type Tls = tokio_rustls::client::TlsStream<TcpStream>;
+type Conn = (ReadHalf<Tls>, WriteHalf<Tls>);
+
+/// TLS connection like the client makes it (pinning off: any certificate).
+async fn tls_connect(port: u16) -> Tls {
+    let tcp = TcpStream::connect(("127.0.0.1", port)).await.expect("TCP connect");
+    let verifier = rusttalk_shared::secure::PinnedVerifier::new(None);
+    let connector = tokio_rustls::TlsConnector::from(rusttalk_shared::secure::client_config(verifier));
+    let name = rustls::pki_types::ServerName::try_from(rusttalk_shared::secure::TLS_SERVER_NAME).unwrap();
+    connector.connect(name, tcp).await.expect("TLS handshake")
+}
 
 struct Welcome {
     client_id: u64,
@@ -91,7 +101,7 @@ async fn connect(port: u16, name: &str, password: Option<String>) -> (Conn, Welc
 
 /// Login; `Err(message)` if the server refuses.
 async fn connect_with(port: u16, name: &str, password: Option<String>, invite: Option<String>) -> Result<(Conn, Welcome), String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.expect("TCP connect");
+    let mut stream = tls_connect(port).await;
     write_frame(
         &mut stream,
         &ClientMessage::Hello { username: name.to_string(), protocol_version: PROTOCOL_VERSION, password, identity: identity_for(name), invite },
@@ -742,6 +752,25 @@ admin_password = \"boss\"
     expect(&mut e, "erin admin", |m| matches!(m, ServerMessage::UserRoleChanged { client_id, role: Role::Admin } if *client_id == we.client_id)).await;
 }
 
+/// Without TLS nothing gets through: a plain Hello is not answered.
+#[tokio::test]
+async fn plaintext_clients_are_refused() {
+    let port = free_port();
+    let _server = spawn_server(port, "");
+    wait_for_port(port);
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let hello = ClientMessage::Hello {
+        username: "plain".into(),
+        protocol_version: PROTOCOL_VERSION,
+        password: None,
+        identity: identity_for("plain"),
+        invite: None,
+    };
+    let _ = write_frame(&mut stream, &hello).await;
+    let answer = tokio::time::timeout(Duration::from_secs(5), read_frame::<_, ServerMessage>(&mut stream)).await;
+    assert!(!matches!(answer, Ok(Ok(Some(ServerMessage::Welcome { .. })))), "no Welcome without TLS");
+}
+
 #[tokio::test]
 async fn passwort_schutz() {
     let port = free_port();
@@ -749,7 +778,7 @@ async fn passwort_schutz() {
     wait_for_port(port);
 
     // Falsches Passwort -> Error-Frame, dann Schluss.
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut stream = tls_connect(port).await;
     write_frame(
         &mut stream,
         &ClientMessage::Hello {

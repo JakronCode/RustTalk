@@ -9,7 +9,8 @@ use audiopus::{Application, Bitrate, Channels, SampleRate, Signal};
 use nnnoiseless::DenoiseState;
 use ringbuf::traits::{Consumer, Observer};
 use ringbuf::HeapCons;
-use rusttalk_shared::audio_packet::{encode_to_vec, AudioHeader, FRAME_SAMPLES, SAMPLE_RATE};
+use rusttalk_shared::audio_packet::{seal_packet, AudioHeader, FRAME_SAMPLES};
+use rusttalk_shared::secure::DIR_TO_SERVER;
 
 use super::dsp::{soft_limit, Agc, DcBlocker};
 use super::AudioControl;
@@ -74,6 +75,7 @@ pub fn run(
     mut cons: HeapCons<f32>,
     udp: std::net::UdpSocket,
     token: u64,
+    cipher: Arc<rusttalk_shared::secure::PacketCipher>,
     control: Arc<AudioControl>,
     stop: Arc<AtomicBool>,
     mut render_ref: HeapCons<f32>,
@@ -90,7 +92,7 @@ pub fn run(
     };
 
     // Registrierungs-Ping: der Server lernt so unsere UDP-Adresse.
-    let _ = udp.send(&encode_to_vec(&AudioHeader::new(token, 0, 0), &[]));
+    let _ = udp.send(&seal_packet(&AudioHeader::new(token, 0, 0), &cipher, DIR_TO_SERVER, &[]));
 
     let mut gate = VoiceGate::new(control.vad_threshold(), 15);
     let mut frame = [0f32; FRAME_SAMPLES];
@@ -200,7 +202,7 @@ pub fn run(
             }
             match encoder.encode_float(&out[..], &mut opus_buf) {
                 Ok(len) => {
-                    let pkt = encode_to_vec(&AudioHeader::new(token, seq, timestamp), &opus_buf[..len]);
+                    let pkt = seal_packet(&AudioHeader::new(token, seq, timestamp), &cipher, DIR_TO_SERVER, &opus_buf[..len]);
                     let _ = udp.send(&pkt);
                     seq = seq.wrapping_add(1);
                 }

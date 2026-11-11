@@ -15,6 +15,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::time::timeout;
 
 use crate::config::ClientConfig;
+use rusttalk_shared::secure;
 
 /// Befehle der UI an den Netzwerk-Thread.
 #[derive(Debug)]
@@ -51,6 +52,10 @@ pub enum NetEvent {
         users: Vec<UserInfo>,
         channels: Vec<ChannelInfo>,
         udp_socket: Option<std::net::UdpSocket>,
+        /// Key for the encrypted audio packets of this session.
+        udp_cipher: Option<Arc<rusttalk_shared::secure::PacketCipher>>,
+        /// SHA-256 fingerprint of the server's TLS certificate.
+        fingerprint: String,
         udp_token: u64,
         spawn_log: Vec<LogEntry>,
         chat_history: Vec<ChatRecord>,
@@ -98,7 +103,7 @@ pub fn connect(
     cmd_tx
 }
 
-fn normalize_addr(addr: &str) -> String {
+pub fn normalize_addr(addr: &str) -> String {
     if addr.contains(':') {
         addr.to_string()
     } else {
@@ -114,11 +119,31 @@ async fn run(
     upload_backlog: &AtomicUsize,
 ) -> anyhow::Result<()> {
     let addr = normalize_addr(&cfg.server_address);
-    let stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr))
+    let tcp = timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr))
         .await
         .map_err(|_| anyhow::anyhow!("Timeout while connecting to {addr}"))??;
-    stream.set_nodelay(true).ok();
-    let peer = stream.peer_addr()?;
+    tcp.set_nodelay(true).ok();
+    let peer = tcp.peer_addr()?;
+
+    // TLS with the server certificate pinned on first use (like SSH).
+    let expected = cfg.known_servers.get(&addr).cloned();
+    let verifier = secure::PinnedVerifier::new(expected.clone());
+    let connector = tokio_rustls::TlsConnector::from(secure::client_config(verifier.clone()));
+    let name = rustls::pki_types::ServerName::try_from(secure::TLS_SERVER_NAME)?;
+    let stream = match timeout(CONNECT_TIMEOUT, connector.connect(name, tcp)).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            let seen = verifier.seen.lock().unwrap().clone();
+            if let (Some(seen), Some(want)) = (seen, expected) {
+                if !seen.eq_ignore_ascii_case(&want) {
+                    anyhow::bail!("{}: {seen}", secure::CERT_CHANGED);
+                }
+            }
+            anyhow::bail!("Secure connection failed: {e} (old server version?)");
+        }
+        Err(_) => anyhow::bail!("Timeout during the secure handshake with {addr}"),
+    };
+    let fingerprint = verifier.seen.lock().unwrap().clone().unwrap_or_default();
     let (mut reader, mut writer) = tokio::io::split(stream);
 
     write_frame(
@@ -136,9 +161,9 @@ async fn run(
     let first: Option<ServerMessage> = timeout(CONNECT_TIMEOUT, read_frame(&mut reader))
         .await
         .map_err(|_| anyhow::anyhow!("Timeout while waiting for the server"))??;
-    let (client_id, settings, udp_token, channels, users, spawn_log, chat_history, gif_search, open_permissions) = match first {
-        Some(ServerMessage::Welcome { client_id, udp_token, channels, users, spawn_log, chat_history, settings, gif_search, open_permissions }) => {
-            (client_id, settings, udp_token, channels, users, spawn_log, chat_history, gif_search, open_permissions)
+    let (client_id, settings, udp_token, channels, users, spawn_log, chat_history, gif_search, open_permissions, udp_key) = match first {
+        Some(ServerMessage::Welcome { client_id, udp_token, channels, users, spawn_log, chat_history, settings, gif_search, open_permissions, udp_key }) => {
+            (client_id, settings, udp_token, channels, users, spawn_log, chat_history, gif_search, open_permissions, udp_key)
         }
         Some(ServerMessage::Error { message }) => anyhow::bail!("{message}"),
         other => anyhow::bail!("Unexpected server response: {other:?}"),
@@ -153,6 +178,8 @@ async fn run(
         users,
         channels,
         udp_socket: Some(udp),
+        udp_cipher: secure::PacketCipher::new(&udp_key).map(Arc::new),
+        fingerprint,
         udp_token,
         spawn_log,
         chat_history,
@@ -261,7 +288,10 @@ mod tests {
     /// Fake-Server: Welcome, dann N grosse Video-Frames; liest parallel mit
     /// und zaehlt die vom Client hochgeladenen Video-Frames.
     async fn fake_server(listener: TcpListener, received: Arc<AtomicUsize>) {
-        let (stream, _) = listener.accept().await.unwrap();
+        let (tcp, _) = listener.accept().await.unwrap();
+        let ck = rcgen_free_cert();
+        let tls = rusttalk_shared::secure::server_config(ck.0, ck.1).unwrap();
+        let stream = tokio_rustls::TlsAcceptor::from(tls).accept(tcp).await.unwrap();
         let (mut r, mut w) = tokio::io::split(stream);
         let _hello: Option<ClientMessage> = read_frame(&mut r).await.unwrap();
         tokio::spawn(async move {
@@ -281,6 +311,7 @@ mod tests {
             chat_history: vec![],
             gif_search: false,
             open_permissions: true,
+            udp_key: vec![1; 32],
         };
         write_frame(&mut w, &welcome).await.unwrap();
         for i in 0..N {
@@ -345,5 +376,43 @@ mod tests {
         assert_eq!(received_by_server.load(Ordering::Relaxed), N);
         assert_eq!(backlog.load(Ordering::Relaxed), 0);
         let _ = cmd_tx.send(Command::Disconnect);
+    }
+
+    /// A remembered fingerprint that does not match -> refused with CERT_CHANGED
+    /// (no Hello is sent, nothing reaches the server).
+    #[test]
+    fn changed_certificate_is_refused() {
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        std_listener.set_nonblocking(true).unwrap();
+        let addr = std_listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(async move {
+                let listener = TcpListener::from_std(std_listener).unwrap();
+                let (tcp, _) = listener.accept().await.unwrap();
+                let (c, k) = rcgen_free_cert();
+                let tls = rusttalk_shared::secure::server_config(c, k).unwrap();
+                let _ = tokio_rustls::TlsAcceptor::from(tls).accept(tcp).await; // fails: client aborts
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            });
+        });
+        let mut cfg = ClientConfig { server_address: addr.to_string(), ..ClientConfig::default() };
+        cfg.known_servers.insert(addr.to_string(), "00:11:22".into());
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let _tx = connect(cfg, event_tx, eframe::egui::Context::default(), Arc::new(AtomicUsize::new(0)));
+        match event_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(NetEvent::Disconnected { reason }) => {
+                assert!(reason.starts_with(secure::CERT_CHANGED), "{reason}");
+                let real = secure::fingerprint(&rcgen_free_cert().0);
+                assert!(reason.contains(&real), "new fingerprint is reported: {reason}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// Test certificate (DER cert, PKCS#8 key) - the client crate has no rcgen,
+    /// so a fixed one generated once for these tests is embedded.
+    fn rcgen_free_cert() -> (Vec<u8>, Vec<u8>) {
+        (include_bytes!("../testdata/tls-cert.der").to_vec(), include_bytes!("../testdata/tls-key.der").to_vec())
     }
 }

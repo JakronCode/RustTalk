@@ -334,6 +334,10 @@ pub struct RustTalkApp {
     removed: Option<String>,
     /// Started via an invite link: connect right away.
     connect_on_start: bool,
+    /// TLS fingerprint of the connected server.
+    server_fingerprint: String,
+    /// The server's certificate changed: (address, new fingerprint).
+    cert_warning: Option<(String, String)>,
     /// Not installed yet: the whole window is the install screen.
     install_screen: Option<lifecycle::InstallScreen>,
     update: lifecycle::UpdateState,
@@ -447,6 +451,8 @@ impl RustTalkApp {
             mod_dialog: None,
             removed: None,
             connect_on_start,
+            server_fingerprint: String::new(),
+            cert_warning: None,
             install_screen: (crate::install::mode() == crate::install::Mode::NotInstalled).then(lifecycle::InstallScreen::new),
             update: lifecycle::UpdateState::new(),
             toast_tx,
@@ -597,6 +603,14 @@ impl RustTalkApp {
     /// Network thread ended. After a successful login this starts the
     /// automatic reconnect; a failed reconnect attempt schedules the next one.
     fn on_connection_lost(&mut self, reason: String) {
+        // Certificate changed: never reconnect on our own - the user decides.
+        if let Some(fp) = reason.strip_prefix(rusttalk_shared::secure::CERT_CHANGED).map(|r| r.trim_start_matches(':').trim().to_string()) {
+            self.reconnect = None;
+            self.disconnect();
+            self.cert_warning = Some((net::normalize_addr(&self.config.server_address), fp));
+            self.set_error("The server's identity changed - see the warning above");
+            return;
+        }
         // Kicked or banned: no automatic reconnect.
         if let Some(why) = self.removed.take() {
             self.reconnect = None;
@@ -786,6 +800,8 @@ impl RustTalkApp {
                 users,
                 channels,
                 udp_socket,
+                udp_cipher,
+                fingerprint,
                 udp_token,
                 spawn_log,
                 chat_history,
@@ -797,6 +813,14 @@ impl RustTalkApp {
                 }
                 self.connected = true;
                 self.gif_available = gif_search;
+                // Trust on first use: remember the server's certificate.
+                let key = net::normalize_addr(&self.config.server_address);
+                if !fingerprint.is_empty() && !self.config.known_servers.contains_key(&key) {
+                    self.config.known_servers.insert(key, fingerprint.clone());
+                    self.config.save();
+                }
+                self.server_fingerprint = fingerprint;
+                self.cert_warning = None;
                 self.open_permissions = open_permissions;
                 self.config.invite = None; // used
                 self.server_settings = settings;
@@ -834,10 +858,11 @@ impl RustTalkApp {
                 if let Some(rc) = self.reconnect.take() {
                     self.restore_after_reconnect(rc);
                 }
-                if let Some(sock) = udp_socket {
+                if let (Some(sock), Some(cipher)) = (udp_socket, udp_cipher) {
                     match AudioEngine::start(
                         sock,
                         udp_token,
+                        cipher,
                         self.control.clone(),
                         self.talking.clone(),
                         self.local_muted.clone(),

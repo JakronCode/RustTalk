@@ -12,7 +12,9 @@
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 //! |                       Timestamp (u32)                         |
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-//! |                  Opus-Payload (variabel) ...                  |
+//! |                Counter (u64, nonce of the AEAD)               |
+//! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//! |   Opus payload, ChaCha20-Poly1305 encrypted (+16 byte tag)    |
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 //! ```
 //!
@@ -24,11 +26,11 @@
 /// Magic-Bytes "RT" (RustTalk), Little-Endian.
 pub const MAGIC: u16 = 0x5254;
 
-/// Protokollversion des Audio-Headers.
-pub const VERSION: u8 = 1;
+/// Protokollversion des Audio-Headers (2 = encrypted).
+pub const VERSION: u8 = 2;
 
 /// Länge des Headers in Bytes.
-pub const HEADER_LEN: usize = 20;
+pub const HEADER_LEN: usize = 28;
 
 /// Sinnvolle Obergrenze für ein UDP-Paket im LAN (unterhalb der MTU).
 pub const MAX_PACKET_LEN: usize = 1500;
@@ -50,12 +52,34 @@ pub struct AudioHeader {
     /// Beliebiger, pro Sender monoton steigender Zeitstempel
     /// (Samples seit Sendebeginn); dient der Jitter-Erkennung.
     pub timestamp: u32,
+    /// Per-key unique counter (nonce); set by [`seal_packet`].
+    pub counter: u64,
 }
 
 impl AudioHeader {
     pub fn new(token: u64, sequence: u32, timestamp: u32) -> Self {
-        Self { flags: 0, token, sequence, timestamp }
+        Self { flags: 0, token, sequence, timestamp, counter: 0 }
     }
+}
+
+/// Builds an encrypted packet: header (with a fresh counter) + sealed payload.
+pub fn seal_packet(header: &AudioHeader, cipher: &crate::secure::PacketCipher, direction: u8, payload: &[u8]) -> Vec<u8> {
+    let mut h = *header;
+    h.counter = cipher.next_counter();
+    let mut out = Vec::with_capacity(HEADER_LEN + payload.len() + crate::secure::TAG_LEN);
+    encode(&h, &[], &mut out);
+    let sealed = cipher.seal(direction, h.counter, &out[..HEADER_LEN], payload);
+    out.extend_from_slice(&sealed);
+    out
+}
+
+/// Opens a packet decoded with [`decode`]: `raw` = the whole packet.
+/// `None` = forged / wrong key.
+pub fn open_packet(header: &AudioHeader, raw: &[u8], cipher: &crate::secure::PacketCipher, direction: u8) -> Option<Vec<u8>> {
+    if raw.len() < HEADER_LEN + crate::secure::TAG_LEN {
+        return None;
+    }
+    cipher.open(direction, header.counter, &raw[..HEADER_LEN], &raw[HEADER_LEN..])
 }
 
 /// Kodiert Header + Payload in `out` (wird vorher geleert).
@@ -68,6 +92,7 @@ pub fn encode(header: &AudioHeader, payload: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(&header.token.to_le_bytes());
     out.extend_from_slice(&header.sequence.to_le_bytes());
     out.extend_from_slice(&header.timestamp.to_le_bytes());
+    out.extend_from_slice(&header.counter.to_le_bytes());
     out.extend_from_slice(payload);
 }
 
@@ -93,6 +118,7 @@ pub fn decode(buf: &[u8]) -> Option<(AudioHeader, &[u8])> {
         token: u64::from_le_bytes(buf[4..12].try_into().ok()?),
         sequence: u32::from_le_bytes(buf[12..16].try_into().ok()?),
         timestamp: u32::from_le_bytes(buf[16..20].try_into().ok()?),
+        counter: u64::from_le_bytes(buf[20..28].try_into().ok()?),
     };
     Some((header, &buf[HEADER_LEN..]))
 }
@@ -103,7 +129,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let header = AudioHeader { flags: 0, token: 0xDEAD_BEEF_CAFE, sequence: 42, timestamp: 960 };
+        let header = AudioHeader { flags: 0, token: 0xDEAD_BEEF_CAFE, sequence: 42, timestamp: 960, counter: 7 };
         let payload = [0xABu8; 137];
         let buf = encode_to_vec(&header, &payload);
         assert_eq!(buf.len(), HEADER_LEN + payload.len());
@@ -143,6 +169,28 @@ mod tests {
     fn rejects_short_buffer() {
         let buf = [0u8; HEADER_LEN - 1];
         assert!(decode(&buf).is_none());
+    }
+
+    #[test]
+    fn sealed_packets_roundtrip() {
+        use crate::secure::{PacketCipher, DIR_TO_SERVER};
+        let key = PacketCipher::random_key();
+        let (tx, rx) = (PacketCipher::new(&key).unwrap(), PacketCipher::new(&key).unwrap());
+        let mut header = AudioHeader::new(9, 3, 960);
+        header.flags = FLAG_SCREEN_AUDIO;
+        let pkt = seal_packet(&header, &tx, DIR_TO_SERVER, b"opus");
+        let (h, _) = decode(&pkt).unwrap();
+        assert_eq!((h.token, h.sequence, h.flags), (9, 3, FLAG_SCREEN_AUDIO));
+        assert_eq!(open_packet(&h, &pkt, &rx, DIR_TO_SERVER).as_deref(), Some(&b"opus"[..]));
+        // Changing the header (e.g. the token) breaks the tag.
+        let mut forged = pkt.clone();
+        forged[4] ^= 0xFF;
+        let (fh, _) = decode(&forged).unwrap();
+        assert!(open_packet(&fh, &forged, &rx, DIR_TO_SERVER).is_none());
+        // An empty payload (registration ping) is authenticated too.
+        let ping = seal_packet(&AudioHeader::new(9, 0, 0), &tx, DIR_TO_SERVER, &[]);
+        let (ph, _) = decode(&ping).unwrap();
+        assert_eq!(open_packet(&ph, &ping, &rx, DIR_TO_SERVER).as_deref(), Some(&[][..]));
     }
 
     #[test]

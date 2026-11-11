@@ -7,6 +7,7 @@ mod db;
 mod gif;
 mod moderation;
 mod state;
+mod tls;
 mod tcp;
 mod udp;
 
@@ -64,7 +65,16 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // TCP und UDP laufen auf derselben Port-Nummer (wie TeamSpeak).
-    let tcp = tcp::run_listener(state.clone(), &cfg.bind_address);
+    // TLS certificate next to the database (stable fingerprint for the clients).
+    let cert_dir = std::path::Path::new(&cfg.db_path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let (cert, key) = tls::load_or_create(&cert_dir)?;
+    info!("TLS-Fingerprint: {}", rusttalk_shared::secure::fingerprint(&cert));
+    let tls = rusttalk_shared::secure::server_config(cert, key).context("TLS-Konfiguration")?;
+    let tcp = tcp::run_listener(state.clone(), &cfg.bind_address, tls);
     let udp = udp::run_udp(state.clone(), &cfg.bind_address);
     tokio::try_join!(tcp, udp)?;
     Ok(())

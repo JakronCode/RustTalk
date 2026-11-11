@@ -25,11 +25,13 @@
 //! v11: Identities (secret per client, server keeps a hash), roles
 //!     (Member/Moderator/Admin), kick/ban/move users, invites, audit log.
 //!     Without any admin the server is "open" (everyone may do everything).
+//! v12: Encryption: TCP over TLS (pinned self-signed certificate), audio
+//!     packets ChaCha20-Poly1305 with a per-session key (`Welcome.udp_key`).
 
 use serde::{Deserialize, Serialize};
 
 /// Aktuelle Protokollversion. Client und Server müssen übereinstimmen.
-pub const PROTOCOL_VERSION: u16 = 11;
+pub const PROTOCOL_VERSION: u16 = 12;
 
 /// Art eines Video-Streams. Ein User kann beide gleichzeitig senden.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -450,6 +452,8 @@ pub enum ServerMessage {
         gif_search: bool,
         /// No admin yet: everyone may do everything.
         open_permissions: bool,
+        /// Key for the audio packets of this session (`secure::UDP_KEY_LEN`).
+        udp_key: Vec<u8>,
     },
     UserJoined {
         user: UserInfo,
@@ -689,6 +693,7 @@ mod tests {
                 chat_history: vec![record],
                 gif_search: true,
                 open_permissions: false,
+                udp_key: vec![7; 32],
             },
             ServerMessage::UserJoined { user: user.clone() },
             ServerMessage::UserLeft { client_id: 1 },

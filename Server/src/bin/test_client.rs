@@ -17,6 +17,7 @@ use anyhow::{bail, Context, Result};
 use rusttalk_shared::audio_packet::{self, AudioHeader, FRAME_SAMPLES, MAX_PACKET_LEN};
 use rusttalk_shared::framing::{read_frame, write_frame};
 use rusttalk_shared::protocol::*;
+use rusttalk_shared::secure::{DIR_TO_CLIENT, DIR_TO_SERVER};
 use tokio::net::{TcpStream, UdpSocket};
 
 #[derive(Debug)]
@@ -117,10 +118,16 @@ async fn main() -> Result<()> {
 
 async fn run(args: &Args) -> Result<()> {
     let addr = normalize_addr(&args.addr);
-    let mut stream = TcpStream::connect(&addr)
+    let tcp = TcpStream::connect(&addr)
         .await
         .with_context(|| format!("Verbindung zu {addr} fehlgeschlagen"))?;
-    stream.set_nodelay(true).ok();
+    tcp.set_nodelay(true).ok();
+    let peer = tcp.peer_addr()?;
+    // TLS; the test client trusts any server certificate (no pinning).
+    let verifier = rusttalk_shared::secure::PinnedVerifier::new(None);
+    let connector = tokio_rustls::TlsConnector::from(rusttalk_shared::secure::client_config(verifier));
+    let name = rustls::pki_types::ServerName::try_from(rusttalk_shared::secure::TLS_SERVER_NAME)?;
+    let mut stream = connector.connect(name, tcp).await.context("TLS")?;
 
     write_frame(
         &mut stream,
@@ -135,8 +142,9 @@ async fn run(args: &Args) -> Result<()> {
     .await?;
 
     let first: Option<ServerMessage> = read_frame(&mut stream).await?;
-    let (my_id, udp_token, mut join_target) = match first {
-        Some(ServerMessage::Welcome { client_id, udp_token, channels, users, spawn_log, chat_history, .. }) => {
+    let (my_id, udp_token, mut join_target, cipher) = match first {
+        Some(ServerMessage::Welcome { client_id, udp_token, channels, users, spawn_log, chat_history, udp_key, .. }) => {
+            let cipher = rusttalk_shared::secure::PacketCipher::new(&udp_key).context("UDP-Schluessel")?;
             println!(
                 "WELCOME client_id={client_id} token={udp_token} channels={} users={} spawn_log={} history={}",
                 channels.len(),
@@ -158,7 +166,7 @@ async fn run(args: &Args) -> Result<()> {
             let by_kind = args.join_kind.and_then(|kind| {
                 channels.iter().filter(|c| c.kind == kind).min_by_key(|c| c.id).map(|c| c.id)
             });
-            (client_id, udp_token, args.join_channel.or(by_kind))
+            (client_id, udp_token, args.join_channel.or(by_kind), cipher)
         }
         Some(ServerMessage::Error { message }) => {
             println!("ERROR {message}");
@@ -167,13 +175,12 @@ async fn run(args: &Args) -> Result<()> {
         other => bail!("unerwartete erste Antwort: {other:?}"),
     };
 
-    let peer = stream.peer_addr()?;
     let (mut reader, mut writer) = tokio::io::split(stream);
 
     // UDP vorbereiten + Registrierungs-Ping (leere Payload).
     let udp = UdpSocket::bind("0.0.0.0:0").await?;
     udp.connect(peer).await?;
-    udp.send(&audio_packet::encode_to_vec(&AudioHeader::new(udp_token, 0, 0), &[])).await?;
+    udp.send(&audio_packet::seal_packet(&AudioHeader::new(udp_token, 0, 0), &cipher, DIR_TO_SERVER, &[])).await?;
 
     // Optionale Aktionen direkt nach dem Login.
     if let Some(name) = &args.create_channel {
@@ -219,7 +226,8 @@ async fn run(args: &Args) -> Result<()> {
             }
             pkt = udp.recv(&mut udp_buf) => {
                 if let Ok(n) = pkt {
-                    if let Some((h, payload)) = audio_packet::decode(&udp_buf[..n]) {
+                    if let Some((h, _)) = audio_packet::decode(&udp_buf[..n]) {
+                        let payload = audio_packet::open_packet(&h, &udp_buf[..n], &cipher, DIR_TO_CLIENT).unwrap_or_default();
                         if !payload.is_empty() {
                             audio_rx += 1;
                             senders.insert(h.token); // Relay: Token = Sprecher-ID
@@ -230,8 +238,10 @@ async fn run(args: &Args) -> Result<()> {
             _ = interval.tick() => {
                 let now = Instant::now();
                 if now < audio_until {
-                    let pkt = audio_packet::encode_to_vec(
+                    let pkt = audio_packet::seal_packet(
                         &AudioHeader::new(udp_token, seq, timestamp),
+                        &cipher,
+                        DIR_TO_SERVER,
                         &dummy_payload,
                     );
                     udp.send(&pkt).await?;
