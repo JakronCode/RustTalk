@@ -20,6 +20,16 @@ CFG=$(mktemp /tmp/rusttalk-e2e-XXXX.toml)
 cat > "$CFG" <<EOF
 bind_address = "127.0.0.1:$PORT"
 server_name = "E2E-Smoke"
+persist_state = false
+
+# In der Lobby ist Sprechen gesperrt -> eigener Voice-Channel fuer den Test
+[[channels]]
+name = "Lobby"
+kind = "spawn"
+
+[[channels]]
+name = "E2E-Voice"
+kind = "voice"
 EOF
 
 echo "=== Starte Server auf 127.0.0.1:$PORT ==="
@@ -29,10 +39,10 @@ trap 'kill $SERVER_PID 2>/dev/null || true; rm -f "$CFG"' EXIT
 sleep 0.7
 
 echo "=== Zwei test_clients schicken sich 3 s Audio ==="
-"$TC" --addr "127.0.0.1:$PORT" --name E2E-A --audio-secs 3 --duration-secs 6 > /tmp/e2e-a.log 2>&1 &
+"$TC" --addr "127.0.0.1:$PORT" --name E2E-A --join-kind voice --audio-secs 3 --duration-secs 6 > /tmp/e2e-a.log 2>&1 &
 PID_A=$!
 sleep 0.4
-"$TC" --addr "127.0.0.1:$PORT" --name E2E-B --audio-secs 3 --duration-secs 6 > /tmp/e2e-b.log 2>&1 &
+"$TC" --addr "127.0.0.1:$PORT" --name E2E-B --join-kind voice --audio-secs 3 --duration-secs 6 > /tmp/e2e-b.log 2>&1 &
 PID_B=$!
 wait $PID_A
 wait $PID_B
