@@ -120,7 +120,16 @@ impl RustTalkApp {
         }
         ui.add_space(12.0);
         let connecting = self.cmd_tx.is_some();
-        let label = if connecting { "Connecting..." } else { "Connect" };
+        let label = match (&self.reconnect, connecting) {
+            (Some(_), true) => "Reconnecting...",
+            (Some(rc), false) => {
+                let secs = rc.next_at.map(|t| t.saturating_duration_since(Instant::now()).as_secs() + 1).unwrap_or(0);
+                ui.ctx().request_repaint_after(Duration::from_millis(250));
+                if secs > 0 { "Reconnect now" } else { "Reconnecting..." }
+            }
+            (None, true) => "Connecting...",
+            (None, false) => "Connect",
+        };
         let connect = ui.add_enabled(
             !connecting,
             egui::Button::new(egui::RichText::new(format!("{}  {label}", icons::regular::SIGN_IN)).size(15.0).strong().color(egui::Color32::WHITE))
@@ -128,7 +137,27 @@ impl RustTalkApp {
                 .min_size(egui::vec2(w, 38.0)),
         );
         if connect.clicked() || (!connecting && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+            if let Some(rc) = self.reconnect.as_mut() {
+                rc.next_at = None; // manual attempt replaces the scheduled one
+            }
             self.start_connect();
+        }
+        if let Some(rc) = &self.reconnect {
+            ui.add_space(4.0);
+            let attempt = rc.attempt;
+            let wait = rc.next_at.map(|t| t.saturating_duration_since(Instant::now()).as_secs() + 1);
+            ui.horizontal(|ui| {
+                let text = match wait {
+                    Some(s) => format!("Connection lost - next attempt in {s} s ({attempt}/{MAX_RECONNECT_ATTEMPTS})"),
+                    None => format!("Reconnecting (attempt {attempt}/{MAX_RECONNECT_ATTEMPTS})..."),
+                };
+                ui.label(egui::RichText::new(text).size(12.0).color(theme::YELLOW));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Cancel").clicked() {
+                        self.cancel_reconnect();
+                    }
+                });
+            });
         }
         ui.add_space(6.0);
         ui.horizontal(|ui| {

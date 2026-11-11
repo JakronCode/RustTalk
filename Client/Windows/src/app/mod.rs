@@ -32,7 +32,7 @@ use rusttalk_shared::protocol::{
     ChannelInfo, ChannelKind, ServerMessage, ServerSettings, UserInfo, VideoKind, MAX_MEDIA_BYTES,
 };
 
-use crate::audio::{capture, playback, AudioControl, AudioEngine, LocalMuteSet, TalkingMap};
+use crate::audio::{capture, playback, AudioControl, AudioEngine, LocalMuteSet, TalkingMap, UserVolumeMap};
 use crate::config::{ClientConfig, ServerBookmark};
 use crate::logo;
 use crate::media::{self, TextureCache};
@@ -111,6 +111,33 @@ impl ScreenPicker {
     }
 }
 
+/// Automatic reconnect after an unexpected connection loss.
+struct Reconnect {
+    /// Number of the next attempt (1-based).
+    attempt: u32,
+    /// When the next attempt starts (`None` = attempt is running).
+    next_at: Option<Instant>,
+    /// Voice channel we were in (id, name as fallback), rejoined afterwards.
+    channel: Option<(u64, String)>,
+    muted: bool,
+    deafened: bool,
+}
+
+/// Give up after this many failed attempts (~10 minutes with backoff).
+const MAX_RECONNECT_ATTEMPTS: u32 = 25;
+
+/// Wait time before reconnect attempt `attempt` (1-based): 1, 2, 4, 8, 15, 30, 30, ... s.
+fn reconnect_delay(attempt: u32) -> Duration {
+    Duration::from_secs(match attempt {
+        0 | 1 => 1,
+        2 => 2,
+        3 => 4,
+        4 => 8,
+        5 => 15,
+        _ => 30,
+    })
+}
+
 /// Nachrichten aus Hintergrund-Threads (GIPHY-Suche/Downloads).
 enum GiphyMsg {
     Results(Result<Vec<media::GifResult>, String>),
@@ -150,6 +177,8 @@ pub struct RustTalkApp {
     confirm_delete: Option<u64>,
     /// Set from a menu; executed at the start of the next frame.
     pending_disconnect: bool,
+    /// Pending automatic reconnect (connection was lost unexpectedly).
+    reconnect: Option<Reconnect>,
     /// Login finished (Welcome received). `cmd_tx` alone = connecting.
     connected: bool,
     server_settings: ServerSettings,
@@ -169,6 +198,8 @@ pub struct RustTalkApp {
     control: Arc<AudioControl>,
     talking: TalkingMap,
     local_muted: LocalMuteSet,
+    /// Per-user playback volume (client id -> gain), filled from `config.user_volumes`.
+    user_volumes: UserVolumeMap,
     /// Pegel-Messung ohne Verbindung (Einstellungs-Fenster).
     mic_monitor: Option<capture::MicMonitor>,
 
@@ -214,6 +245,7 @@ impl RustTalkApp {
         cc.egui_ctx.set_zoom_factor(config.ui_scale.clamp(0.75, 1.5));
         let control = Arc::new(AudioControl::new(config.voice_activation, config.vad_threshold));
         control.set_output_volume(config.output_volume);
+        control.set_input_volume(config.input_volume);
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let (giphy_tx, giphy_rx) = std::sync::mpsc::channel::<GiphyMsg>();
         Self {
@@ -241,6 +273,7 @@ impl RustTalkApp {
             channel_settings: None,
             confirm_delete: None,
             pending_disconnect: false,
+            reconnect: None,
             connected: false,
             server_settings: ServerSettings::default(),
             server_settings_dialog: None,
@@ -254,6 +287,7 @@ impl RustTalkApp {
             audio: None,
             talking: Arc::new(Mutex::new(HashMap::new())),
             local_muted: Arc::new(Mutex::new(HashSet::new())),
+            user_volumes: Arc::new(Mutex::new(HashMap::new())),
             mic_monitor: None,
             textures: TextureCache::default(),
             pending_image: None,
@@ -336,6 +370,7 @@ impl RustTalkApp {
         self.selected_channel = None;
         self.talking.lock().unwrap().clear();
         self.local_muted.lock().unwrap().clear();
+        self.user_volumes.lock().unwrap().clear();
         self.control.transmitting.store(false, Ordering::Relaxed);
         // Video stoppen + Frames rauswerfen.
         self.cam = None;
@@ -375,6 +410,124 @@ impl RustTalkApp {
         self.channels.get(&id).map(|c| c.kind)
     }
 
+    /// Loads the saved volume for `name` (by username, local) into the mixer.
+    fn apply_user_volume(&self, id: u64, name: &str) {
+        let mut map = self.user_volumes.lock().unwrap();
+        match self.config.user_volumes.get(name) {
+            Some(&v) => {
+                map.insert(id, v.clamp(0.0, crate::audio::MAX_VOLUME));
+            }
+            None => {
+                map.remove(&id);
+            }
+        }
+    }
+
+    /// Network thread ended. After a successful login this starts the
+    /// automatic reconnect; a failed reconnect attempt schedules the next one.
+    fn on_connection_lost(&mut self, reason: String) {
+        let was_connected = self.connected;
+        if was_connected && self.reconnect.is_none() {
+            let me = self.users.get(&self.my_id);
+            let channel = me
+                .and_then(|u| self.channels.get(&u.channel_id))
+                .filter(|c| c.kind == ChannelKind::Voice)
+                .map(|c| (c.id, c.name.clone()));
+            self.reconnect = Some(Reconnect {
+                attempt: 1,
+                next_at: None,
+                channel,
+                muted: self.control.self_muted.load(Ordering::Relaxed),
+                deafened: self.control.self_deafened.load(Ordering::Relaxed),
+            });
+        }
+        self.disconnect();
+        let Some(rc) = self.reconnect.as_mut() else {
+            self.set_error(format!("Disconnected: {reason}"));
+            return;
+        };
+        if !was_connected {
+            rc.attempt += 1; // the running attempt failed
+        }
+        if rc.attempt > MAX_RECONNECT_ATTEMPTS {
+            self.reconnect = None;
+            self.set_error(format!("Disconnected: {reason} (gave up reconnecting)"));
+            return;
+        }
+        let delay = reconnect_delay(rc.attempt);
+        rc.next_at = Some(Instant::now() + delay);
+        let attempt = rc.attempt;
+        self.set_error(format!(
+            "Connection lost ({reason}) - reconnecting in {} s (attempt {attempt}/{MAX_RECONNECT_ATTEMPTS})",
+            delay.as_secs()
+        ));
+    }
+
+    /// Starts the next reconnect attempt when its time has come.
+    fn poll_reconnect(&mut self) {
+        let due = self
+            .reconnect
+            .as_ref()
+            .and_then(|rc| rc.next_at)
+            .is_some_and(|t| Instant::now() >= t);
+        if due && self.cmd_tx.is_none() {
+            if let Some(rc) = self.reconnect.as_mut() {
+                rc.next_at = None;
+            }
+            self.start_connect();
+        }
+    }
+
+    /// Cancels a pending automatic reconnect (button on the connect screen).
+    fn cancel_reconnect(&mut self) {
+        if self.reconnect.take().is_some() {
+            if self.cmd_tx.is_some() && !self.connected {
+                self.disconnect(); // stop the running attempt
+            }
+            self.set_status("Reconnect cancelled");
+        }
+    }
+
+    /// After a successful reconnect: back into the old voice channel, same mute state.
+    fn restore_after_reconnect(&mut self, rc: Reconnect) {
+        let Some(tx) = self.cmd_tx.clone() else { return };
+        if rc.muted || rc.deafened {
+            self.control.self_muted.store(rc.muted, Ordering::Relaxed);
+            self.control.self_deafened.store(rc.deafened, Ordering::Relaxed);
+            let _ = tx.send(Command::SetMute { muted: rc.muted, deafened: rc.deafened });
+        }
+        if let Some((id, name)) = rc.channel {
+            let target = self
+                .channels
+                .get(&id)
+                .filter(|c| c.kind == ChannelKind::Voice && c.name == name)
+                .or_else(|| self.channels.values().find(|c| c.kind == ChannelKind::Voice && c.name == name))
+                .map(|c| c.id);
+            if let Some(id) = target {
+                let _ = tx.send(Command::JoinChannel(id));
+                self.select_channel(id);
+            }
+        }
+        self.set_status(format!("Reconnected to {}", self.server_settings.name));
+    }
+
+    /// Current playback volume of one user (1.0 = 100 %).
+    fn user_volume(&self, id: u64) -> f32 {
+        self.user_volumes.lock().unwrap().get(&id).copied().unwrap_or(1.0)
+    }
+
+    /// Sets the playback volume of one user and remembers it by username.
+    fn set_user_volume(&mut self, id: u64, name: &str, volume: f32) {
+        let v = volume.clamp(0.0, crate::audio::MAX_VOLUME);
+        if (v - 1.0).abs() < 0.005 {
+            self.config.user_volumes.remove(name);
+            self.user_volumes.lock().unwrap().remove(&id);
+        } else {
+            self.config.user_volumes.insert(name.to_string(), v);
+            self.user_volumes.lock().unwrap().insert(id, v);
+        }
+    }
+
     fn select_channel(&mut self, id: u64) {
         self.selected_channel = Some(id);
         self.unread.remove(&id);
@@ -392,11 +545,18 @@ impl RustTalkApp {
                 spawn_log,
                 chat_history,
             } => {
+                if self.cmd_tx.is_none() {
+                    return; // attempt was cancelled meanwhile; the net thread ends on its own
+                }
                 self.connected = true;
                 self.server_settings = settings;
                 self.my_id = my_id;
                 self.channels = channels.into_iter().map(|c| (c.id, c)).collect();
                 self.users = users.into_iter().map(|u| (u.id, u)).collect();
+                let known: Vec<(u64, String)> = self.users.values().map(|u| (u.id, u.name.clone())).collect();
+                for (id, name) in known {
+                    self.apply_user_volume(id, &name);
+                }
                 // Spawn-Log in die Spawn-Ansicht laden.
                 if let Some(spawn_id) = self.spawn_channel_id() {
                     let lines = spawn_log
@@ -423,6 +583,9 @@ impl RustTalkApp {
                     });
                 }
                 self.set_status(format!("Connected to {}", self.server_settings.name));
+                if let Some(rc) = self.reconnect.take() {
+                    self.restore_after_reconnect(rc);
+                }
                 if let Some(sock) = udp_socket {
                     match AudioEngine::start(
                         sock,
@@ -430,6 +593,7 @@ impl RustTalkApp {
                         self.control.clone(),
                         self.talking.clone(),
                         self.local_muted.clone(),
+                        self.user_volumes.clone(),
                         self.config.input_device.as_deref(),
                         self.config.output_device.as_deref(),
                     ) {
@@ -440,10 +604,7 @@ impl RustTalkApp {
             }
             NetEvent::Message(msg) => self.handle_server_message(msg),
             NetEvent::Status(text) => self.set_error(text),
-            NetEvent::Disconnected { reason } => {
-                self.disconnect();
-                self.set_error(format!("Disconnected: {reason}"));
-            }
+            NetEvent::Disconnected { reason } => self.on_connection_lost(reason),
         }
     }
 
@@ -456,11 +617,13 @@ impl RustTalkApp {
                         ch.user_ids.push(user.id);
                     }
                 }
+                self.apply_user_volume(user.id, &user.name);
                 self.users.insert(user.id, user);
                 // Join-Zeile kommt serverseitig via SpawnLogEntry.
             }
             ServerMessage::UserLeft { client_id } => {
                 self.users.remove(&client_id);
+                self.user_volumes.lock().unwrap().remove(&client_id);
                 for ch in self.channels.values_mut() {
                     ch.user_ids.retain(|&id| id != client_id);
                 }
@@ -609,9 +772,11 @@ impl eframe::App for RustTalkApp {
         #[cfg(debug_assertions)]
         self.dev_hooks(ctx);
         if std::mem::take(&mut self.pending_disconnect) {
+            self.reconnect = None;
             self.disconnect();
             self.set_status("Disconnected");
         }
+        self.poll_reconnect();
         // Status changed somewhere without set_status -> restart the toast.
         if self.status != self.status_seen {
             self.status_seen = self.status.clone();
@@ -646,7 +811,7 @@ impl eframe::App for RustTalkApp {
         // Mic monitor for the level meter in the settings (without a connection).
         if self.show_settings && self.audio.is_none() && self.mic_monitor.is_none() {
             self.mic_monitor =
-                capture::MicMonitor::start(self.config.input_device.as_deref()).ok();
+                capture::MicMonitor::start(self.config.input_device.as_deref(), Some(self.control.input_volume_handle())).ok();
         }
         if !self.show_settings && self.mic_monitor.is_some() {
             self.mic_monitor = None; // Drop stoppt Stream + Thread
@@ -847,6 +1012,14 @@ mod tests {
         assert_eq!(key_from_name("SPACE"), Some(egui::Key::Space));
         assert_eq!(key_from_name("space"), Some(egui::Key::Space));
         assert_eq!(key_from_name("??"), None);
+    }
+
+    #[test]
+    fn reconnect_backoff() {
+        let secs: Vec<u64> = (1..=8).map(|a| reconnect_delay(a).as_secs()).collect();
+        assert_eq!(secs, vec![1, 2, 4, 8, 15, 30, 30, 30]);
+        assert_eq!(reconnect_delay(0).as_secs(), 1);
+        assert_eq!(reconnect_delay(1000).as_secs(), 30);
     }
 
     #[test]

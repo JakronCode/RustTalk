@@ -16,11 +16,13 @@
 //!     Servername im `Welcome`.
 //! v7: Servereinstellungen (`ServerSettings`: Name, Icon, Willkommenstext,
 //!     AFK-Mover) statt nur Servername; `Notice` fuer Hinweise.
+//! v8: Server messages in `ServerSettings`: join/leave messages (posted in an
+//!     announcement text channel), rules (lobby), AFK notice template, MOTD.
 
 use serde::{Deserialize, Serialize};
 
 /// Aktuelle Protokollversion. Client und Server müssen übereinstimmen.
-pub const PROTOCOL_VERSION: u16 = 7;
+pub const PROTOCOL_VERSION: u16 = 8;
 
 /// Art eines Video-Streams. Ein User kann beide gleichzeitig senden.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -37,6 +39,25 @@ pub const MAX_ICON_BYTES: usize = 256 * 1024;
 /// Max. Laenge des Willkommenstexts.
 pub const MAX_WELCOME_LEN: usize = 1000;
 
+/// Max. length of a short server message (join/leave/AFK notice/MOTD).
+pub const MAX_SERVER_MESSAGE_LEN: usize = 300;
+
+/// Default join message (`{user}` = username).
+pub const DEFAULT_JOIN_MESSAGE: &str = "{user} joined the server";
+/// Default leave message (`{user}` = username).
+pub const DEFAULT_LEAVE_MESSAGE: &str = "{user} left the server";
+/// Default AFK notice (`{channel}` = target channel, `{minutes}` = timeout).
+pub const DEFAULT_AFK_NOTICE: &str = "You were moved to {channel} after {minutes} min muted (AFK)";
+
+/// Replaces `{key}` placeholders in a server message template.
+pub fn fill_template(template: &str, vars: &[(&str, &str)]) -> String {
+    let mut out = template.to_string();
+    for (key, value) in vars {
+        out = out.replace(&format!("{{{key}}}"), value);
+    }
+    out
+}
+
 /// Serverweite Einstellungen (im Client unter "Server Settings" editierbar).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerSettings {
@@ -50,6 +71,18 @@ pub struct ServerSettings {
     pub afk_timeout_mins: u32,
     /// Ziel-Channel (Voice oder Lobby); None = Lobby.
     pub afk_channel: Option<u64>,
+    /// Posted in `announce_channel` when someone connects (empty = off).
+    pub join_message: String,
+    /// Posted in `announce_channel` when someone disconnects (empty = off).
+    pub leave_message: String,
+    /// Text channel for join/leave messages; None = no announcements.
+    pub announce_channel: Option<u64>,
+    /// Server rules, shown in the lobby (empty = none).
+    pub rules: String,
+    /// Sent to users moved by the AFK mover (empty = default text).
+    pub afk_notice: String,
+    /// Message of the day, shown to everyone on connect (empty = none).
+    pub motd: String,
 }
 
 impl Default for ServerSettings {
@@ -61,6 +94,12 @@ impl Default for ServerSettings {
             afk_enabled: true,
             afk_timeout_mins: 10,
             afk_channel: None,
+            join_message: DEFAULT_JOIN_MESSAGE.to_string(),
+            leave_message: DEFAULT_LEAVE_MESSAGE.to_string(),
+            announce_channel: None,
+            rules: String::new(),
+            afk_notice: DEFAULT_AFK_NOTICE.to_string(),
+            motd: String::new(),
         }
     }
 }
@@ -438,5 +477,16 @@ mod tests {
             let back: ServerMessage = bincode::deserialize(&bytes).expect("deserialize");
             assert_eq!(msg, back);
         }
+    }
+
+    #[test]
+    fn template_placeholders() {
+        assert_eq!(fill_template(DEFAULT_JOIN_MESSAGE, &[("user", "anna")]), "anna joined the server");
+        assert_eq!(
+            fill_template(DEFAULT_AFK_NOTICE, &[("channel", "Lobby"), ("minutes", "10")]),
+            "You were moved to Lobby after 10 min muted (AFK)"
+        );
+        assert_eq!(fill_template("no vars {x}", &[]), "no vars {x}", "unknown placeholders stay");
+        assert_eq!(fill_template("{user} & {user}", &[("user", "b")]), "b & b");
     }
 }

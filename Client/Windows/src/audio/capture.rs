@@ -36,6 +36,7 @@ pub fn build_input_stream(
     device_name: Option<&str>,
     producer: HeapProd<f32>,
     level_sink: Option<Arc<AtomicU32>>,
+    gain: Option<Arc<AtomicU32>>,
 ) -> Result<cpal::Stream> {
     let device = pick_input_device(device_name)?;
     let supported = device.default_input_config().context("default_input_config")?;
@@ -49,12 +50,12 @@ pub fn build_input_stream(
     );
     let err_fn = |e| tracing::warn!("Input-Stream-Fehler: {e}");
     let stream = match supported.sample_format() {
-        cpal::SampleFormat::F32 => build_in::<f32>(&device, &config, |s| s, producer, level_sink, err_fn)?,
+        cpal::SampleFormat::F32 => build_in::<f32>(&device, &config, |s| s, producer, level_sink, gain, err_fn)?,
         cpal::SampleFormat::I16 => {
-            build_in::<i16>(&device, &config, |s| s as f32 / 32768.0, producer, level_sink, err_fn)?
+            build_in::<i16>(&device, &config, |s| s as f32 / 32768.0, producer, level_sink, gain, err_fn)?
         }
         cpal::SampleFormat::U16 => {
-            build_in::<u16>(&device, &config, |s| (s as f32 - 32768.0) / 32768.0, producer, level_sink, err_fn)?
+            build_in::<u16>(&device, &config, |s| (s as f32 - 32768.0) / 32768.0, producer, level_sink, gain, err_fn)?
         }
         other => return Err(anyhow!("Unsupported sample format: {other:?}")),
     };
@@ -71,11 +72,12 @@ pub struct MicMonitor {
 }
 
 impl MicMonitor {
-    pub fn start(device_name: Option<&str>) -> Result<Self> {
+    /// `gain`: input volume handle, so the meter shows the level after the gain.
+    pub fn start(device_name: Option<&str>, gain: Option<Arc<AtomicU32>>) -> Result<Self> {
         let rb = HeapRb::<f32>::new(9600); // 200 ms genuegen
         let (prod, mut cons) = rb.split();
         let level = Arc::new(AtomicU32::new(0));
-        let stream = build_input_stream(device_name, prod, Some(level.clone()))?;
+        let stream = build_input_stream(device_name, prod, Some(level.clone()), gain)?;
         let stop = Arc::new(AtomicBool::new(false));
         std::thread::Builder::new()
             .name("mic-monitor".to_string())
@@ -109,6 +111,7 @@ fn build_in<T: cpal::SizedSample + Send + 'static>(
     to_f32: fn(T) -> f32,
     mut producer: HeapProd<f32>,
     level_sink: Option<Arc<AtomicU32>>,
+    gain: Option<Arc<AtomicU32>>,
     err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
 ) -> Result<cpal::Stream> {
     let channels = config.channels as usize;
@@ -128,6 +131,10 @@ fn build_in<T: cpal::SizedSample + Send + 'static>(
                     let sum: f32 = frame.iter().map(|&s| to_f32(s)).sum();
                     mono.push(sum / frame.len() as f32);
                 }
+            }
+            // Manual input volume (before metering, so meter and VAD see the same signal).
+            if let Some(g) = &gain {
+                apply_gain(&mut mono, f32::from_bits(g.load(Ordering::Relaxed)));
             }
             // Pegel melden (geglaettet mit schnellem Anstieg, sanftem Abfall).
             if let Some(sink) = &level_sink {
@@ -149,4 +156,35 @@ fn build_in<T: cpal::SizedSample + Send + 'static>(
     .context("build_input_stream")?;
     stream.play().context("Could not start the input stream")?;
     Ok(stream)
+}
+
+/// Multiplies the samples by `gain` and clamps to [-1, 1] (like a real ADC).
+/// 1.0 is a no-op.
+pub fn apply_gain(samples: &mut [f32], gain: f32) {
+    if (gain - 1.0).abs() < 1e-4 {
+        return;
+    }
+    for s in samples.iter_mut() {
+        *s = (*s * gain).clamp(-1.0, 1.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gain_scales_and_clamps() {
+        let mut v = [0.1f32, -0.2, 0.6, -0.9];
+        apply_gain(&mut v, 2.0);
+        assert!((v[0] - 0.2).abs() < 1e-6);
+        assert!((v[1] + 0.4).abs() < 1e-6);
+        assert_eq!(v[2], 1.0, "clamped");
+        assert_eq!(v[3], -1.0, "clamped");
+        let mut w = [0.5f32; 4];
+        apply_gain(&mut w, 1.0);
+        assert_eq!(w, [0.5; 4], "unity is a no-op");
+        apply_gain(&mut w, 0.0);
+        assert_eq!(w, [0.0; 4], "zero mutes");
+    }
 }

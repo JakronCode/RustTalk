@@ -58,6 +58,12 @@ pub struct ClientConfig {
     /// Playback volume for everyone (1.0 = 100 %, max 2.0).
     #[serde(default = "default_one")]
     pub output_volume: f32,
+    /// Manual microphone gain before the processing chain (1.0 = 100 %, max 2.0).
+    #[serde(default = "default_one")]
+    pub input_volume: f32,
+    /// Per-user playback volume by username (local only; missing = 100 %).
+    #[serde(default)]
+    pub user_volumes: std::collections::BTreeMap<String, f32>,
 }
 
 fn default_username() -> String {
@@ -99,6 +105,8 @@ impl Default for ClientConfig {
             ui_scale: 1.0,
             show_timestamps: true,
             output_volume: 1.0,
+            input_volume: 1.0,
+            user_volumes: Default::default(),
         }
     }
 }
@@ -154,6 +162,8 @@ mod tests {
             ui_scale: 1.0,
             show_timestamps: true,
             output_volume: 1.0,
+            input_volume: 0.5,
+            user_volumes: [("anna".to_string(), 1.5)].into_iter().collect(),
         };
         let text = toml::to_string_pretty(&cfg).unwrap();
         let back: ClientConfig = toml::from_str(&text).unwrap();
@@ -163,6 +173,8 @@ mod tests {
         assert_eq!(back.bookmarks[1].password.as_deref(), Some("pw"));
         assert!(!back.noise_suppression);
         assert!(!back.auto_gain);
+        assert_eq!(back.input_volume, 0.5);
+        assert_eq!(back.user_volumes.get("anna"), Some(&1.5));
     }
 
     #[test]
@@ -174,6 +186,8 @@ mod tests {
         assert!(cfg.noise_suppression, "Rauschunterdrueckung default an");
         assert!(cfg.auto_gain, "Auto-Lautstaerke default an (alte Configs ohne Feld)");
         assert!(cfg.bookmarks.is_empty());
+        assert_eq!(cfg.input_volume, 1.0);
+        assert!(cfg.user_volumes.is_empty());
         assert!(cfg.server_address.ends_with(":7331"));
     }
 }

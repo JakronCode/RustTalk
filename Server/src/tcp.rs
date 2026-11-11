@@ -118,6 +118,15 @@ async fn handle_connection(stream: TcpStream, peer: SocketAddr, state: SharedSta
         // Join im Spawn-Log dokumentieren (persistiert serverseitig).
         let entry = st.push_spawn_log(format!("{username} joined the server"));
         st.broadcast(&ServerMessage::SpawnLogEntry { entry });
+        let join_template = st.settings().join_message.clone();
+        if let Some(msg) = st.announcement(&join_template, &username) {
+            st.broadcast(&msg);
+        }
+        // Message of the day: only to the new client.
+        let motd = st.settings().motd.trim().to_string();
+        if !motd.is_empty() {
+            st.send_to(id, &ServerMessage::Notice { message: motd });
+        }
         (id, username, video_backlog)
     };
     info!("Client {client_id} ({username}) von {peer} verbunden");
@@ -137,6 +146,10 @@ async fn handle_connection(stream: TcpStream, peer: SocketAddr, state: SharedSta
         let mut st = state.lock().unwrap();
         st.remove_client(client_id);
         st.broadcast(&ServerMessage::UserLeft { client_id });
+        let leave_template = st.settings().leave_message.clone();
+        if let Some(msg) = st.announcement(&leave_template, &username) {
+            st.broadcast(&msg);
+        }
     }
     writer_handle.abort();
     match &result {

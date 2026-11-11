@@ -1,5 +1,5 @@
 //! Server settings dialog: overview (logo, name), AFK mover, messages
-//! (welcome text + placeholders) and WIP tabs (roles, bans, invites, audit
+//! (welcome, join/leave, rules, AFK notice, MOTD) and WIP tabs (roles, bans, invites, audit
 //! log). Also the server icon painter and the "Report a Bug" link.
 //!
 //! There is no role system yet: everyone connected may change these
@@ -91,7 +91,7 @@ impl RustTalkApp {
                             match dlg.tab {
                                 ServerTab::Overview => self.server_overview(ui, &mut dlg),
                                 ServerTab::Afk => self.server_afk(ui, &mut dlg),
-                                ServerTab::Messages => server_messages(ui, &mut dlg),
+                                ServerTab::Messages => self.server_messages(ui, &mut dlg),
                                 ServerTab::Roles => server_wip(ui, "Roles", "Create roles like Admin or Moderator and decide who may manage channels, move users or change these settings."),
                                 ServerTab::Bans => server_wip(ui, "Bans", "Ban users by name or address and see the ban list."),
                                 ServerTab::Invites => server_wip(ui, "Invites", "Create invite links that open RustTalk and connect directly to this server."),
@@ -231,46 +231,74 @@ impl RustTalkApp {
     }
 }
 
-fn server_messages(ui: &mut egui::Ui, dlg: &mut ServerSettingsDialog) {
-    card(ui, |ui| {
-        caption(ui, "Welcome message");
-        ui.add(
-            egui::TextEdit::multiline(&mut dlg.draft.welcome_message)
-                .hint_text("Shown to everyone in the lobby, e.g. \"Welcome! Please read #announcements first.\"")
-                .char_limit(rusttalk_shared::protocol::MAX_WELCOME_LEN)
-                .desired_rows(4)
-                .desired_width(f32::INFINITY),
-        );
-        ui.label(
-            egui::RichText::new(format!("{} / {}", dlg.draft.welcome_message.chars().count(), rusttalk_shared::protocol::MAX_WELCOME_LEN))
-                .size(11.5)
-                .color(theme::MUTED),
-        );
-    });
-    theme::wip_banner(ui, "The messages below are placeholders and not sent yet.");
-    card(ui, |ui| {
-        for (i, (label, desc, hint)) in [
-            ("Join message", "Posted in a text channel when someone connects", "{user} joined the server - say hi!"),
-            ("Leave message", "Posted when someone disconnects", "{user} left the server"),
-            ("Rules", "Must be accepted before talking", "1. Be nice  2. No spam  ..."),
-            ("AFK notice", "Sent to users moved by the AFK mover", "You were moved to {channel} after {minutes} min"),
-            ("Message of the day", "Shown once per day on connect", "Game night on Friday at 8 pm!"),
-        ]
-        .iter()
-        .enumerate()
-        {
-            if i > 0 {
-                ui.separator();
-            }
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(*label).color(theme::HEADER));
-                theme::wip_badge(ui);
+impl RustTalkApp {
+    fn server_messages(&mut self, ui: &mut egui::Ui, dlg: &mut ServerSettingsDialog) {
+        use rusttalk_shared::protocol::{MAX_SERVER_MESSAGE_LEN, MAX_WELCOME_LEN};
+        card(ui, |ui| {
+            caption(ui, "Welcome message");
+            ui.add(
+                egui::TextEdit::multiline(&mut dlg.draft.welcome_message)
+                    .hint_text("Shown to everyone in the lobby, e.g. \"Welcome! Please read #announcements first.\"")
+                    .char_limit(MAX_WELCOME_LEN)
+                    .desired_rows(4)
+                    .desired_width(f32::INFINITY),
+            );
+            char_count(ui, &dlg.draft.welcome_message, MAX_WELCOME_LEN);
+        });
+        card(ui, |ui| {
+            caption(ui, "Join & leave messages");
+            setting_row(ui, "Announcement channel", Some("Text channel where join and leave messages are posted"), false, |ui| {
+                let mut targets: Vec<(Option<u64>, String)> = vec![(None, "Off".to_string())];
+                for parent in std::iter::once(None).chain(self.sorted_children(None).into_iter().filter(|c| c.kind == ChannelKind::Category).map(|c| Some(c.id))) {
+                    for ch in self.sorted_children(parent).into_iter().filter(|c| c.kind == ChannelKind::Text) {
+                        targets.push((Some(ch.id), ch.name));
+                    }
+                }
+                let current = targets.iter().find(|(id, _)| *id == dlg.draft.announce_channel).map(|(_, n)| n.clone()).unwrap_or_default();
+                egui::ComboBox::from_id_salt("announce_channel").width(200.0).selected_text(current).show_ui(ui, |ui| {
+                    for (id, name) in targets {
+                        let icon = if id.is_none() { icons::regular::PROHIBIT } else { icons::regular::CHAT_CIRCLE };
+                        ui.selectable_value(&mut dlg.draft.announce_channel, id, format!("{icon}  {name}"));
+                    }
+                });
             });
-            ui.label(egui::RichText::new(*desc).size(12.0).color(theme::MUTED));
-            let mut s = String::new();
-            ui.add_enabled(false, egui::TextEdit::singleline(&mut s).hint_text(*hint).desired_width(f32::INFINITY));
-        }
-    });
+            ui.add_enabled_ui(dlg.draft.announce_channel.is_some(), |ui| {
+                ui.separator();
+                message_field(ui, "Join message", "Posted when someone connects (empty = off).  {user} = name", "{user} joined the server - say hi!", &mut dlg.draft.join_message, MAX_SERVER_MESSAGE_LEN);
+                ui.separator();
+                message_field(ui, "Leave message", "Posted when someone disconnects (empty = off).  {user} = name", "{user} left the server", &mut dlg.draft.leave_message, MAX_SERVER_MESSAGE_LEN);
+            });
+        });
+        card(ui, |ui| {
+            caption(ui, "Rules");
+            ui.add(
+                egui::TextEdit::multiline(&mut dlg.draft.rules)
+                    .hint_text("Shown in the lobby below the welcome message, e.g. \"1. Be nice  2. No spam\"")
+                    .char_limit(MAX_WELCOME_LEN)
+                    .desired_rows(4)
+                    .desired_width(f32::INFINITY),
+            );
+            char_count(ui, &dlg.draft.rules, MAX_WELCOME_LEN);
+        });
+        card(ui, |ui| {
+            caption(ui, "Notices");
+            message_field(ui, "AFK notice", "Sent to users moved by the AFK mover (empty = default).  {channel}, {minutes}", rusttalk_shared::protocol::DEFAULT_AFK_NOTICE, &mut dlg.draft.afk_notice, MAX_SERVER_MESSAGE_LEN);
+            ui.separator();
+            message_field(ui, "Message of the day", "Shown to everyone when they connect (empty = none)", "Game night on Friday at 8 pm!", &mut dlg.draft.motd, MAX_SERVER_MESSAGE_LEN);
+        });
+    }
+}
+
+/// "12 / 300" counter below a text field.
+fn char_count(ui: &mut egui::Ui, text: &str, max: usize) {
+    ui.label(egui::RichText::new(format!("{} / {max}", text.chars().count())).size(11.5).color(theme::MUTED));
+}
+
+/// Label, description and single-line input for a short server message.
+fn message_field(ui: &mut egui::Ui, label: &str, desc: &str, hint: &str, value: &mut String, max: usize) {
+    ui.label(egui::RichText::new(label).color(theme::HEADER));
+    ui.label(egui::RichText::new(desc).size(12.0).color(theme::MUTED));
+    ui.add(egui::TextEdit::singleline(value).hint_text(hint).char_limit(max).desired_width(f32::INFINITY));
 }
 
 fn server_wip(ui: &mut egui::Ui, title: &str, text: &str) {

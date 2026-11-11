@@ -19,7 +19,7 @@
 # Rueckgabecode = cargo-Exitcode.
 
 $ErrorActionPreference = "Continue"
-$Src = "C:\Users\jb\Documents\RustTalk"
+$Src = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 $BuildDir = "$env:LOCALAPPDATA\Programs\RustTalk-src"
 
 Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue

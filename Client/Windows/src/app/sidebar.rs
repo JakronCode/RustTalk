@@ -565,7 +565,7 @@ impl RustTalkApp {
     }
 
     /// Member under a voice channel: avatar (green ring/dot when talking),
-    /// name, mute icons; right-click: local mute.
+    /// name, mute icons; right-click: local mute + per-user volume.
     fn user_row(
         &mut self,
         ui: &mut egui::Ui,
@@ -641,12 +641,18 @@ impl RustTalkApp {
                     }
                     ui.close_menu();
                 }
-                ui.add_enabled_ui(false, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("{}  User Volume", icons::regular::SPEAKER_HIGH));
-                        theme::wip_badge(ui);
-                    });
-                });
+                ui.separator();
+                ui.label(format!("{}  User Volume", icons::regular::SPEAKER_HIGH));
+                let mut pct = (self.user_volume(user.id) * 100.0).round();
+                let slider = egui::Slider::new(&mut pct, 0.0..=crate::audio::MAX_VOLUME * 100.0)
+                    .suffix(" %")
+                    .step_by(5.0);
+                if ui.add(slider).changed() {
+                    self.set_user_volume(user.id, &user.name, pct / 100.0);
+                }
+                if (pct - 100.0).abs() > 0.5 && ui.small_button("Reset to 100 %").clicked() {
+                    self.set_user_volume(user.id, &user.name, 1.0);
+                }
             });
         }
     }

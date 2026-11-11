@@ -9,7 +9,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rusttalk_shared::audio_packet::{FRAME_SAMPLES, SAMPLE_RATE};
 
 use super::jitter::USER_TIMEOUT;
-use super::{AudioControl, LocalMuteSet, SharedMixer};
+use super::{AudioControl, LocalMuteSet, SharedMixer, UserVolumeMap};
 use std::collections::VecDeque;
 
 /// Namen aller Ausgabegeraete (fuer die Einstellungen).
@@ -98,6 +98,7 @@ pub fn build_output_stream(
     mixer: SharedMixer,
     control: Arc<AudioControl>,
     local_muted: LocalMuteSet,
+    user_volumes: UserVolumeMap,
 ) -> Result<cpal::Stream> {
     let device = pick_output_device(device_name)?;
     let supported = pick_output_config(&device)?;
@@ -111,12 +112,12 @@ pub fn build_output_stream(
     );
     let err_fn = |e| tracing::warn!("Output-Stream-Fehler: {e}");
     let stream = match supported.sample_format() {
-        cpal::SampleFormat::F32 => build_out::<f32>(&device, &config, |s| s, mixer, control, local_muted, err_fn)?,
+        cpal::SampleFormat::F32 => build_out::<f32>(&device, &config, |s| s, mixer, control, local_muted, user_volumes, err_fn)?,
         cpal::SampleFormat::I16 => {
-            build_out::<i16>(&device, &config, |s| (s * 32767.0) as i16, mixer, control, local_muted, err_fn)?
+            build_out::<i16>(&device, &config, |s| (s * 32767.0) as i16, mixer, control, local_muted, user_volumes, err_fn)?
         }
         cpal::SampleFormat::U16 => {
-            build_out::<u16>(&device, &config, |s| (s * 32767.0 + 32768.0) as u16, mixer, control, local_muted, err_fn)?
+            build_out::<u16>(&device, &config, |s| (s * 32767.0 + 32768.0) as u16, mixer, control, local_muted, user_volumes, err_fn)?
         }
         other => return Err(anyhow!("Unsupported sample format: {other:?}")),
     };
@@ -130,6 +131,7 @@ fn build_out<T: cpal::SizedSample + Send + 'static>(
     mixer: SharedMixer,
     control: Arc<AudioControl>,
     local_muted: LocalMuteSet,
+    user_volumes: UserVolumeMap,
     err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
 ) -> Result<cpal::Stream> {
     let channels = config.channels as usize;
@@ -154,14 +156,17 @@ fn build_out<T: cpal::SizedSample + Send + 'static>(
                     let mut map = mixer.lock().unwrap();
                     map.retain(|_, u| u.last_seen.elapsed() < USER_TIMEOUT);
                     let local = local_muted.lock().unwrap();
+                    let volumes = user_volumes.lock().unwrap();
                     for (id, user) in map.iter_mut() {
                         if local.contains(id) {
                             continue; // lokal stummgeschaltet
                         }
                         tmp.fill(0.0);
                         let n = user.fill(&mut tmp);
+                        // Per-user volume (local only, 1.0 = unchanged).
+                        let gain = volumes.get(id).copied().unwrap_or(1.0);
                         for (m, t) in chunk[..n].iter_mut().zip(tmp[..n].iter()) {
-                            *m += *t;
+                            *m += *t * gain;
                         }
                     }
                 }

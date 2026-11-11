@@ -18,9 +18,10 @@ Lightweight voice chat in Rust — a Discord-style client with a TeamSpeak-style
 - **Discord-style UI:** server menu, voice panel, user panel, settings window with categories, channel settings (partly WIP)
 - **Text chat** with history, images (PNG/JPEG/GIF), unread markers
 - **SQLite persistence** (server): channels (incl. order), chat history (retention 10k per channel) and the lobby log survive restarts
-- **Client UI:** dark mode, procedural logo, saved servers, settings in a separate window, mic level meter, avatars with talking ring, per-user local mute (right click), UI scaling
+- **Client UI:** dark mode, procedural logo, saved servers, settings in a separate window, mic level meter, avatars with talking ring, per-user local mute and **per-user volume** 0–200 % (right click, remembered by name), **input volume**, UI scaling
+- **Auto-reconnect:** on connection loss the client retries with backoff (1 s … 30 s) and rejoins the last voice channel with the same mute state
 - **Video (MJPEG ~25 fps over TCP):** webcam with device selection + live preview, share a screen or a single window via a picker ("Applications" / "Entire Screen"); camera and screen at the same time. Click a tile for fullscreen with a member bar (green dot while talking). Quality levels "High" (1080p) and "Balanced" (720p)
-- **Server settings** (in the app): name, icon, welcome message in the lobby, **auto AFK mover** (muted users are moved after N minutes, default 10) — roles/bans/invites as WIP
+- **Server settings** (in the app): name, icon, welcome message and rules in the lobby, **join/leave messages** in an announcement text channel, AFK notice template, message of the day, **auto AFK mover** (muted users are moved after N minutes, default 10) — roles/bans/invites as WIP
 - **Report a Bug** button that opens a pre-filled GitHub issue
 - **Server:** single binary + `server.toml`, systemd service, one port (7331 TCP+UDP), optional password, keepalive/timeouts for dead connections
 
@@ -54,11 +55,11 @@ Client (Windows)                          Server (Debian)
                                             └──────────────┘
 ```
 
-- **TCP:** login, channels, chat (text + images), events, video frames (camera/screen), channel order, server settings (protocol v7)
+- **TCP:** login, channels, chat (text + images), events, video frames (camera/screen), channel order, server settings (protocol v8)
 - **UDP:** Opus audio only (20 ms frames, token + sequence header); the server relays 1:1 within the voice channel
 - **Lobby:** everyone lands here when connecting; talking is blocked on the server; join log
 
-Details (German): [Konzept.md](Konzept.md) · test log: [test.md](test.md)
+Details (German): [Konzept.md](Konzept.md) · test log: [test.md](test.md) · roadmap: [ROADMAP.md](ROADMAP.md)
 
 ---
 
@@ -120,7 +121,7 @@ bash Server/Test_Scripts/e2e_local.sh
 ## Project structure
 
 ```
-├── shared/            # protocol (v7), framing, UDP packet format
+├── shared/            # protocol (v8), framing, UDP packet format
 ├── Server/            # Linux server (+ test_client CLI, integration tests, deploy/, Test_Scripts/)
 │   └── src/           #   main, config, state (RAM), db (SQLite), tcp, udp
 └── Client/Windows/    # egui client

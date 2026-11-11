@@ -345,6 +345,82 @@ async fn server_settings_werden_verteilt() {
     assert_eq!(wc.settings, new);
 }
 
+/// Collects messages until the connection is quiet for `quiet_ms`.
+async fn drain(conn: &mut Conn, quiet_ms: u64) -> Vec<ServerMessage> {
+    let mut out = Vec::new();
+    while let Some(m) = recv(conn, quiet_ms).await {
+        out.push(m);
+    }
+    out
+}
+
+fn chat_texts(msgs: &[ServerMessage]) -> Vec<(u64, String, String)> {
+    msgs.iter()
+        .filter_map(|m| match m {
+            ServerMessage::Chat { channel_id, from_name, text, .. } => Some((*channel_id, from_name.clone(), text.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn join_leave_announcements_and_motd() {
+    let port = free_port();
+    let _server = spawn_server(port, "");
+    wait_for_port(port);
+
+    let (mut a, _) = connect(port, "alice", None).await;
+    drain(&mut a, 300).await;
+    send(&mut a, &ClientMessage::CreateChannel { name: "news".into(), kind: ChannelKind::Text, parent: None }).await;
+    let news = match recv(&mut a, 2000).await {
+        Some(ServerMessage::ChannelCreated { channel }) => channel.id,
+        other => panic!("ChannelCreated erwartet, bekam: {other:?}"),
+    };
+    let settings = ServerSettings {
+        announce_channel: Some(news),
+        join_message: "hi {user}".into(),
+        leave_message: "bye {user}".into(),
+        motd: "Game night".into(),
+        rules: "Be nice".into(),
+        ..ServerSettings::default()
+    };
+    send(&mut a, &ClientMessage::UpdateServerSettings { settings: settings.clone() }).await;
+    assert!(matches!(recv(&mut a, 2000).await, Some(ServerMessage::ServerSettingsChanged { .. })));
+
+    // bob: rules in the Welcome, MOTD as notice, join announcement for everyone.
+    let (mut b, wb) = connect(port, "bob", None).await;
+    assert_eq!(wb.settings.rules, "Be nice");
+    let bob_msgs = drain(&mut b, 500).await;
+    assert!(
+        bob_msgs.iter().any(|m| matches!(m, ServerMessage::Notice { message } if message == "Game night")),
+        "MOTD fehlt: {bob_msgs:?}"
+    );
+    let expected_join = (news, "RustTalk".to_string(), "hi bob".to_string());
+    assert!(chat_texts(&bob_msgs).contains(&expected_join), "bob: {bob_msgs:?}");
+    let alice_msgs = drain(&mut a, 500).await;
+    assert!(chat_texts(&alice_msgs).contains(&expected_join), "alice: {alice_msgs:?}");
+    assert!(
+        !alice_msgs.iter().any(|m| matches!(m, ServerMessage::Notice { .. })),
+        "MOTD nur an den Neuen"
+    );
+
+    // bob leaves -> leave announcement.
+    drop(b);
+    let alice_msgs = drain(&mut a, 800).await;
+    assert!(
+        chat_texts(&alice_msgs).contains(&(news, "RustTalk".to_string(), "bye bob".to_string())),
+        "leave fehlt: {alice_msgs:?}"
+    );
+
+    // Announcement channel deleted -> switched off, no more messages.
+    send(&mut a, &ClientMessage::DeleteChannel { channel_id: news }).await;
+    drain(&mut a, 400).await;
+    let (_c, wc) = connect(port, "carol", None).await;
+    assert_eq!(wc.settings.announce_channel, None);
+    let alice_msgs = drain(&mut a, 500).await;
+    assert!(chat_texts(&alice_msgs).is_empty(), "keine Ansage mehr: {alice_msgs:?}");
+}
+
 #[tokio::test]
 async fn passwort_schutz() {
     let port = free_port();

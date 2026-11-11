@@ -2,6 +2,24 @@
 
 > Pflichtdokumentation aller Testläufe. Neueste oben.
 
+## 2026-11-11 (16) – Kategorie A: Lautstärke pro Nutzer, Auto-Reconnect, Eingangslautstärke, Servernachrichten (Protokoll v8)
+
+**Wünsche:** Checkliste ([ROADMAP.md](ROADMAP.md)), Kategorie A umsetzen, testen, pushen.
+
+**Client:**
+- **A1 Lautstärke pro Nutzer:** Rechtsklick auf einen Nutzer → Regler 0–200 % (+ „Reset to 100 %“). Wird im Mixer pro Sprecher angewendet, lokal per Nutzername in `client_config.toml` (`user_volumes`) gespeichert und beim Verbinden/Join wieder angewendet.
+- **A2 Auto-Reconnect:** Bricht eine bestehende Verbindung unerwartet ab, verbindet der Client neu (Backoff 1, 2, 4, 8, 15, 30 s …, max. 25 Versuche), betritt den letzten Voice-Channel wieder (per ID, Fallback Name) und stellt Mute/Deafen wieder her. Verbindungsbildschirm zeigt Countdown, „Reconnect now“ und „Cancel“. Manuelles Trennen startet keinen Reconnect.
+- **A3 Eingangslautstärke:** Settings > Voice & Audio, 0–200 %, wirkt im Capture-Callback vor Pegelanzeige, VAD, RNNoise und AGC (Anzeige und Schwelle passen zusammen).
+- **A4 Servernachrichten:** Server Settings > Messages: Announcement-Text-Channel, Join-/Leave-Nachricht (`{user}`), Regeln (in der Lobby angezeigt), AFK-Hinweis (`{channel}`, `{minutes}`), Message of the Day (Toast beim Verbinden).
+
+**Server / Protokoll v8:** `ServerSettings` um `join_message`, `leave_message`, `announce_channel`, `rules`, `afk_notice`, `motd` erweitert; Validierung (300 Zeichen, Regeln 1000, Announcement nur Text-Channel), gelöschter Announcement-Channel → aus. Ansagen kommen als Chat von „RustTalk“ (id 0) und werden persistiert. **Migration:** gespeicherte v7-Einstellungen (bincode) werden gelesen und um Defaults ergänzt – Name/Icon/AFK bleiben erhalten.
+
+**Tests:** Client 55 ✅ (neu: Backoff, Eingangs-Gain, Config-Felder), Server 38 ✅ (neu: Servernachrichten-Validierung/Ansagen, AFK-Vorlage, v7-Migration), Integration 9 ✅ (neu: `join_leave_announcements_and_motd`), Shared 13 ✅ (neu: Platzhalter) – Windows (direkt + Release-Build via `cargo.ps1`).
+**Live geprüft (Windows, lokaler Server):** Debug-Client mit `RUSTTALK_DEV_AUTOCONNECT` + `join:Lounge`, Server gekillt und nach 8 s neu gestartet → Client verbindet sich selbst neu und ist wieder in der Lounge (`UserMoved { channel_id: 6 }` beim Beobachter-`test_client`).
+**Nicht geprüft:** Regler pro Nutzer / Eingangslautstärke mit echtem Ton und per Screenshot, Messages-Tab per Screenshot, Linux-Server-Build.
+
+---
+
 ## 2026-11-11 (15) – Servereinstellungen, AFK-Mover, Disconnect, Bug-Report (Protokoll v7)
 
 **Wünsche:** Servereinstellungen (Auto-AFK nach 10 min stumm, Logo + Name, Platzhalter für Nachrichten), sichtbarer Disconnect soll den Server trennen (nicht in die Lobby), Disconnect raus aus dem Server-Menü, dort „Server Settings“ rein, Menü wurde immer breiter, Lobby per Klick beitreten, „Report a Bug“-Button.

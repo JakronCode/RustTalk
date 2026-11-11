@@ -279,9 +279,12 @@ impl RustTalkApp {
                 }
             });
             ui.separator();
-            setting_row(ui, "Input volume", Some("Manual microphone gain"), true, |ui| {
-                let mut v = 100.0f32;
-                ui.add(egui::Slider::new(&mut v, 0.0..=200.0).fixed_decimals(0).suffix(" %"));
+            setting_row(ui, "Input volume", Some("Manual microphone gain (before noise suppression and auto gain)"), false, |ui| {
+                let mut pct = (self.config.input_volume * 100.0).round();
+                if ui.add(egui::Slider::new(&mut pct, 0.0..=200.0).step_by(5.0).fixed_decimals(0).suffix(" %")).changed() {
+                    self.config.input_volume = pct / 100.0;
+                    self.control.set_input_volume(self.config.input_volume);
+                }
             });
         });
 

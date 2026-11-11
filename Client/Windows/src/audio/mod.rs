@@ -44,6 +44,8 @@ pub struct AudioControl {
     pub auto_gain: AtomicBool,
     /// Playback volume (f32 bits, 1.0 = 100 %).
     output_volume_bits: AtomicU32,
+    /// Manual microphone gain (f32 bits, 1.0 = 100 %), applied in the capture callback.
+    input_volume: Arc<AtomicU32>,
     /// Aktueller Mikro-Pegel (RMS, geglaettet) – fuer die Pegel-Anzeige in den Einstellungen.
     mic_level: Arc<AtomicU32>,
     /// Wir senden gerade (Gate offen) – fuer den Selbst-Sprech-Indikator.
@@ -61,6 +63,7 @@ impl AudioControl {
             noise_suppression: AtomicBool::new(true),
             auto_gain: AtomicBool::new(true),
             output_volume_bits: AtomicU32::new(1.0f32.to_bits()),
+            input_volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             mic_level: Arc::new(AtomicU32::new(0)),
             transmitting: AtomicBool::new(false),
         }
@@ -86,6 +89,15 @@ impl AudioControl {
         self.output_volume_bits.store(value.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
     }
 
+    pub fn set_input_volume(&self, value: f32) {
+        self.input_volume.store(value.clamp(0.0, MAX_VOLUME).to_bits(), Ordering::Relaxed);
+    }
+
+    /// Shared handle for the capture callback (and the mic monitor).
+    pub fn input_volume_handle(&self) -> Arc<AtomicU32> {
+        self.input_volume.clone()
+    }
+
     pub fn set_vad_threshold(&self, value: f32) {
         self.vad_threshold_bits.store(value.to_bits(), Ordering::Relaxed);
     }
@@ -99,6 +111,13 @@ pub type SharedMixer = Arc<Mutex<HashMap<u64, UserAudio>>>;
 
 /// Lokal stummgeschaltete Sprecher (nur clientseitig, kein Server-Eingriff).
 pub type LocalMuteSet = Arc<Mutex<HashSet<u64>>>;
+
+/// Per-speaker playback volume (client id -> gain, 1.0 = 100 %, max 2.0).
+/// Local only; missing entry = 100 %.
+pub type UserVolumeMap = Arc<Mutex<HashMap<u64, f32>>>;
+
+/// Allowed range for per-user and input volume.
+pub const MAX_VOLUME: f32 = 2.0;
 
 /// Laufende Audio-Pipeline. Beim Drop werden die Threads gestoppt.
 pub struct AudioEngine {
@@ -118,6 +137,7 @@ impl AudioEngine {
         control: Arc<AudioControl>,
         talking: TalkingMap,
         local_muted: LocalMuteSet,
+        user_volumes: UserVolumeMap,
         input_device: Option<&str>,
         output_device: Option<&str>,
     ) -> Result<Self> {
@@ -140,7 +160,7 @@ impl AudioEngine {
         // Capture: Mikro -> Ring-Puffer (mit Pegel-Sink fuer die UI).
         let rb = HeapRb::<f32>::new((SAMPLE_RATE * 2) as usize); // 2 s Puffer
         let (prod, cons) = rb.split();
-        let input = capture::build_input_stream(input_device, prod, Some(control.mic_level_sink()))
+        let input = capture::build_input_stream(input_device, prod, Some(control.mic_level_sink()), Some(control.input_volume_handle()))
             .context("Could not start audio input")?;
 
         // Encoder-Thread: Ring-Puffer -> Opus -> UDP.
@@ -154,7 +174,7 @@ impl AudioEngine {
             .context("Encoder-Thread starten")?;
 
         // Wiedergabe: Mixer -> Lautsprecher.
-        let output = playback::build_output_stream(output_device, mixer, control, local_muted)
+        let output = playback::build_output_stream(output_device, mixer, control, local_muted, user_volumes)
             .context("Audio-Ausgabe konnte nicht gestartet werden")?;
 
         Ok(Self { _input: input, _output: output, stop })

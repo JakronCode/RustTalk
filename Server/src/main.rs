@@ -47,13 +47,13 @@ async fn main() -> anyhow::Result<()> {
                 let moved = st.afk_sweep(std::time::Instant::now());
                 for (client_id, channel_id) in moved {
                     let target = st.channel(channel_id).map(|c| c.name.clone()).unwrap_or_default();
-                    let mins = st.settings().afk_timeout_mins;
+                    let message = st.afk_notice(&target);
                     info!("AFK: Client {client_id} -> {target}");
                     st.broadcast(&rusttalk_shared::protocol::ServerMessage::UserMoved { client_id, channel_id });
                     st.send_to(
                         client_id,
                         &rusttalk_shared::protocol::ServerMessage::Notice {
-                            message: format!("You were moved to {target} after {mins} min muted (AFK)"),
+                            message,
                         },
                     );
                 }

@@ -11,8 +11,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusttalk_shared::protocol::{
     ChannelInfo, ChannelKind, ChannelPlacement, ChatRecord, LogEntry, ServerMessage, UserInfo,
-    ServerSettings, MAX_ICON_BYTES, MAX_NAME_LEN, MAX_WELCOME_LEN,
-    SPAWN_LOG_CAP,
+    ServerSettings, MAX_ICON_BYTES, MAX_NAME_LEN, MAX_SERVER_MESSAGE_LEN, MAX_WELCOME_LEN,
+    SPAWN_LOG_CAP, DEFAULT_AFK_NOTICE, fill_template,
 };
 use tokio::sync::mpsc;
 
@@ -23,6 +23,9 @@ use crate::db::Db;
 /// werden Frames fuer diesen Zuschauer verworfen: langsame oder tote
 /// Verbindungen bremsen niemanden und fressen keinen Speicher.
 pub const MAX_VIDEO_BACKLOG: usize = 3 * 1024 * 1024;
+
+/// Sender name of server announcements in text channels (client id 0).
+pub const ANNOUNCER_NAME: &str = "RustTalk";
 
 /// Thread-sicher geteilter State.
 pub type SharedState = std::sync::Arc<std::sync::Mutex<State>>;
@@ -194,6 +197,9 @@ impl State {
             if state.settings.afk_channel.is_some_and(|id| !state.is_afk_target(id)) {
                 state.settings.afk_channel = None;
             }
+            if state.settings.announce_channel.is_some_and(|id| !state.is_text_channel(id)) {
+                state.settings.announce_channel = None;
+            }
             for entry in db.load_events()? {
                 if state.spawn_log.len() >= SPAWN_LOG_CAP {
                     state.spawn_log.pop_front();
@@ -273,6 +279,10 @@ impl State {
             .is_some_and(|c| matches!(c.kind, ChannelKind::Voice | ChannelKind::Spawn))
     }
 
+    fn is_text_channel(&self, id: u64) -> bool {
+        self.channels.get(&id).is_some_and(|c| c.kind == ChannelKind::Text)
+    }
+
     /// Neue Servereinstellungen pruefen, uebernehmen und speichern.
     pub fn update_settings(&mut self, new: ServerSettings) -> Result<ServerSettings, String> {
         let name = validate_name(&new.name)?;
@@ -291,13 +301,74 @@ impl State {
                 return Err("AFK channel must be a voice channel or the lobby".to_string());
             }
         }
-        self.settings = ServerSettings { name, welcome_message: welcome, ..new };
+        if let Some(id) = new.announce_channel {
+            if !self.is_text_channel(id) {
+                return Err("Announcement channel must be a text channel".to_string());
+            }
+        }
+        let short = |label: &str, text: &str| -> Result<String, String> {
+            let t = text.trim().to_string();
+            if t.chars().count() > MAX_SERVER_MESSAGE_LEN {
+                return Err(format!("{label} too long (max. {MAX_SERVER_MESSAGE_LEN} characters)"));
+            }
+            Ok(t)
+        };
+        let join_message = short("Join message", &new.join_message)?;
+        let leave_message = short("Leave message", &new.leave_message)?;
+        let afk_notice = short("AFK notice", &new.afk_notice)?;
+        let motd = short("Message of the day", &new.motd)?;
+        let rules = new.rules.trim().to_string();
+        if rules.chars().count() > MAX_WELCOME_LEN {
+            return Err(format!("Rules too long (max. {MAX_WELCOME_LEN} characters)"));
+        }
+        self.settings = ServerSettings {
+            name,
+            welcome_message: welcome,
+            join_message,
+            leave_message,
+            afk_notice,
+            motd,
+            rules,
+            ..new
+        };
         if let Some(db) = &self.db {
             if let Err(e) = db.save_settings(&self.settings) {
                 tracing::warn!("Einstellungen speichern fehlgeschlagen: {e}");
             }
         }
         Ok(self.settings.clone())
+    }
+
+    /// Join/leave announcement: builds the chat message for the announcement
+    /// channel (and persists it). None if no channel is set or the template is empty.
+    /// `template` is `settings.join_message` or `settings.leave_message`.
+    pub fn announcement(&self, template: &str, username: &str) -> Option<ServerMessage> {
+        let channel_id = self.settings.announce_channel.filter(|id| self.is_text_channel(*id))?;
+        if template.trim().is_empty() {
+            return None;
+        }
+        let text = fill_template(template, &[("user", username)]);
+        let timestamp = now_secs();
+        self.persist_message(channel_id, ANNOUNCER_NAME, &text, timestamp, None);
+        Some(ServerMessage::Chat {
+            channel_id,
+            from_id: 0,
+            from_name: ANNOUNCER_NAME.to_string(),
+            text,
+            timestamp,
+            image: None,
+        })
+    }
+
+    /// Text for a user moved by the AFK mover (template or default).
+    pub fn afk_notice(&self, channel_name: &str) -> String {
+        let template = if self.settings.afk_notice.trim().is_empty() {
+            DEFAULT_AFK_NOTICE
+        } else {
+            &self.settings.afk_notice
+        };
+        let mins = self.settings.afk_timeout_mins.to_string();
+        fill_template(template, &[("channel", channel_name), ("minutes", &mins)])
     }
 
     /// Auto-AFK: Clients in Voice-Channels, die laenger als das Limit stumm
@@ -594,8 +665,15 @@ impl State {
         }
         let was_category = channel.kind == ChannelKind::Category;
         self.channels.remove(&id);
-        if self.settings.afk_channel == Some(id) {
+        let afk_gone = self.settings.afk_channel == Some(id);
+        let announce_gone = self.settings.announce_channel == Some(id);
+        if afk_gone {
             self.settings.afk_channel = None;
+        }
+        if announce_gone {
+            self.settings.announce_channel = None;
+        }
+        if afk_gone || announce_gone {
             if let Some(db) = &self.db {
                 let _ = db.save_settings(&self.settings);
             }
@@ -1175,6 +1253,68 @@ kind = "spawn"
         let st2 = State::new(&cfg).unwrap();
         assert_eq!(order(&st2, None), vec!["B", "A"]);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn server_messages_validation_and_announcements() {
+        let mut st = test_state();
+        let voice = st.all_channels().iter().find(|c| c.name == "Funkturm").unwrap().id;
+        let text = st.all_channels().iter().find(|c| c.name == "quasselbude").unwrap().id;
+        // No announcement channel -> nothing is posted.
+        assert!(st.announcement(&st.settings().join_message.clone(), "anna").is_none());
+        // Only text channels are allowed as announcement target.
+        assert!(st
+            .update_settings(ServerSettings { announce_channel: Some(voice), ..ServerSettings::default() })
+            .is_err());
+        for bad in [
+            ServerSettings { join_message: "x".repeat(MAX_SERVER_MESSAGE_LEN + 1), ..ServerSettings::default() },
+            ServerSettings { leave_message: "x".repeat(MAX_SERVER_MESSAGE_LEN + 1), ..ServerSettings::default() },
+            ServerSettings { afk_notice: "x".repeat(MAX_SERVER_MESSAGE_LEN + 1), ..ServerSettings::default() },
+            ServerSettings { motd: "x".repeat(MAX_SERVER_MESSAGE_LEN + 1), ..ServerSettings::default() },
+            ServerSettings { rules: "x".repeat(MAX_WELCOME_LEN + 1), ..ServerSettings::default() },
+        ] {
+            assert!(st.update_settings(bad).is_err());
+        }
+        let saved = st
+            .update_settings(ServerSettings {
+                announce_channel: Some(text),
+                join_message: "  hi {user}!  ".into(),
+                motd: " Game night ".into(),
+                ..ServerSettings::default()
+            })
+            .unwrap();
+        assert_eq!(saved.join_message, "hi {user}!", "trimmed");
+        assert_eq!(saved.motd, "Game night");
+        match st.announcement(&saved.join_message, "anna") {
+            Some(ServerMessage::Chat { channel_id, from_id, from_name, text: t, .. }) => {
+                assert_eq!(channel_id, text);
+                assert_eq!(from_id, 0);
+                assert_eq!(from_name, ANNOUNCER_NAME);
+                assert_eq!(t, "hi anna!");
+            }
+            other => panic!("expected chat announcement, got {other:?}"),
+        }
+        // Empty template = off.
+        assert!(st.announcement("  ", "anna").is_none());
+        // Deleting the announcement channel switches announcements off.
+        st.delete_channel(text).unwrap();
+        assert_eq!(st.settings().announce_channel, None);
+        assert!(st.announcement("hi {user}", "anna").is_none());
+    }
+
+    #[test]
+    fn afk_notice_uses_template_or_default() {
+        let mut st = test_state();
+        assert_eq!(st.afk_notice("Lobby"), "You were moved to Lobby after 10 min muted (AFK)");
+        st.update_settings(ServerSettings {
+            afk_timeout_mins: 5,
+            afk_notice: "Zzz - {channel} ({minutes})".into(),
+            ..ServerSettings::default()
+        })
+        .unwrap();
+        assert_eq!(st.afk_notice("AFK"), "Zzz - AFK (5)");
+        st.update_settings(ServerSettings { afk_notice: String::new(), ..ServerSettings::default() }).unwrap();
+        assert!(st.afk_notice("Lobby").starts_with("You were moved to Lobby"), "empty = default");
     }
 
     #[test]

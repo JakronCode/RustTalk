@@ -155,8 +155,14 @@ impl Db {
             .conn
             .query_row("SELECT value FROM settings WHERE key = 'server'", [], |r| r.get(0))
             .ok();
-        Ok(blob.and_then(|b| match bincode::deserialize(&b) {
+        Ok(blob.and_then(|b| match bincode::deserialize::<ServerSettings>(&b) {
             Ok(s) => Some(s),
+            // Protocol v7 blob (before the server message fields): migrate.
+            Err(_) if bincode::deserialize::<SettingsV7>(&b).is_ok() => {
+                let old: SettingsV7 = bincode::deserialize(&b).expect("checked above");
+                tracing::info!("Einstellungen aus v7 migriert");
+                Some(old.into())
+            }
             Err(e) => {
                 tracing::warn!("Gespeicherte Einstellungen unlesbar, nutze Config: {e}");
                 None
@@ -253,6 +259,32 @@ impl Db {
     }
 }
 
+/// `ServerSettings` as stored by protocol v7 (bincode has no field defaults,
+/// so old blobs need their own type to be read).
+#[derive(serde::Deserialize)]
+struct SettingsV7 {
+    name: String,
+    icon: Option<Vec<u8>>,
+    welcome_message: String,
+    afk_enabled: bool,
+    afk_timeout_mins: u32,
+    afk_channel: Option<u64>,
+}
+
+impl From<SettingsV7> for ServerSettings {
+    fn from(o: SettingsV7) -> Self {
+        ServerSettings {
+            name: o.name,
+            icon: o.icon,
+            welcome_message: o.welcome_message,
+            afk_enabled: o.afk_enabled,
+            afk_timeout_mins: o.afk_timeout_mins,
+            afk_channel: o.afk_channel,
+            ..ServerSettings::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +319,47 @@ mod tests {
         let channels = db.load_channels().unwrap();
         assert_eq!(channels.len(), 2);
         assert_eq!(channels[1].parent, None);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn v7_settings_are_migrated() {
+        #[derive(serde::Serialize)]
+        struct V7 {
+            name: String,
+            icon: Option<Vec<u8>>,
+            welcome_message: String,
+            afk_enabled: bool,
+            afk_timeout_mins: u32,
+            afk_channel: Option<u64>,
+        }
+        let path = temp_db("settings-v7");
+        let db = Db::open(&path).unwrap();
+        let old = V7 {
+            name: "Old Server".into(),
+            icon: Some(vec![1, 2, 3]),
+            welcome_message: "Hi".into(),
+            afk_enabled: false,
+            afk_timeout_mins: 7,
+            afk_channel: Some(4),
+        };
+        db.conn
+            .execute(
+                "INSERT INTO settings (key, value) VALUES ('server', ?1)",
+                params![bincode::serialize(&old).unwrap()],
+            )
+            .unwrap();
+        let s = db.load_settings().unwrap().expect("migrated");
+        assert_eq!(s.name, "Old Server");
+        assert_eq!(s.icon, Some(vec![1, 2, 3]));
+        assert_eq!(s.welcome_message, "Hi");
+        assert!(!s.afk_enabled);
+        assert_eq!(s.afk_timeout_mins, 7);
+        assert_eq!(s.afk_channel, Some(4));
+        assert_eq!(s.join_message, ServerSettings::default().join_message, "new fields get defaults");
+        // Saving again writes the v8 format, which loads directly.
+        db.save_settings(&s).unwrap();
+        assert_eq!(db.load_settings().unwrap(), Some(s));
         std::fs::remove_file(&path).ok();
     }
 

@@ -207,6 +207,13 @@ impl RustTalkApp {
                     });
                 });
             });
+            if !settings.rules.is_empty() {
+                ui.add_space(8.0);
+                theme::card(ui, |ui| {
+                    theme::caption(ui, &format!("{}  Server rules", icons::regular::SCROLL));
+                    ui.add(egui::Label::new(egui::RichText::new(&settings.rules).color(theme::TEXT)).wrap());
+                });
+            }
             ui.add_space(12.0);
             theme::caption(ui, "Activity");
         });
