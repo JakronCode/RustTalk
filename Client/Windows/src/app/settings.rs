@@ -458,8 +458,14 @@ impl RustTalkApp {
                 toggle(ui, &mut self.config.flash_taskbar);
             });
             ui.separator();
-            setting_row(ui, "Desktop notifications", Some("Pop-up for new messages while RustTalk is in the background"), true, |ui| {
-                toggle(ui, &mut false.clone());
+            setting_row(ui, "Desktop notifications", Some("Windows pop-up for new messages while RustTalk is in the background (click opens the channel)"), false, |ui| {
+                toggle(ui, &mut self.config.desktop_notifications);
+            });
+            ui.separator();
+            ui.add_enabled_ui(self.config.desktop_notifications, |ui| {
+                setting_row(ui, "Show message text", Some("Off = the pop-up only says \"New message\""), false, |ui| {
+                    toggle(ui, &mut self.config.notification_preview);
+                });
             });
         });
         card(ui, |ui| {
@@ -495,9 +501,10 @@ impl RustTalkApp {
     fn page_advanced(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
             caption(ui, "Data");
-            setting_row(ui, "Settings file", Some(ClientConfig::PATH), false, |ui| {
+            let path = std::path::absolute(ClientConfig::path()).unwrap_or_else(|_| ClientConfig::path());
+            setting_row(ui, "Settings file", Some(&path.display().to_string()), false, |ui| {
                 if ui.button(format!("{}  Show in folder", icons::regular::FOLDER_OPEN)).clicked() {
-                    let dir = std::env::current_dir().unwrap_or_default();
+                    let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
                     let _ = std::process::Command::new("explorer").arg(dir).spawn();
                 }
             });
@@ -544,6 +551,7 @@ impl RustTalkApp {
                 });
             }
         });
+        self.updates_card(ui);
         card(ui, |ui| {
             caption(ui, "Feedback");
             setting_row(ui, "Found a bug?", Some("Opens a new GitHub issue with your version pre-filled"), false, |ui| {

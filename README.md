@@ -18,7 +18,8 @@ Lightweight voice chat in Rust — a Discord-style client with a TeamSpeak-style
 - **Discord-style UI:** server menu, voice panel, user panel, settings window with categories, channel settings (partly WIP)
 - **Text chat** with history, images (PNG/JPEG/GIF, **animated**), unread markers, **replies**, **edit/delete** own messages, **@mentions** (highlight, sound, autocomplete), **search** per channel
 - **GIF picker (GIPHY), Discord style:** trending on open, search while typing, two-column grid, click = send. One GIPHY key per **server** (Server Settings > Integrations) – members enter nothing; the server searches and caches, the key never leaves it
-- **Notifications:** sounds for join/leave in your voice channel, new messages and mute; taskbar flash while in the background
+- **Notifications:** Windows pop-ups (toasts) for new messages while RustTalk is in the background (click opens the channel, text can be hidden), sounds for join/leave/messages/mute, taskbar flash
+- **Installer + updater:** the downloaded exe installs itself per user; in-app updates from the GitHub releases
 - **SQLite persistence** (server): channels (incl. order), chat history (retention 10k per channel) and the lobby log survive restarts
 - **Client UI:** dark mode, procedural logo, saved servers, settings in a separate window, mic level meter, avatars with talking ring, per-user local mute and **per-user volume** 0–200 % (right click, remembered by name), **input volume**, UI scaling
 - **Auto-reconnect:** on connection loss the client retries with backoff (1 s … 30 s) and rejoins the last voice channel with the same mute state
@@ -29,7 +30,7 @@ Lightweight voice chat in Rust — a Discord-style client with a TeamSpeak-style
 
 ### Not yet (WIP)
 
-- Desktop pop-up notifications, toggle-mute/deafen hotkeys, roles/bans/invites — see [ROADMAP.md](ROADMAP.md)
+- Toggle-mute/deafen hotkeys, roles/bans/invites — see [ROADMAP.md](ROADMAP.md)
 
 ---
 
@@ -87,11 +88,19 @@ With persistence enabled, the channels in `server.toml` are only used on the ver
 
 Open port **7331** (TCP+UDP) in the firewall if nftables/ufw is active.
 
-Prebuilt binaries are attached to the [GitHub releases](https://github.com/JakronCode/RustTalk/releases).
+Prebuilt binaries are attached to the [GitHub releases](https://github.com/JakronCode/RustTalk/releases) (`rusttalk-server-linux-x86_64.tar.gz`).
 
-### Client (Windows)
+### Client (Windows) – install
 
-Requirements: Rust (MSVC toolchain incl. C++ build tools).
+Download `rusttalk-windows.exe` from the [latest release](https://github.com/JakronCode/RustTalk/releases/latest) and run it. It installs itself for your user (no admin rights): `%LOCALAPPDATA%\Programs\RustTalk`, Start menu entry (optional desktop shortcut), settings in `%APPDATA%\RustTalk`. Uninstall via Windows **Apps & features**.
+
+**Updates:** the installed app checks GitHub for a newer release on start (Settings > About > Updates) and installs it on one click (download, SHA-256 check, restart).
+
+Command line (for admins/scripts): `rusttalk-windows.exe --install [--desktop-shortcut] [--no-start]`, `rusttalk.exe --uninstall [--quiet] [--remove-settings]`, `rusttalk.exe --update`.
+
+### Client (Windows) – build from source
+
+Requirements: Rust (MSVC toolchain incl. C++ build tools). Builds started from a cargo `target` folder (and debug builds) run **portable** – no install screen, settings in the working directory.
 
 > ⚠️ **WDAC note (this development machine):** WDAC blocks cargo build scripts under `Documents` (os error 4551). Therefore **always build/test via the wrapper**, which mirrors the workspace to `%LOCALAPPDATA%\Programs\RustTalk-src`:
 
@@ -106,6 +115,16 @@ powershell -ExecutionPolicy Bypass -File Client\Windows\Test_Scripts\cargo.ps1 -
 On machines without such policies a plain `cargo build --release -p rusttalk-client` is enough (the exe is then in `target\release\`).
 
 On start: enter the server address (e.g. `10.69.40.101`) and a username, then connect. "Save server" adds it to your saved servers.
+
+### Releasing
+
+Bump the version in `Client/Windows/Cargo.toml`, `Server/Cargo.toml` and `shared/Cargo.toml`, then push a tag:
+
+```bash
+git tag v0.4.0 && git push origin v0.4.0
+```
+
+The [Release workflow](.github/workflows/release.yml) checks that the tag matches the versions and attaches `rusttalk-windows.exe` (+ `.sha256`, needed by the updater) and the Linux server package to the GitHub release.
 
 ### Tests
 

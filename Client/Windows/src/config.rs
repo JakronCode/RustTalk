@@ -55,6 +55,15 @@ pub struct ClientConfig {
     /// Playback volume for everyone (1.0 = 100 %, max 2.0).
     #[serde(default = "default_one")]
     pub output_volume: f32,
+    /// Windows pop-up for new messages while RustTalk is in the background.
+    #[serde(default = "default_true")]
+    pub desktop_notifications: bool,
+    /// Show the message text in the pop-up (off = only "New message").
+    #[serde(default = "default_true")]
+    pub notification_preview: bool,
+    /// Ask GitHub for a newer release on start.
+    #[serde(default = "default_true")]
+    pub check_updates: bool,
     /// Flash the taskbar icon on new messages while RustTalk is in the background.
     #[serde(default = "default_true")]
     pub flash_taskbar: bool,
@@ -119,6 +128,9 @@ impl Default for ClientConfig {
             ui_scale: 1.0,
             show_timestamps: true,
             output_volume: 1.0,
+            desktop_notifications: true,
+            notification_preview: true,
+            check_updates: true,
             flash_taskbar: true,
             sound_join: true,
             sound_leave: true,
@@ -133,11 +145,14 @@ impl Default for ClientConfig {
 }
 
 impl ClientConfig {
-    pub const PATH: &'static str = "client_config.toml";
+    /// Settings file: `%APPDATA%\RustTalk` when installed, else the working dir.
+    pub fn path() -> std::path::PathBuf {
+        crate::install::config_path()
+    }
 
     /// Laedt die Config; bei fehlender/kaputter Datei: Defaults.
     pub fn load() -> Self {
-        std::fs::read_to_string(Self::PATH)
+        std::fs::read_to_string(Self::path())
             .ok()
             .and_then(|text| toml::from_str(&text).ok())
             .unwrap_or_default()
@@ -147,7 +162,11 @@ impl ClientConfig {
     pub fn save(&self) {
         match toml::to_string_pretty(self) {
             Ok(text) => {
-                if let Err(e) = std::fs::write(Self::PATH, text) {
+                let path = Self::path();
+                if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                if let Err(e) = std::fs::write(&path, text) {
                     tracing::warn!("Config konnte nicht gespeichert werden: {e}");
                 }
             }
@@ -182,6 +201,9 @@ mod tests {
             ui_scale: 1.0,
             show_timestamps: true,
             output_volume: 1.0,
+            desktop_notifications: false,
+            notification_preview: false,
+            check_updates: false,
             flash_taskbar: false,
             sound_join: true,
             sound_leave: false,
@@ -204,6 +226,7 @@ mod tests {
         assert!(back.global_ptt);
         assert!(!back.animate_gifs);
         assert!(!back.flash_taskbar && !back.sound_leave && back.sound_join);
+        assert!(!back.desktop_notifications && !back.notification_preview && !back.check_updates);
         assert_eq!(back.user_volumes.get("anna"), Some(&1.5));
     }
 
@@ -219,6 +242,7 @@ mod tests {
         assert_eq!(cfg.input_volume, 1.0);
         assert!(!cfg.global_ptt, "global PTT is opt-in");
         assert!(cfg.animate_gifs);
+        assert!(cfg.desktop_notifications && cfg.notification_preview && cfg.check_updates);
         assert!(cfg.flash_taskbar && cfg.sound_join && cfg.sound_leave && cfg.sound_message && cfg.sound_mute);
         assert!(cfg.user_volumes.is_empty());
         assert!(cfg.server_address.ends_with(":7331"));

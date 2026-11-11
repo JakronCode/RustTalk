@@ -2,6 +2,23 @@
 
 > Pflichtdokumentation aller Testläufe. Neueste oben.
 
+## 2026-11-11 (20) – Windows-Toasts, Installation statt portabel, Updater (v0.4.0)
+
+**Wünsche:** Desktop-Pop-ups (Windows-Toasts); keine portable Version mehr, sondern installieren + persistenter Client; Update-Funktion, die sich die aktuellste Version aus dem Repo holt.
+
+**Client:**
+- **Installation** (`install.rs`): Die Release-Exe ist ihr eigener Installer. Außerhalb des Installationsordners gestartet zeigt sie „Install RustTalk“ → `%LOCALAPPDATA%\Programs\RustTalk\rusttalk.exe`, Startmenü- (+ optional Desktop-)Verknüpfung (`mslnk`), Eintrag in „Apps & Features“ (HKCU, Deinstallation über `--uninstall`, fragt ob Einstellungen gelöscht werden sollen), App-ID für Toasts (HKCU `AppUserModelId`). Einstellungen der installierten App in `%APPDATA%\RustTalk` (alte `client_config.toml` wird übernommen). Kein Admin nötig. Dev-Builds (Debug oder aus `target\`, also auch `cargo.ps1`) bleiben portabel wie bisher.
+- **Updater** (`update.rs`): prüft beim Start `releases/latest` von `JakronCode/RustTalk` (User-Agent „RustTalk-Updater“, keine Nutzerdaten), Settings > About > Updates mit „Install update & restart“ + Fortschritt; Download → SHA-256 gegen `.sha256` aus dem Release (ohne Prüfsumme kein Update) → laufende Exe umbenennen, neue an ihren Platz, Neustart. Hinweis-Banner auf dem Verbindungsbildschirm.
+- **Toasts** (`notify.rs`, `tauri-winrt-notification`): neue Nachricht bei Fenster im Hintergrund → Pop-up „Name · Channel“ + Text (abschaltbar: „Show message text“); Klick holt das Fenster nach vorne und öffnet den Channel; max. 1 Toast / 2 s (Erwähnungen immer). Installiert als „RustTalk“ mit Icon, portabel unter „PowerShell“.
+- Kommandozeile: `--install [--desktop-shortcut] [--no-start]`, `--uninstall [--quiet] [--remove-settings]`, `--update`. Release-Builds ohne Konsolenfenster.
+- **Release-Workflow** `.github/workflows/release.yml`: bei Tag `v*` Versionsprüfung (Tag = Cargo-Versionen), Windows-Client als `rusttalk-windows.exe` + `.sha256`, Linux-Server-Paket. Versionen auf **0.4.0** angehoben.
+
+**Tests:** Client 73 ✅ (neu: Modus-Erkennung, Icons, Versionsvergleich, Release-Parsing, Prüfsummen, Toast-Texte; Toast manuell per `--ignored` ✅), Server 43 ✅, Integration 12 ✅, Shared 13 ✅.
+**Live geprüft (Windows, echtes Benutzerprofil, danach wieder entfernt):** Installationsbildschirm (Screenshot); `--install --desktop-shortcut` → Exe, Icons, beide Verknüpfungen (Ziel/Icon/Arbeitsordner), Apps-&-Features-Eintrag 0.4.0, App-ID; `--update` gegen Fake-GitHub: falsche Prüfsumme → abgelehnt, Exe unverändert; gültiges Release v0.4.1 → Exe getauscht, Hash stimmt; gleiche Version → nichts; `--uninstall --quiet --remove-settings` → alles entfernt (**Bugfix:** Ordner blieb zuerst stehen, weil `cmd.exe` Rusts `\"`-Quoting nicht versteht → `raw_arg`). Echter Toast über die Windows-API angezeigt.
+**Nicht geprüft:** Toast-Klick, Toast mit „RustTalk“-App-ID im installierten Client, Install-Button per Maus, Release-Workflow auf GitHub (läuft erst beim ersten Tag).
+
+---
+
 ## 2026-11-11 (19) – Klarere UI fürs Löschen, Antworten und Bearbeiten
 
 **Wünsche:** Beim Löschen nachfragen, beim Antworten die Nachricht hervorheben, beim Bearbeiten Haken/X zum Bestätigen/Abbrechen.

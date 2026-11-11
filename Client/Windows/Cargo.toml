@@ -1,6 +1,6 @@
 [package]
 name = "rusttalk-client"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 
 [[bin]]
@@ -14,7 +14,7 @@ egui-phosphor = "0.9"
 nnnoiseless = "0.5"
 cpal = "0.15"
 # Medien: Bilder, Kamera, Bildschirm, GIFs
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "ico"] }
 rfd = "0.15"
 # input-msmf = Windows-Kamera-Backend (Media Foundation). Ohne dieses Feature
 # hat nokhwa auf Windows KEIN Backend und jede Kamera schlaegt fehl.
@@ -25,6 +25,11 @@ ureq = { version = "2", features = ["json"] }
 serde_json = "1"
 # Global push-to-talk: polls key/mouse state (no hook, keys still reach other apps)
 device_query = "4"
+# Windows toasts (pop-ups), install (registry, Start menu link), update check (SHA-256)
+tauri-winrt-notification = "0.8"
+winreg = "0.55"
+mslnk = "0.1"
+sha2 = "0.10"
 audiopus = "0.2"
 ringbuf = "0.4"
 tokio = { version = "1", features = ["net", "time", "io-util", "sync", "rt", "macros"] }

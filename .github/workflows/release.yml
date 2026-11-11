@@ -1,0 +1,70 @@
+# Builds a release when a version tag is pushed (e.g. `git tag v0.4.0 && git push origin v0.4.0`).
+#
+# Attaches to the GitHub release:
+#   rusttalk-windows.exe         client = installer (the in-app updater downloads this)
+#   rusttalk-windows.exe.sha256  checksum (the updater refuses updates without it)
+#   rusttalk-server-linux-x86_64.tar.gz  server binary + server.toml + deploy scripts
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match the Cargo version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          for f in Client/Windows/Cargo.toml Server/Cargo.toml shared/Cargo.toml; do
+            v=$(grep -m1 '^version' "$f" | cut -d'"' -f2)
+            if [ "$v" != "$tag" ]; then
+              echo "::error::$f has version $v, tag is $GITHUB_REF_NAME"
+              exit 1
+            fi
+          done
+
+  windows-client:
+    needs: check-version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release -p rusttalk-client
+      - name: Package
+        shell: pwsh
+        run: |
+          Copy-Item target/release/rusttalk.exe rusttalk-windows.exe
+          $hash = (Get-FileHash rusttalk-windows.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  rusttalk-windows.exe" | Out-File -Encoding ascii -NoNewline rusttalk-windows.exe.sha256
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            rusttalk-windows.exe
+            rusttalk-windows.exe.sha256
+
+  linux-server:
+    needs: check-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        run: cargo test -p rusttalk-shared -p rusttalk-server
+      - name: Build
+        run: cargo build --release -p rusttalk-server
+      - name: Package
+        run: |
+          mkdir -p dist/rusttalk-server
+          cp target/release/rusttalk-server Server/server.toml dist/rusttalk-server/
+          cp -r Server/deploy dist/rusttalk-server/
+          tar -C dist -czf rusttalk-server-linux-x86_64.tar.gz rusttalk-server
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: rusttalk-server-linux-x86_64.tar.gz

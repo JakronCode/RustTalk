@@ -15,6 +15,7 @@
 
 mod channel_settings;
 mod connect;
+mod lifecycle;
 mod media_ui;
 mod server_settings;
 mod settings;
@@ -318,6 +319,13 @@ pub struct RustTalkApp {
     /// Fehler aus dem Kamera-Thread fuer die Anzeige im Kamera-Dialog.
     cam_error: Arc<Mutex<Option<String>>>,
     giphy: GifPicker,
+    /// Not installed yet: the whole window is the install screen.
+    install_screen: Option<lifecycle::InstallScreen>,
+    update: lifecycle::UpdateState,
+    /// Clicked toasts report their channel here.
+    toast_tx: std::sync::mpsc::Sender<u64>,
+    toast_rx: std::sync::mpsc::Receiver<u64>,
+    last_toast: Option<Instant>,
     /// The server offers GIF search (it has a GIPHY key).
     gif_available: bool,
     /// Where the GIF that is downloading goes: (channel, reply_to).
@@ -341,6 +349,7 @@ impl RustTalkApp {
         control.set_output_volume(config.output_volume);
         control.set_input_volume(config.input_volume);
         let global_ptt = hotkey::spawn_global_ptt(control.clone());
+        let (toast_tx, toast_rx) = std::sync::mpsc::channel::<u64>();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let (giphy_tx, giphy_rx) = std::sync::mpsc::channel::<GiphyMsg>();
         Self {
@@ -409,6 +418,11 @@ impl RustTalkApp {
             local_preview_tex: None,
             cam_error: Arc::new(Mutex::new(None)),
             giphy: GifPicker::default(),
+            install_screen: (crate::install::mode() == crate::install::Mode::NotInstalled).then(lifecycle::InstallScreen::new),
+            update: lifecycle::UpdateState::new(),
+            toast_tx,
+            toast_rx,
+            last_toast: None,
             gif_available: false,
             gif_target: None,
             gif_button_rect: None,
@@ -914,6 +928,9 @@ impl RustTalkApp {
                     if mentioned || !focused || self.selected_channel != Some(channel_id) {
                         self.notify(Sound::Message);
                     }
+                    if !focused {
+                        self.message_toast(channel_id, &from_name, &text, image.is_some(), mentioned);
+                    }
                     if !focused && self.config.flash_taskbar {
                         self.ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                             egui::UserAttentionType::Informational,
@@ -1006,6 +1023,19 @@ impl RustTalkApp {
 
 impl eframe::App for RustTalkApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.install_screen.is_some() {
+            self.ui_install(ctx);
+            return;
+        }
+        self.poll_background(ctx);
+        // Installed app: look for an update once per start.
+        static CHECKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if self.config.check_updates
+            && crate::install::mode() == crate::install::Mode::Installed
+            && !CHECKED.swap(true, Ordering::Relaxed)
+        {
+            self.check_for_updates();
+        }
         while let Ok(ev) = self.event_rx.try_recv() {
             self.handle_event(ev);
         }
