@@ -771,6 +771,36 @@ async fn plaintext_clients_are_refused() {
     assert!(!matches!(answer, Ok(Ok(Some(ServerMessage::Welcome { .. })))), "no Welcome without TLS");
 }
 
+/// A viewer's keyframe request reaches the sharer - only within the channel.
+#[tokio::test]
+async fn keyframe_requests_reach_the_sharer() {
+    let port = free_port();
+    let _server = spawn_server(port, "[[channels]]
+name = \"Funkturm\"
+kind = \"voice\"
+");
+    wait_for_port(port);
+    let (mut a, wa) = connect(port, "alice", None).await;
+    let (mut b, _) = connect(port, "bob", None).await;
+    let (mut c, _) = connect(port, "carol", None).await;
+    for conn in [&mut a, &mut b] {
+        send(conn, &ClientMessage::JoinChannel { channel_id: 2 }).await;
+    }
+    send(&mut a, &ClientMessage::SetSharing { sharing: true }).await;
+    for conn in [&mut a, &mut b, &mut c] {
+        drain(conn, 500).await;
+    }
+    // carol is in the lobby, not watching: her request is ignored.
+    send(&mut c, &ClientMessage::RequestKeyframe { from_id: wa.client_id, kind: VideoKind::Screen }).await;
+    assert!(recv(&mut a, 600).await.is_none(), "no request from outside the channel");
+    // bob watches: alice is asked for a keyframe.
+    send(&mut b, &ClientMessage::RequestKeyframe { from_id: wa.client_id, kind: VideoKind::Screen }).await;
+    match recv(&mut a, 2000).await {
+        Some(ServerMessage::KeyframeRequest { kind: VideoKind::Screen }) => {}
+        other => panic!("KeyframeRequest erwartet, bekam: {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn passwort_schutz() {
     let port = free_port();

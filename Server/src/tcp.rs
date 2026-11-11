@@ -439,6 +439,13 @@ async fn message_loop(
                     }
                 }
             }
+            ClientMessage::RequestKeyframe { from_id, kind } => {
+                // Only between people in the same channel, only to someone sharing.
+                let same = st.client(from_id).zip(st.client(client_id)).is_some_and(|(s, v)| s.channel_id == v.channel_id && s.sharing);
+                if same {
+                    st.send_to(from_id, &ServerMessage::KeyframeRequest { kind });
+                }
+            }
             ClientMessage::StopVideo { kind } => {
                 // Kommt vor einem evtl. SetSharing(false) -> Ziele noch gueltig.
                 let msg = ServerMessage::VideoStopped { from_id: client_id, kind };

@@ -158,8 +158,9 @@ impl RustTalkApp {
                         // Video tiles first (screen before camera).
                         for user in &members {
                             for kind in [VideoKind::Screen, VideoKind::Camera] {
-                                if let Some(data) = self.video_frames.get(&(user.id, kind)).cloned() {
-                                    if video_tile(ui, &mut self.textures, &data, user, kind).clicked() {
+                                if let Some(view) = self.video_frames.get(&(user.id, kind)) {
+                                    let tex = view.tex.clone();
+                                    if video_tile(ui, tex.as_ref(), user, kind).clicked() {
                                         open_fs = Some((user.id, kind));
                                     }
                                 }
@@ -630,8 +631,7 @@ fn member_card(ui: &mut egui::Ui, user: &UserInfo, speaking: bool, me: bool) {
 /// Video tile (click = fullscreen).
 fn video_tile(
     ui: &mut egui::Ui,
-    textures: &mut TextureCache,
-    data: &[u8],
+    tex: Option<&egui::TextureHandle>,
     user: &UserInfo,
     kind: VideoKind,
 ) -> egui::Response {
@@ -639,11 +639,17 @@ fn video_tile(
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     let p = ui.painter();
     p.rect_filled(rect, 10.0, egui::Color32::BLACK);
-    if let Some(tex) = textures.texture_for(ui.ctx(), data, &format!("video-{}-{kind:?}", user.id)) {
-        let fit = theme::fit_size(tex.size_vec2(), rect.size());
-        egui::Image::new(&tex)
-            .corner_radius(10.0)
-            .paint_at(ui, egui::Rect::from_center_size(rect.center(), fit));
+    match tex {
+        Some(tex) => {
+            let fit = theme::fit_size(tex.size_vec2(), rect.size());
+            egui::Image::new(tex)
+                .corner_radius(10.0)
+                .paint_at(ui, egui::Rect::from_center_size(rect.center(), fit));
+        }
+        None => {
+            // First keyframe not there yet.
+            p.text(rect.center(), egui::Align2::CENTER_CENTER, "Connecting...", egui::FontId::proportional(13.0), theme::MUTED);
+        }
     }
     let label = format!("{}  {}", kind_icon(kind), user.name);
     let galley = p.layout_no_wrap(label, egui::FontId::proportional(12.5), egui::Color32::WHITE);

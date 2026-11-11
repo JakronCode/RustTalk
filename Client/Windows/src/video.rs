@@ -1,28 +1,24 @@
 //! Video-Capture: Kamera (nokhwa/Media Foundation) und Bildschirm/Fenster
-//! (xcap) -> JPEG-Frames.
+//! (xcap) -> H.264 (`video_codec`).
 //!
-//! MVP-Ansatz: MJPEG (~25 fps; Kamera max. 960x540, Bildschirm max.
-//! 1280x720) ueber den TCP-Steuerkanal. Auf dem LAN ausreichend;
-//! H.264/AV1-Streaming waere Phase 5.
-//!
-//! Jede Quelle laeuft in einem eigenen Thread und liefert Frames an eine
-//! Senke `on_frame(jpeg, sending)`. `sending` ist `false`, solange die
-//! Quelle nur fuer die lokale Vorschau laeuft (Kamera-Dialog) – die UI
-//! zeigt den Frame dann nur lokal an und schickt nichts an den Server.
+//! Each source runs a capture thread and ONE encoder thread (H.264 frames
+//! depend on each other, so they are encoded in order). The capture thread
+//! hands over at most one picture at a time; a busy encoder drops frames
+//! instead of building up latency. Frames go to a sink `on_frame(VideoOut)`:
+//! the H.264 frame while `sending`, plus a preview picture for the camera
+//! dialog.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use eframe::egui;
+
+use crate::video_codec::{fit_even, H264Encoder};
 
 /// Frame-Intervall: 25 fps.
 pub const FRAME_INTERVAL: Duration = Duration::from_millis(40);
-/// Standardgroesse fuer `encode_jpeg` (nur Tests).
-#[cfg(test)]
-pub const MAX_W: u32 = 960;
-#[cfg(test)]
-pub const MAX_H: u32 = 540;
 
 /// Gleichmaessiger Takt: laesst im Schnitt einen Frame pro `FRAME_INTERVAL`
 /// durch, auch wenn die Quelle (z. B. Kamera mit 30 fps) etwas schneller ist.
@@ -60,6 +56,7 @@ pub const THUMB_H: u32 = 180;
 pub struct VideoCapture {
     stop: Arc<AtomicBool>,
     sending: Arc<AtomicBool>,
+    keyframe: Arc<AtomicBool>,
 }
 
 impl VideoCapture {
@@ -74,6 +71,11 @@ impl VideoCapture {
 
     pub fn is_sending(&self) -> bool {
         self.sending.load(Ordering::Relaxed)
+    }
+
+    /// A viewer needs a full picture: the next frame is a keyframe.
+    pub fn request_keyframe(&self) {
+        self.keyframe.store(true, Ordering::Relaxed);
     }
 }
 
@@ -98,121 +100,93 @@ pub enum VideoQuality {
 pub struct EncodeParams {
     pub max_w: u32,
     pub max_h: u32,
-    pub quality: u8,
-    /// Parallele Kodier-Threads (1080p braucht ~65 ms pro Bild -> 3 fuer 25 fps).
-    pub workers: usize,
+    /// H.264 bit rate (bits per second).
+    pub bitrate: u32,
 }
 
 impl VideoQuality {
     pub fn label(self) -> &'static str {
         match self {
-            VideoQuality::Balanced => "Balanced (720p, ~2.5 MB/s)",
-            VideoQuality::High => "High (1080p, ~6 MB/s)",
+            VideoQuality::Balanced => "Balanced (720p, ~2 Mbit/s)",
+            VideoQuality::High => "High (1080p, ~4 Mbit/s)",
         }
     }
 
     pub fn screen(self) -> EncodeParams {
         match self {
-            VideoQuality::Balanced => EncodeParams { max_w: 1280, max_h: 720, quality: 70, workers: 2 },
-            VideoQuality::High => EncodeParams { max_w: 1920, max_h: 1080, quality: 75, workers: 3 },
+            VideoQuality::Balanced => EncodeParams { max_w: 1280, max_h: 720, bitrate: 2_000_000 },
+            VideoQuality::High => EncodeParams { max_w: 1920, max_h: 1080, bitrate: 4_000_000 },
         }
     }
 
     pub fn camera(self) -> EncodeParams {
         match self {
-            VideoQuality::Balanced => EncodeParams { max_w: 960, max_h: 540, quality: 70, workers: 1 },
-            VideoQuality::High => EncodeParams { max_w: 1280, max_h: 720, quality: 80, workers: 2 },
+            VideoQuality::Balanced => EncodeParams { max_w: 960, max_h: 540, bitrate: 1_200_000 },
+            VideoQuality::High => EncodeParams { max_w: 1280, max_h: 720, bitrate: 2_500_000 },
         }
     }
 }
 
-/// Auftrag an den Encoder-Pool (Sequenznummer haelt die Reihenfolge).
+/// What the encoder thread delivers per picture.
+pub struct VideoOut {
+    /// H.264 wire frame (only while sending).
+    pub frame: Option<Vec<u8>>,
+    /// Picture for the local camera preview (camera only).
+    pub preview: Option<egui::ColorImage>,
+}
+
+/// Auftrag an den Encoder-Thread.
 struct EncodeJob {
-    seq: u64,
     img: image::DynamicImage,
 }
 
-/// Encoder-Pool: `workers` Threads kodieren parallel, ein Sammler-Thread
-/// ruft `on_frame` in Aufnahme-Reihenfolge auf (verspaetete aeltere Bilder
-/// werden verworfen). Die Queue fasst nur `workers` Auftraege; ist sie voll,
-/// verwirft der Aufrufer das Bild (`try_send`) statt Latenz aufzubauen.
-/// Alles endet, sobald der zurueckgegebene Sender gedroppt wird.
-fn spawn_encoder_pool<F>(
+/// Starts the encoder thread of a source. It ends when the returned sender
+/// is dropped. The channel holds one picture: a busy encoder drops frames.
+fn spawn_encoder<F>(
     name: &str,
     params: EncodeParams,
+    screen: bool,
+    preview: bool,
     sending: Arc<AtomicBool>,
+    keyframe: Arc<AtomicBool>,
     mut on_frame: F,
 ) -> Result<std::sync::mpsc::SyncSender<EncodeJob>>
 where
-    F: FnMut(Vec<u8>, bool) + Send + 'static,
+    F: FnMut(VideoOut) + Send + 'static,
 {
-    let workers = params.workers.max(1);
-    let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<EncodeJob>(workers);
-    let job_rx = Arc::new(std::sync::Mutex::new(job_rx));
-    let (out_tx, out_rx) = std::sync::mpsc::channel::<(u64, Vec<u8>)>();
-    for i in 0..workers {
-        let job_rx = job_rx.clone();
-        let out_tx = out_tx.clone();
-        std::thread::Builder::new()
-            .name(format!("{name}-enc{i}"))
-            .spawn(move || loop {
-                let job = match job_rx.lock().unwrap().recv() {
-                    Ok(j) => j,
-                    Err(_) => break, // Aufnahme beendet
-                };
-                match encode_jpeg_q(job.img, params.max_w, params.max_h, params.quality) {
-                    Ok(jpeg) => {
-                        if out_tx.send((job.seq, jpeg)).is_err() {
-                            break;
+    let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<EncodeJob>(1);
+    std::thread::Builder::new()
+        .name(format!("{name}-enc"))
+        .spawn(move || {
+            let mut enc = H264Encoder::new(params.bitrate, screen);
+            let mut was_sending = false;
+            for job in job_rx {
+                let rgb = fit_even(job.img, params.max_w, params.max_h);
+                let now_sending = sending.load(Ordering::Relaxed);
+                // Asked for, or just went live: start with a full picture.
+                if keyframe.swap(false, Ordering::Relaxed) || (now_sending && !was_sending) {
+                    enc.request_keyframe();
+                }
+                was_sending = now_sending;
+                let frame = if now_sending {
+                    match enc.encode(&rgb) {
+                        Ok(f) => Some(f),
+                        Err(e) => {
+                            tracing::warn!("{e:#}");
+                            None
                         }
                     }
-                    Err(e) => tracing::warn!("JPEG-Encode: {e}"),
+                } else {
+                    None
+                };
+                let preview = preview.then(|| egui::ColorImage::from_rgb([rgb.width() as usize, rgb.height() as usize], rgb.as_raw()));
+                if frame.is_some() || preview.is_some() {
+                    on_frame(VideoOut { frame, preview });
                 }
-            })
-            .context("Kodier-Thread starten")?;
-    }
-    drop(out_tx);
-    std::thread::Builder::new()
-        .name(format!("{name}-out"))
-        .spawn(move || {
-            let mut last = 0u64;
-            for (seq, jpeg) in out_rx {
-                if seq <= last {
-                    continue; // ein neueres Bild war schneller fertig
-                }
-                last = seq;
-                on_frame(jpeg, sending.load(Ordering::Relaxed));
             }
         })
-        .context("Sammler-Thread starten")?;
+        .context("Kodier-Thread starten")?;
     Ok(job_tx)
-}
-
-/// JPEG-Kodierung mit Standardgroesse (Tests/Hilfen).
-#[cfg(test)]
-pub fn encode_jpeg(img: image::DynamicImage) -> Result<Vec<u8>> {
-    encode_jpeg_max(img, MAX_W, MAX_H)
-}
-
-/// JPEG-Kodierung: DynamicImage -> Thumbnail -> JPEG (Qualitaet 60).
-#[cfg(test)]
-pub fn encode_jpeg_max(img: image::DynamicImage, max_w: u32, max_h: u32) -> Result<Vec<u8>> {
-    encode_jpeg_q(img, max_w, max_h, 60)
-}
-
-/// Wie `encode_jpeg_max`, mit waehlbarer JPEG-Qualitaet (1-100).
-pub fn encode_jpeg_q(img: image::DynamicImage, max_w: u32, max_h: u32, quality: u8) -> Result<Vec<u8>> {
-    let img = if img.width() > max_w || img.height() > max_h {
-        img.thumbnail(max_w, max_h)
-    } else {
-        img
-    };
-    // JPEG kennt keinen Alpha-Kanal -> immer RGB8 kodieren.
-    let img = image::DynamicImage::ImageRgb8(img.to_rgb8());
-    let mut out = Vec::new();
-    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality);
-    enc.encode_image(&img).context("JPEG-Encode")?;
-    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -305,18 +279,18 @@ pub fn start_camera<F, E>(
     mut on_error: E,
 ) -> Result<VideoCapture>
 where
-    F: FnMut(Vec<u8>, bool) + Send + 'static,
+    F: FnMut(VideoOut) + Send + 'static,
     E: FnMut(String) + Send + 'static,
 {
     let stop = Arc::new(AtomicBool::new(false));
     let sending = Arc::new(AtomicBool::new(false));
-    let jobs = spawn_encoder_pool("video-cam", quality.camera(), sending.clone(), on_frame)?;
+    let keyframe = Arc::new(AtomicBool::new(false));
+    let jobs = spawn_encoder("video-cam", quality.camera(), false, true, sending.clone(), keyframe.clone(), on_frame)?;
     std::thread::Builder::new()
         .name("video-cam".to_string())
         .spawn({
             let stop = stop.clone();
             move || {
-                let mut seq = 0u64;
                 use nokhwa::pixel_format::RgbFormat;
 
                 let mut camera = match open_camera(index) {
@@ -359,16 +333,15 @@ where
                     if stop.load(Ordering::Relaxed) {
                         break;
                     }
-                    seq += 1;
-                    // Pool voll -> Bild verwerfen (keine wachsende Latenz).
-                    let _ = jobs.try_send(EncodeJob { seq, img: image::DynamicImage::ImageRgb8(img) });
+                    // Encoder busy -> drop the picture (no growing latency).
+                    let _ = jobs.try_send(EncodeJob { img: image::DynamicImage::ImageRgb8(img) });
                 }
                 let _ = camera.stop_stream();
-                // `jobs` faellt hier weg -> Encoder-Pool beendet sich.
+                // `jobs` faellt hier weg -> Encoder-Thread beendet sich.
             }
         })
         .context("Kamera-Thread starten")?;
-    Ok(VideoCapture { stop, sending })
+    Ok(VideoCapture { stop, sending, keyframe })
 }
 
 // ---------------------------------------------------------------------------
@@ -488,21 +461,21 @@ pub fn start_screen<F, E>(
     mut on_error: E,
 ) -> Result<VideoCapture>
 where
-    F: FnMut(Vec<u8>, bool) + Send + 'static,
+    F: FnMut(VideoOut) + Send + 'static,
     E: FnMut(String) + Send + 'static,
 {
     let stop = Arc::new(AtomicBool::new(false));
     let sending = Arc::new(AtomicBool::new(true));
+    let keyframe = Arc::new(AtomicBool::new(false));
 
-    // Pipeline: Aufnahme-Thread -> Encoder-Pool (parallel, Reihenfolge bleibt).
-    let jobs = spawn_encoder_pool("video-screen", quality.screen(), sending.clone(), on_frame)?;
+    // Pipeline: Aufnahme-Thread -> H.264-Encoder-Thread.
+    let jobs = spawn_encoder("video-screen", quality.screen(), true, false, sending.clone(), keyframe.clone(), on_frame)?;
 
     std::thread::Builder::new()
         .name("video-screen".to_string())
         .spawn({
             let stop = stop.clone();
             move || {
-                let mut seq = 0u64;
                 let target = match find_target(source) {
                     Ok(t) => t,
                     Err(e) => {
@@ -531,12 +504,8 @@ where
                             if stop.load(Ordering::Relaxed) {
                                 break;
                             }
-                            // Pool voll -> Kodierer haengen hinterher, Bild verwerfen.
-                            seq += 1;
-                            let _ = jobs.try_send(EncodeJob {
-                                seq,
-                                img: image::DynamicImage::ImageRgba8(img),
-                            });
+                            // Encoder busy -> drop the picture.
+                            let _ = jobs.try_send(EncodeJob { img: image::DynamicImage::ImageRgba8(img) });
                         }
                         Err(e) => {
                             failures += 1;
@@ -552,7 +521,7 @@ where
             }
         })
         .context("Screen-Thread starten")?;
-    Ok(VideoCapture { stop, sending })
+    Ok(VideoCapture { stop, sending, keyframe })
 }
 
 #[cfg(test)]
@@ -560,81 +529,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn jpeg_encode_produces_valid_jpeg() {
-        let img = image::ImageBuffer::from_fn(128, 96, |x, y| {
-            image::Rgba([(x * 2) as u8, (y * 2) as u8, 128, 255])
-        });
-        let bytes = encode_jpeg(image::DynamicImage::ImageRgba8(img)).unwrap();
-        assert_eq!(&bytes[..2], &[0xFF, 0xD8], "JPEG-Magic");
-        // Und dekodierbar:
-        assert!(image::load_from_memory(&bytes).is_ok());
-    }
-
-    #[test]
-    fn jpeg_thumbnail_bounds_size() {
-        let img = image::ImageBuffer::from_pixel(1920, 1080, image::Rgba([10, 20, 30, 255]));
-        let bytes = encode_jpeg(image::DynamicImage::ImageRgba8(img)).unwrap();
-        let decoded = image::load_from_memory(&bytes).unwrap();
-        assert!(decoded.width() <= MAX_W && decoded.height() <= MAX_H);
-        assert_eq!(decoded.width(), MAX_W, "Seitenverhaeltnis bleibt");
-    }
-
-    #[test]
-    fn screen_frames_use_larger_size() {
-        let img = image::RgbaImage::from_pixel(3440, 1440, image::Rgba([1, 2, 3, 255]));
-        let bytes =
-            {
-            let p = VideoQuality::High.screen();
-            encode_jpeg_q(image::DynamicImage::ImageRgba8(img), p.max_w, p.max_h, p.quality).unwrap()
-        };
-        let d = image::load_from_memory(&bytes).unwrap();
-        assert_eq!(d.width(), 1920);
-        assert!(d.height() <= 1080);
-        // Kleine Bilder werden nicht hochskaliert.
-        let small = image::RgbaImage::from_pixel(200, 100, image::Rgba([1, 2, 3, 255]));
-        let bytes = encode_jpeg_max(image::DynamicImage::ImageRgba8(small), 1280, 720).unwrap();
-        assert_eq!(image::load_from_memory(&bytes).unwrap().width(), 200);
-    }
-
-    #[test]
     fn pacer_yields_about_25_fps_from_30_fps_camera() {
         let start = Instant::now();
         let mut pacer = Pacer { next: start };
         // 3 s Kamera mit 30 fps (33,3 ms Abstand).
-        let accepted = (0..90)
-            .filter(|i| pacer.ready_at(start + Duration::from_micros(33_333 * i)))
-            .count();
+        let accepted = (0..90).filter(|i| pacer.ready_at(start + Duration::from_micros(33_333 * i))).count();
         assert!((70..=78).contains(&accepted), "~75 Frames erwartet, bekam {accepted}");
     }
 
+    /// The encoder thread: preview only while not sending, keyframe when going
+    /// live, H.264 frames decodable in order, thread ends with the sender.
     #[test]
-    fn encoder_pool_keeps_order_and_shuts_down() {
-        let params = EncodeParams { max_w: 64, max_h: 64, quality: 70, workers: 3 };
+    fn encoder_thread_previews_then_streams() {
+        let params = EncodeParams { max_w: 320, max_h: 180, bitrate: 500_000 };
         let (tx, rx) = std::sync::mpsc::channel();
-        let sending = Arc::new(AtomicBool::new(true));
-        let jobs = spawn_encoder_pool("test", params, sending, move |jpeg, s| {
-            let _ = tx.send((image::load_from_memory(&jpeg).unwrap(), s));
+        let sending = Arc::new(AtomicBool::new(false));
+        let keyframe = Arc::new(AtomicBool::new(false));
+        let jobs = spawn_encoder("test", params, false, true, sending.clone(), keyframe, move |out| {
+            let _ = tx.send(out);
         })
         .unwrap();
-        // Bildinhalt = Sequenznummer (Rotwert), damit die Reihenfolge pruefbar ist.
-        for seq in 1..=20u64 {
-            let img = image::RgbImage::from_pixel(32, 32, image::Rgb([(seq * 10) as u8, 0, 0]));
-            jobs.send(EncodeJob { seq, img: image::DynamicImage::ImageRgb8(img) }).unwrap();
+        let pic = |v: u8| image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(640, 360, image::Rgb([v, 40, 200])));
+        jobs.send(EncodeJob { img: pic(10) }).unwrap();
+        let first = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(first.frame.is_none(), "preview only");
+        assert_eq!(first.preview.as_ref().unwrap().size, [320, 180], "scaled to the quality size");
+        sending.store(true, Ordering::Relaxed);
+        let mut dec = crate::video_codec::H264Decoder::new().unwrap();
+        let mut pictures = 0;
+        for v in 0..5u8 {
+            jobs.send(EncodeJob { img: pic(v * 40) }).unwrap();
+            let out = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let frame = out.frame.expect("H.264 while sending");
+            if let crate::video_codec::Decoded::Picture(img) = dec.decode(&frame).unwrap() {
+                assert_eq!(img.size, [320, 180]);
+                pictures += 1;
+            }
         }
-        drop(jobs); // Pool muss sich danach beenden -> rx endet.
-        let reds: Vec<u8> = rx.iter().map(|(img, s)| {
-            assert!(s);
-            img.to_rgb8().get_pixel(16, 16)[0]
-        }).collect();
-        assert!(!reds.is_empty());
-        // Streng steigend (JPEG-Toleranz: Abstand 10 je Schritt).
-        assert!(reds.windows(2).all(|w| w[1] > w[0]), "Reihenfolge: {reds:?}");
+        assert!(pictures >= 4, "first live frame is a keyframe -> decodable right away ({pictures})");
+        drop(jobs);
+        assert!(rx.recv_timeout(Duration::from_secs(5)).is_err(), "thread ended");
     }
 
     #[test]
     fn quality_levels_scale_up() {
         let (b, h) = (VideoQuality::Balanced.screen(), VideoQuality::High.screen());
-        assert!(h.max_w > b.max_w && h.workers >= b.workers);
+        assert!(h.max_w > b.max_w && h.bitrate > b.bitrate);
         assert_eq!(VideoQuality::default(), VideoQuality::High);
     }
 
@@ -657,112 +597,46 @@ mod tests {
     #[ignore]
     fn hw_camera_delivers_frames() {
         let cams = list_cameras().expect("Kamera-Abfrage");
-        println!("Kameras: {cams:?}");
         let cam = cams.first().expect("keine Kamera angeschlossen");
         let (tx, rx) = std::sync::mpsc::channel();
-        let (etx, erx) = std::sync::mpsc::channel();
-        let cap = start_camera(cam.index, VideoQuality::High, move |j, s| { let _ = tx.send((j, s)); }, move |e| { let _ = etx.send(e); })
-            .unwrap();
-        let (jpeg, sending) = rx.recv_timeout(Duration::from_secs(10)).unwrap_or_else(|_| {
-            panic!("kein Kamera-Frame: {:?}", erx.try_recv())
-        });
-        assert!(!sending, "startet im Vorschau-Modus");
-        let img = image::load_from_memory(&jpeg).unwrap();
-        println!("Kamera-Frame {}x{}", img.width(), img.height());
+        let cap = start_camera(cam.index, VideoQuality::High, move |o| { let _ = tx.send(o); }, |e| panic!("{e}")).unwrap();
+        let out = rx.recv_timeout(Duration::from_secs(10)).expect("Kamera-Frame");
+        assert!(out.frame.is_none() && out.preview.is_some(), "startet im Vorschau-Modus");
         drop(cap);
     }
 
-    /// Kodierzeit/Groesse verschiedener Stufen auf dem Hauptmonitor.
+    /// Bildrate und Datenrate beim Teilen des Hauptmonitors (Release-Build aussagekraeftig).
     #[test]
     #[ignore]
-    fn hw_screen_quality_levels() {
-        let m = xcap::Monitor::all().unwrap().into_iter().find(|m| m.is_primary().unwrap_or(false)).unwrap();
-        let img = m.capture_image().unwrap();
-        println!("Quelle {}x{}", img.width(), img.height());
-        for (w, h, q) in [(1280, 720, 60), (1280, 720, 80), (1920, 1080, 70), (1920, 1080, 80), (2560, 1440, 75)] {
-            let t = Instant::now();
-            let mut size = 0;
-            for _ in 0..5 {
-                size = encode_jpeg_q(image::DynamicImage::ImageRgba8(img.clone()), w, h, q).unwrap().len();
-            }
-            println!("STUFE {w}x{h} q{q}: {:.1} ms, {} KB", t.elapsed().as_secs_f64() * 200.0, size / 1024);
-        }
-    }
-
-    #[test]
-    #[ignore]
-    fn hw_share_sources_and_window_capture() {
+    fn hw_screen_h264_rate() {
         let list = list_share_sources();
-        for e in &list {
-            println!(
-                "{:?} | {} | {} | thumb={:?}",
-                e.source,
-                e.title,
-                e.subtitle,
-                e.thumbnail.as_ref().map(|t| (t.width(), t.height()))
-            );
-        }
         let mon = list.iter().find(|e| matches!(e.source, ShareSource::Monitor(_))).expect("Monitor");
         let (tx, rx) = std::sync::mpsc::channel();
-        let cap = start_screen(mon.source, VideoQuality::High, move |j, s| { let _ = tx.send((j, s)); }, |e| panic!("{e}")).unwrap();
-        let (jpeg, sending) = rx.recv_timeout(Duration::from_secs(5)).expect("Screen-Frame");
-        assert!(sending);
-        assert!(image::load_from_memory(&jpeg).is_ok());
-        // Einzelzeiten: Aufnahme vs. Verkleinern+JPEG.
-        if let Ok(Target::Monitor(m)) = find_target(mon.source) {
-            let t = Instant::now();
-            let mut last = None;
-            for _ in 0..10 {
-                last = m.capture_image().ok();
-            }
-            let cap_ms = t.elapsed().as_secs_f64() * 100.0;
-            let img = last.expect("Capture");
-            let t = Instant::now();
-            for _ in 0..10 {
-                let _ = encode_jpeg_max(
-                    image::DynamicImage::ImageRgba8(img.clone()),
-                    1920,
-                    1080,
-                );
-            }
-            let enc_ms = t.elapsed().as_secs_f64() * 100.0;
-            println!("Aufnahme {cap_ms:.1} ms, Kodierung {enc_ms:.1} ms pro Frame");
-        }
-        // Erreichte Bildrate ueber 3 s (aussagekraeftig nur im Release-Build).
+        let cap = start_screen(mon.source, VideoQuality::High, move |o| { let _ = tx.send(o); }, |e| panic!("{e}")).unwrap();
         let t0 = Instant::now();
-        let mut n = 0;
-        let mut bytes = 0;
+        let (mut n, mut bytes) = (0, 0);
         while t0.elapsed() < Duration::from_secs(3) {
-            if let Ok((j, _)) = rx.recv_timeout(Duration::from_millis(500)) {
+            if let Ok(o) = rx.recv_timeout(Duration::from_millis(500)) {
                 n += 1;
-                bytes += j.len();
+                bytes += o.frame.map(|f| f.len()).unwrap_or(0);
             }
         }
-        println!(
-            "Monitor '{}': {:.1} fps, {:.0} KB/Frame",
-            mon.title,
-            n as f64 / 3.0,
-            bytes as f64 / n.max(1) as f64 / 1024.0
-        );
+        println!("{:.1} fps, {:.2} Mbit/s", n as f64 / 3.0, bytes as f64 * 8.0 / 3.0 / 1e6);
         drop(cap);
-        if let Some(win) = list.iter().find(|e| matches!(e.source, ShareSource::Window(_))) {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let _cap = start_screen(win.source, VideoQuality::High, move |j, s| { let _ = tx.send((j, s)); }, |e| panic!("{e}")).unwrap();
-            let (jpeg, _) = rx.recv_timeout(Duration::from_secs(5)).expect("Fenster-Frame");
-            let img = image::load_from_memory(&jpeg).unwrap();
-            println!("Fenster '{}' -> {}x{}", win.title, img.width(), img.height());
-        }
     }
 
     #[test]
-    fn sending_flag_toggles() {
+    fn sending_flag_and_keyframe_request() {
         let cap = VideoCapture {
             stop: Arc::new(AtomicBool::new(false)),
             sending: Arc::new(AtomicBool::new(false)),
+            keyframe: Arc::new(AtomicBool::new(false)),
         };
         assert!(!cap.is_sending());
         cap.set_sending(true);
         assert!(cap.is_sending());
+        cap.request_keyframe();
+        assert!(cap.keyframe.load(Ordering::Relaxed));
         let stop = cap.stop.clone();
         drop(cap);
         assert!(stop.load(Ordering::Relaxed), "Drop stoppt den Thread");

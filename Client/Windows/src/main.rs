@@ -19,6 +19,7 @@ mod net;
 mod notify;
 mod update;
 mod video;
+mod video_codec;
 
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt()

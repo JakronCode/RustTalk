@@ -27,6 +27,8 @@
 //!     Without any admin the server is "open" (everyone may do everything).
 //! v12: Encryption: TCP over TLS (pinned self-signed certificate), audio
 //!     packets ChaCha20-Poly1305 with a per-session key (`Welcome.udp_key`).
+//!     Video is H.264 (`VideoFrame.data` = frame number + Annex-B); viewers
+//!     ask the sender for a keyframe (`RequestKeyframe` -> `KeyframeRequest`).
 
 use serde::{Deserialize, Serialize};
 
@@ -428,6 +430,11 @@ pub enum ClientMessage {
     StopVideo {
         kind: VideoKind,
     },
+    /// Viewer: please send a full picture of this stream (joined late / frames lost).
+    RequestKeyframe {
+        from_id: u64,
+        kind: VideoKind,
+    },
     /// Sauberes Trennen (Server antwortet nicht, schließt nur).
     Disconnect,
 }
@@ -558,6 +565,10 @@ pub enum ServerMessage {
         from_id: u64,
         kind: VideoKind,
     },
+    /// To the sender: a viewer needs a keyframe of this stream.
+    KeyframeRequest {
+        kind: VideoKind,
+    },
     /// Neue Servereinstellungen (an alle).
     ServerSettingsChanged {
         settings: ServerSettings,
@@ -638,6 +649,7 @@ mod tests {
             ClientMessage::CreateInvite { max_uses: Some(5), hours: None },
             ClientMessage::DeleteInvite { code: "XYZ".into() },
             ClientMessage::RequestAdminData,
+            ClientMessage::RequestKeyframe { from_id: 3, kind: VideoKind::Screen },
             ClientMessage::SetMuteState { muted: true, deafened: false },
             ClientMessage::SetSharing { sharing: true },
             ClientMessage::VideoFrame { kind: VideoKind::Camera, data: vec![1, 2, 3] },
@@ -731,6 +743,7 @@ mod tests {
                 error: None,
             },
             ServerMessage::GifSearchChanged { available: true },
+            ServerMessage::KeyframeRequest { kind: VideoKind::Camera },
             ServerMessage::UserRoleChanged { client_id: 1, role: Role::Admin },
             ServerMessage::PermissionsChanged { open: false },
             ServerMessage::Removed { reason: "spam".into(), banned: true },

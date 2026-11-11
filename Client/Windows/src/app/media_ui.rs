@@ -117,9 +117,7 @@ impl RustTalkApp {
             .frame(egui::Frame::default().fill(egui::Color32::BLACK))
             .show(ctx, |ui| {
                 let rect = ui.max_rect();
-                if let Some(data) = self.video_frames.get(&key).cloned() {
-                    if let Some(tex) =
-                        self.textures.texture_for(ctx, &data, &format!("video-{uid}-{kind:?}"))
+                if let Some(tex) = self.video_frames.get(&key).and_then(|v| v.tex.clone()) {
                     {
                         let fit = theme::fit_size(tex.size_vec2(), rect.size());
                         ui.painter().image(
@@ -298,9 +296,8 @@ impl RustTalkApp {
             if kind.is_some_and(|want| want != k) {
                 continue;
             }
-            if let Some(old) = self.video_frames.remove(&(user_id, k)) {
-                self.textures.remove_bytes(&old);
-            }
+            // Dropping the view ends its decoder thread.
+            self.video_frames.remove(&(user_id, k));
         }
     }
 
@@ -311,18 +308,18 @@ impl RustTalkApp {
         &self,
         kind: VideoKind,
         cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
-    ) -> impl FnMut(Vec<u8>, bool) + Send + 'static {
+    ) -> impl FnMut(video::VideoOut) + Send + 'static {
         let tx = cmd_tx.clone();
         let events = self.event_tx.clone();
         let preview = self.local_preview.clone();
         let ctx = self.ctx.clone();
         let backlog = self.upload_backlog.clone();
         let my_id = self.my_id;
-        move |jpeg: Vec<u8>, sending: bool| {
-            if kind == VideoKind::Camera {
-                *preview.lock().unwrap() = Some(jpeg.clone());
+        move |out: video::VideoOut| {
+            if let Some(img) = out.preview {
+                *preview.lock().unwrap() = Some(img);
             }
-            if sending {
+            if let Some(jpeg) = out.frame {
                 // Upload staut (langsames WLAN o. ae.) -> Frame nicht senden,
                 // statt Latenz und Speicher endlos wachsen zu lassen.
                 let len = jpeg.len();
@@ -363,30 +360,57 @@ impl RustTalkApp {
         }
     }
 
-    /// Eigene Vorschau als Textur (eine Textur, wird pro Frame aktualisiert).
+    /// Eigene Vorschau als Textur (eine Textur, bei jedem neuen Bild aktualisiert).
     pub(super) fn local_preview_texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
-        let data = self.local_preview.lock().unwrap().clone()?;
-        let key = media::hash_bytes(&data);
-        if let Some((k, tex)) = &self.local_preview_tex {
-            if *k == key {
-                return Some(tex.clone());
+        if let Some(img) = self.local_preview.lock().unwrap().take() {
+            match &mut self.local_preview_tex {
+                Some(tex) => tex.set(img, egui::TextureOptions::LINEAR),
+                None => self.local_preview_tex = Some(ctx.load_texture("local-preview", img, egui::TextureOptions::LINEAR)),
             }
         }
-        let img = image::load_from_memory(&data).ok()?.to_rgba8();
-        let color = egui::ColorImage::from_rgba_unmultiplied(
-            [img.width() as usize, img.height() as usize],
-            &img,
-        );
-        match &mut self.local_preview_tex {
-            Some((k, tex)) => {
-                tex.set(color, egui::TextureOptions::LINEAR);
-                *k = key;
-                Some(tex.clone())
-            }
-            None => {
-                let tex = ctx.load_texture("local-preview", color, egui::TextureOptions::LINEAR);
-                self.local_preview_tex = Some((key, tex.clone()));
-                Some(tex)
+        self.local_preview_tex.clone()
+    }
+
+    /// An incoming H.264 frame: to the decoder thread of its stream (started on first use).
+    pub(super) fn feed_video(&mut self, key: (u64, VideoKind), data: Vec<u8>) {
+        let view = self.video_frames.entry(key).or_insert_with(|| VideoView::spawn(key, self.video_tx.clone(), self.ctx.clone()));
+        if let Err(std::sync::mpsc::TrySendError::Full(_)) = view.tx.try_send(data) {
+            // Decoder can't keep up: this frame is lost -> the next ones need a keyframe.
+            let _ = self.video_tx.send(DecodeMsg::NeedKeyframe(key));
+        }
+    }
+
+    /// Decoded pictures -> textures; keyframe needs -> request (max. 1/s per stream).
+    pub(super) fn poll_video(&mut self, ctx: &egui::Context) {
+        while let Ok(msg) = self.video_rx.try_recv() {
+            match msg {
+                DecodeMsg::Picture(key, img) => {
+                    if let Some(v) = self.video_frames.get_mut(&key) {
+                        match &mut v.tex {
+                            Some(t) => t.set(img, egui::TextureOptions::LINEAR),
+                            None => v.tex = Some(ctx.load_texture(format!("video-{}-{:?}", key.0, key.1), img, egui::TextureOptions::LINEAR)),
+                        }
+                    }
+                }
+                DecodeMsg::NeedKeyframe(key) => {
+                    let Some(v) = self.video_frames.get_mut(&key) else { continue };
+                    if v.last_request.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+                        continue;
+                    }
+                    v.last_request = Some(Instant::now());
+                    if key.0 == self.my_id {
+                        // Own tile: ask our own encoder directly.
+                        let src = match key.1 {
+                            VideoKind::Camera => self.cam.as_ref(),
+                            VideoKind::Screen => self.screen.as_ref(),
+                        };
+                        if let Some(c) = src {
+                            c.request_keyframe();
+                        }
+                    } else if let Some(tx) = &self.cmd_tx {
+                        let _ = tx.send(Command::Raw(rusttalk_shared::protocol::ClientMessage::RequestKeyframe { from_id: key.0, kind: key.1 }));
+                    }
+                }
             }
         }
     }
@@ -516,6 +540,7 @@ impl RustTalkApp {
             if !self.cam.as_ref().is_some_and(|c| c.is_sending()) {
                 self.cam = None;
                 *self.local_preview.lock().unwrap() = None;
+                self.local_preview_tex = None;
             }
         }
     }
@@ -1078,5 +1103,48 @@ pub(super) fn kind_label(kind: VideoKind) -> &'static str {
     match kind {
         VideoKind::Camera => "Camera",
         VideoKind::Screen => "Screen",
+    }
+}
+
+/// One incoming video stream: its decoder thread and the latest picture.
+pub(super) struct VideoView {
+    pub(super) tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+    pub(super) tex: Option<egui::TextureHandle>,
+    pub(super) last_request: Option<Instant>,
+}
+
+/// From decoder threads to the UI.
+pub(super) enum DecodeMsg {
+    Picture((u64, VideoKind), egui::ColorImage),
+    NeedKeyframe((u64, VideoKind)),
+}
+
+impl VideoView {
+    /// Starts the decoder thread (ends when the view and its sender are dropped).
+    fn spawn(key: (u64, VideoKind), out: std::sync::mpsc::Sender<DecodeMsg>, ctx: egui::Context) -> Self {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
+        let _ = std::thread::Builder::new().name(format!("video-dec-{}", key.0)).spawn(move || {
+            let mut dec = match crate::video_codec::H264Decoder::new() {
+                Ok(d) => d,
+                Err(e) => return tracing::warn!("{e:#}"),
+            };
+            for frame in rx {
+                match dec.decode(&frame) {
+                    Ok(crate::video_codec::Decoded::Picture(img)) => {
+                        dec.got_picture();
+                        if out.send(DecodeMsg::Picture(key, img)).is_err() {
+                            break;
+                        }
+                        ctx.request_repaint();
+                    }
+                    Ok(crate::video_codec::Decoded::Nothing) => {}
+                    Err(e) => tracing::debug!("{e:#}"),
+                }
+                if dec.need_keyframe && out.send(DecodeMsg::NeedKeyframe(key)).is_err() {
+                    break;
+                }
+            }
+        });
+        Self { tx, tex: None, last_request: None }
     }
 }

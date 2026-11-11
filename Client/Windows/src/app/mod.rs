@@ -299,7 +299,10 @@ pub struct RustTalkApp {
     pending_image: Option<(String, Vec<u8>)>,
     /// Letzte Video-Frames pro (User, Art) als JPEG – Kamera und Bildschirm
     /// eines Users sind getrennte Kacheln.
-    video_frames: HashMap<(u64, VideoKind), Vec<u8>>,
+    video_frames: HashMap<(u64, VideoKind), media_ui::VideoView>,
+    /// Decoded pictures / keyframe needs from the decoder threads.
+    video_tx: std::sync::mpsc::Sender<media_ui::DecodeMsg>,
+    video_rx: std::sync::mpsc::Receiver<media_ui::DecodeMsg>,
     /// Video-Bytes in der Sende-Queue (siehe `net::connect`).
     upload_backlog: Arc<std::sync::atomic::AtomicUsize>,
     /// Vom Bildschirm-Thread gesetzt, wenn er wegen eines Fehlers endet.
@@ -318,9 +321,9 @@ pub struct RustTalkApp {
     cam_dialog: Option<CamDialog>,
     screen_picker: Option<ScreenPicker>,
     /// Letzter eigener Frame (auch im reinen Vorschau-Modus).
-    local_preview: Arc<Mutex<Option<Vec<u8>>>>,
+    local_preview: Arc<Mutex<Option<egui::ColorImage>>>,
     /// Textur der eigenen Vorschau (wird pro Frame ueberschrieben).
-    local_preview_tex: Option<(u64, egui::TextureHandle)>,
+    local_preview_tex: Option<egui::TextureHandle>,
     /// Fehler aus dem Kamera-Thread fuer die Anzeige im Kamera-Dialog.
     cam_error: Arc<Mutex<Option<String>>>,
     giphy: GifPicker,
@@ -376,6 +379,7 @@ impl RustTalkApp {
         control.set_input_volume(config.input_volume);
         let global_ptt = hotkey::spawn_global_ptt(control.clone());
         let (toast_tx, toast_rx) = std::sync::mpsc::channel::<u64>();
+        let (video_tx, video_rx) = std::sync::mpsc::channel::<media_ui::DecodeMsg>();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let (giphy_tx, giphy_rx) = std::sync::mpsc::channel::<GiphyMsg>();
         Self {
@@ -432,6 +436,8 @@ impl RustTalkApp {
             textures: TextureCache::default(),
             pending_image: None,
             video_frames: HashMap::new(),
+            video_tx,
+            video_rx,
             screen_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             upload_backlog: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             fullscreen: None,
@@ -1090,17 +1096,15 @@ impl RustTalkApp {
                     self.clear_video_of(client_id, None);
                 }
             }
-            ServerMessage::VideoFrame { from_id, kind, data } => {
-                // Alten Frame ersetzen (Texture-Cache schont die Dekodierung).
-                let key = (from_id, kind);
-                if let Some(old) = self.video_frames.get(&key) {
-                    if old.len() == data.len() && old == &data {
-                        return; // identischer Frame, nichts tun
-                    }
-                    let old = old.clone();
-                    self.textures.remove_bytes(&old);
+            ServerMessage::VideoFrame { from_id, kind, data } => self.feed_video((from_id, kind), data),
+            ServerMessage::KeyframeRequest { kind } => {
+                let src = match kind {
+                    VideoKind::Camera => self.cam.as_ref(),
+                    VideoKind::Screen => self.screen.as_ref(),
+                };
+                if let Some(c) = src {
+                    c.request_keyframe();
                 }
-                self.video_frames.insert(key, data);
             }
             ServerMessage::VideoStopped { from_id, kind } => {
                 self.clear_video_of(from_id, Some(kind));
@@ -1125,6 +1129,7 @@ impl eframe::App for RustTalkApp {
             return;
         }
         self.poll_background(ctx);
+        self.poll_video(ctx);
         if std::mem::take(&mut self.connect_on_start) && self.cmd_tx.is_none() {
             self.start_connect();
         }
@@ -1321,6 +1326,15 @@ impl RustTalkApp {
                         }
                         "new_channel" => self.open_new_channel(None, ChannelKind::Text),
                         "gif" => self.open_gif_picker(),
+                        // Share the RustTalk window itself (screenshot tests without the desktop).
+                        "share_self" => {
+                            let sources = video::list_share_sources();
+                            let src = sources.into_iter().find(|e| matches!(e.source, ShareSource::Window(_)) && e.title.contains(arg)).map(|e| e.source);
+                            match (self.cmd_tx.clone(), src) {
+                                (Some(tx), Some(src)) => self.start_screen_share(src, &tx),
+                                _ => tracing::warn!("share_self: window '{arg}' not found"),
+                            }
+                        }
                         "claim_admin" => {
                             if let Some(tx) = &self.cmd_tx {
                                 let _ = tx.send(Command::Raw(rusttalk_shared::protocol::ClientMessage::ClaimAdmin { password: None }));
