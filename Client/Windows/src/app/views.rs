@@ -334,11 +334,21 @@ impl RustTalkApp {
                     let right_w = 76.0;
                     let resp = ui.add(
                         egui::TextEdit::multiline(&mut self.chat_input)
+                            .id(composer_id(ch_id))
                             .hint_text(format!("Message {name}"))
                             .desired_rows(1)
                             .frame(false)
                             .desired_width(ui.available_width() - right_w),
                     );
+                    // After Reply / Edit / a picked @name: type right away, cursor at the end.
+                    if std::mem::take(&mut self.focus_composer) {
+                        resp.request_focus();
+                        if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), resp.id) {
+                            let end = egui::text::CCursor::new(self.chat_input.chars().count());
+                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
+                            state.store(ui.ctx(), resp.id);
+                        }
+                    }
                     let enter = resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
                     // Esc cancels reply/edit; Up in an empty input edits the last own message.
                     if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -367,12 +377,17 @@ impl RustTalkApp {
                             .add(egui::Button::new(egui::RichText::new(icons::regular::PAPER_PLANE_RIGHT).size(18.0).color(theme::ACCENT)).frame(false))
                             .on_hover_text("Send (Enter)  -  Shift+Enter for a new line")
                             .clicked();
-                        if ui
-                            .add(egui::Button::new(egui::RichText::new(icons::regular::GIF).size(18.0).color(theme::MUTED)).frame(false))
-                            .on_hover_text("Search GIFs (GIPHY)")
-                            .clicked()
-                        {
-                            self.giphy.open = !self.giphy.open;
+                        let gif_color = if self.giphy.open { theme::ACCENT } else { theme::MUTED };
+                        let gif = ui
+                            .add(egui::Button::new(egui::RichText::new(icons::regular::GIF).size(18.0).color(gif_color)).frame(false))
+                            .on_hover_text("GIFs");
+                        self.gif_button_rect = Some(gif.rect);
+                        if gif.clicked() {
+                            if self.giphy.open {
+                                self.close_gif_picker();
+                            } else {
+                                self.open_gif_picker();
+                            }
                         }
                         if send || enter {
                             self.send_chat(ch_id, cmd_tx);
@@ -483,6 +498,7 @@ impl RustTalkApp {
                 self.chat_input.truncate(cut);
                 self.chat_input.push_str(&format!("@{name} "));
             }
+            self.focus_composer = true;
         }
     }
 
@@ -574,6 +590,11 @@ fn video_tile(
         p.text(rect.right_top() + egui::vec2(-14.0, 14.0), egui::Align2::CENTER_CENTER, icons::regular::CORNERS_OUT, egui::FontId::proportional(16.0), egui::Color32::WHITE);
     }
     resp.on_hover_text("Click for fullscreen").on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Stable id of the message input of a channel (for focusing it).
+fn composer_id(ch_id: u64) -> egui::Id {
+    egui::Id::new(("composer", ch_id))
 }
 
 /// Context for drawing one chat line.
@@ -728,16 +749,29 @@ pub(super) fn chat_line(
         }
     });
     // Hover toolbar (top right of the message, only while fully visible).
-    if ui.rect_contains_pointer(row) && ui.clip_rect().contains(row.right_top()) {
-        let mut buttons: Vec<(&str, &str, ChatAction)> = vec![(icons::regular::ARROW_BEND_UP_LEFT, "Reply", ChatAction::Reply(line.id))];
-        if own {
-            buttons.push((icons::regular::PENCIL_SIMPLE, "Edit", ChatAction::Edit(line.id)));
-            buttons.push((icons::regular::TRASH, "Delete", ChatAction::Delete(line.id)));
-        }
-        let width = buttons.len() as f32 * 28.0 + 8.0;
-        egui::Area::new(ui.id().with(("chat-tools", line.id)))
+    // It lives in its own foreground layer on top of the message. "Hovered"
+    // therefore means: pointer over the message OR the toolbar, and the top
+    // layer there is the chat or the toolbar (not a menu/window above).
+    // (`rect_contains_pointer` alone turned false as soon as the pointer
+    // reached the toolbar -> it vanished and flickered, clicks were lost.)
+    let mut buttons: Vec<(&str, &str, ChatAction)> = vec![(icons::regular::ARROW_BEND_UP_LEFT, "Reply", ChatAction::Reply(line.id))];
+    if own {
+        buttons.push((icons::regular::PENCIL_SIMPLE, "Edit", ChatAction::Edit(line.id)));
+        buttons.push((icons::regular::TRASH, "Delete", ChatAction::Delete(line.id)));
+    }
+    let width = buttons.len() as f32 * 28.0 + 8.0;
+    let tools_id = egui::Id::new(("chat-tools", line.id));
+    let tools_layer = egui::LayerId::new(egui::Order::Foreground, tools_id);
+    let tools_rect = egui::Rect::from_min_size(egui::pos2(row.right() - width, row.top() - 6.0), egui::vec2(width, 30.0));
+    let visible_row = ui.clip_rect().intersect(row);
+    let hovered = ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| {
+        (visible_row.contains(p) || tools_rect.contains(p))
+            && ui.ctx().layer_id_at(p).is_some_and(|l| l == ui.layer_id() || l == tools_layer)
+    });
+    if hovered && ui.clip_rect().contains(row.right_top()) {
+        egui::Area::new(tools_id)
             .order(egui::Order::Foreground)
-            .fixed_pos(egui::pos2(row.right() - width, row.top() - 6.0))
+            .fixed_pos(tools_rect.min)
             .show(ui.ctx(), |ui| {
                 egui::Frame::default()
                     .fill(theme::DARK)
@@ -761,4 +795,71 @@ pub(super) fn chat_line(
             });
     }
     action
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs one egui frame with `events` and draws a single own chat line.
+    fn frame(ctx: &egui::Context, lines: &[ChatLine], textures: &mut TextureCache, events: Vec<egui::Event>) -> Option<ChatAction> {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 400.0))),
+            events,
+            ..Default::default()
+        };
+        let mut action = None;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let c = LineCtx { lines, me: "me", grouped: false, show_ts: true, animate: false, highlighted: false };
+                action = chat_line(ui, &lines[0], textures, &c);
+            });
+        });
+        action
+    }
+
+    /// Regression: the hover toolbar vanished as soon as the pointer reached
+    /// it (its own layer covered the message), so its buttons never got a click.
+    #[test]
+    fn hover_toolbar_stays_visible_and_buttons_click() {
+        let ctx = egui::Context::default();
+        let mut textures = TextureCache::default();
+        let lines = vec![ChatLine {
+            id: 7,
+            kind: ChatKind::Message { from: "me".into(), own: true },
+            text: "hello".into(),
+            timestamp: 0,
+            image: None,
+            reply_to: None,
+            edited: false,
+        }];
+        let tools = egui::Id::new(("chat-tools", 7u64));
+        let moved = |p: egui::Pos2| vec![egui::Event::PointerMoved(p)];
+
+        // Pointer on the message -> toolbar appears.
+        for _ in 0..3 {
+            frame(&ctx, &lines, &mut textures, moved(egui::pos2(300.0, 40.0)));
+        }
+        let rect = ctx.memory(|m| m.area_rect(tools)).expect("toolbar shown on hover");
+
+        // Move onto the second button (Edit) and stay there: toolbar must remain.
+        let edit = rect.min + egui::vec2(2.0 + 24.0 + ctx.style().spacing.item_spacing.x + 12.0, rect.height() / 2.0);
+        for _ in 0..3 {
+            frame(&ctx, &lines, &mut textures, moved(edit));
+        }
+        assert!(ctx.layer_id_at(edit).is_some_and(|l| l.id == tools), "toolbar still under the pointer");
+
+        // Click it.
+        let press = |pressed| egui::Event::PointerButton { pos: edit, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        let mut got = frame(&ctx, &lines, &mut textures, vec![press(true)]);
+        got = got.or(frame(&ctx, &lines, &mut textures, vec![press(false)]));
+        assert_eq!(got, Some(ChatAction::Edit(7)));
+    }
+
+    #[test]
+    fn snippets_are_short_and_flat() {
+        assert_eq!(snippet("a\n  b", false), "a b");
+        assert_eq!(snippet("", true), "[image]");
+        assert!(snippet(&"x".repeat(200), false).ends_with("..."));
+    }
 }

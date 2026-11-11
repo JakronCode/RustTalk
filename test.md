@@ -2,6 +2,22 @@
 
 > Pflichtdokumentation aller Testläufe. Neueste oben.
 
+## 2026-11-11 (18) – Chat-Bugfixes, GIF-Picker wie Discord, GIPHY-Key pro Server (Protokoll v10)
+
+**Rückmeldung:** Hover-Leiste, Bearbeiten/Löschen und Antworten/Erwähnungen „buggen“; GIF-Fenster wie bei Discord; kein API-Key im Client, sondern pro Server (Server Settings).
+
+**Ursachen (Chat):**
+- Die Hover-Leiste (Antworten/Bearbeiten/Löschen) liegt in einer eigenen Vordergrund-Ebene über der Nachricht. Die Hover-Prüfung (`rect_contains_pointer`) verlangt, dass die *oberste* Ebene unter dem Mauszeiger die der Nachricht ist – sobald die Maus die Leiste erreichte, galt die Nachricht als nicht mehr gehovert → Leiste verschwand/flackerte, Klicks gingen ins Leere. Fix: Hover = Zeiger über Nachricht **oder** Leiste, oberste Ebene ist Chat **oder** Leiste.
+- Nach „Antworten“/„Bearbeiten“ bekam das Eingabefeld keinen Fokus → Tippen/Enter wirkten wirkungslos. Fix: Fokus ins Eingabefeld, beim Bearbeiten Cursor ans Textende; ebenso nach Auswahl eines @-Vorschlags.
+
+**GIFs (Protokoll v10):** Suche läuft über den Server (`GifSearch` → `GifResults`), Key einmal pro Server unter Server Settings > **Integrations** (wird beim Speichern mit einer Anfrage geprüft, in der Server-DB getrennt von den Einstellungen abgelegt, nie an Clients gesendet; Clients erfahren nur `gif_search: bool` / `GifSearchChanged`). Server cacht Seiten 10 min (Gratis-Key: ~100 Anfragen/h). Client-Key-Einstellung entfernt. **Picker:** Popup über dem GIF-Button, Trending beim Öffnen, Suche beim Tippen (350 ms Debounce), zwei Spalten (Masonry, Seitenverhältnis bleibt), Nachladen beim Scrollen, nur sichtbare Vorschauen werden geladen, Hover animiert, Klick sendet sofort (auch als Antwort), Esc/Klick daneben schließt; ohne Key Hinweis + Button zu den Server Settings.
+
+**Tests:** Client 66 ✅ (neu: **Hover-Regressionstest** mit simulierten Mausereignissen – schlägt mit der alten Logik nachweislich fehl –, Masonry-Layout), Server 43 ✅ (neu: GIPHY-Parsing, Cache, Key-Speicherung), Integration 12 ✅ (neu: `gif_search_needs_a_server_key`, `gif_key_is_checked_and_search_is_cached` mit Fake-GIPHY im Test), Shared 13 ✅.
+**Live geprüft:** Testserver (Port 7444) + lokaler Fake-GIPHY (`RUSTTALK_GIPHY_API`, nur für Tests) + Debug-Client, Fenster-Screenshots: Picker ohne Key (Hinweis), Picker mit Trending-Grid (nur sichtbare Vorschauen geladen), Integrations-Tab.
+**Nicht geprüft:** echter GIPHY-Key, GIF per Klick senden und Hover-Leiste mit echter Maus (Klick-Logik per Regressionstest abgedeckt).
+
+---
+
 ## 2026-11-11 (17) – Kategorie B: globales PTT, GIPHY, Benachrichtigungen, Chat-Funktionen (Protokoll v9)
 
 **Wünsche:** Kategorie B aus [ROADMAP.md](ROADMAP.md) umsetzen, testen, pushen.

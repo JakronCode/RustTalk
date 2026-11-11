@@ -28,6 +28,10 @@ pub enum Command {
     SendChat { channel_id: u64, text: String, image: Option<Vec<u8>>, reply_to: Option<u64> },
     EditChat { message_id: u64, text: String },
     DeleteChat(u64),
+    /// GIF search through the server (empty query = trending).
+    GifSearch { query: String, offset: u32 },
+    /// Set / remove the server's GIPHY key.
+    SetGifKey(Option<String>),
     SetMute { muted: bool, deafened: bool },
     SetSharing(bool),
     VideoFrame(VideoKind, Vec<u8>),
@@ -48,6 +52,8 @@ pub enum NetEvent {
         udp_token: u64,
         spawn_log: Vec<LogEntry>,
         chat_history: Vec<ChatRecord>,
+        /// The server offers GIF search.
+        gif_search: bool,
     },
     Message(ServerMessage),
     /// Fehler/Infos aus lokalen Hintergrund-Threads (z. B. Kamera).
@@ -124,9 +130,9 @@ async fn run(
     let first: Option<ServerMessage> = timeout(CONNECT_TIMEOUT, read_frame(&mut reader))
         .await
         .map_err(|_| anyhow::anyhow!("Timeout while waiting for the server"))??;
-    let (client_id, settings, udp_token, channels, users, spawn_log, chat_history) = match first {
-        Some(ServerMessage::Welcome { client_id, udp_token, channels, users, spawn_log, chat_history, settings }) => {
-            (client_id, settings, udp_token, channels, users, spawn_log, chat_history)
+    let (client_id, settings, udp_token, channels, users, spawn_log, chat_history, gif_search) = match first {
+        Some(ServerMessage::Welcome { client_id, udp_token, channels, users, spawn_log, chat_history, settings, gif_search }) => {
+            (client_id, settings, udp_token, channels, users, spawn_log, chat_history, gif_search)
         }
         Some(ServerMessage::Error { message }) => anyhow::bail!("{message}"),
         other => anyhow::bail!("Unexpected server response: {other:?}"),
@@ -144,6 +150,7 @@ async fn run(
         udp_token,
         spawn_log,
         chat_history,
+        gif_search,
     });
 
     // Lesen in eigenem Task: `read_frame` ist NICHT abbruchsicher. Lief es
@@ -205,6 +212,8 @@ async fn run(
                             }
                             Command::EditChat { message_id, text } => ClientMessage::EditChat { message_id, text },
                             Command::DeleteChat(message_id) => ClientMessage::DeleteChat { message_id },
+                            Command::GifSearch { query, offset } => ClientMessage::GifSearch { query, offset },
+                            Command::SetGifKey(key) => ClientMessage::SetGifKey { key },
                             Command::SetMute { muted, deafened } => {
                                 ClientMessage::SetMuteState { muted, deafened }
                             }
@@ -262,6 +271,7 @@ mod tests {
             users: vec![],
             spawn_log: vec![],
             chat_history: vec![],
+            gif_search: false,
         };
         write_frame(&mut w, &welcome).await.unwrap();
         for i in 0..N {

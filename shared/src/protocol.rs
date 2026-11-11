@@ -20,11 +20,13 @@
 //!     announcement text channel), rules (lobby), AFK notice template, MOTD.
 //! v9: Chat message ids: replies (`reply_to`), `EditChat`/`DeleteChat` (own
 //!     messages only, by name) -> `ChatEdited`/`ChatDeleted`.
+//! v10: GIF search through the server (`GifSearch` -> `GifResults`); the
+//!     GIPHY key is set per server (`SetGifKey`) and never sent to clients.
 
 use serde::{Deserialize, Serialize};
 
 /// Aktuelle Protokollversion. Client und Server müssen übereinstimmen.
-pub const PROTOCOL_VERSION: u16 = 9;
+pub const PROTOCOL_VERSION: u16 = 10;
 
 /// Art eines Video-Streams. Ein User kann beide gleichzeitig senden.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -174,6 +176,22 @@ pub struct ChatRecord {
     pub edited: bool,
 }
 
+/// One GIF from the server's GIF search.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GifInfo {
+    pub id: String,
+    pub title: String,
+    /// Small animated preview for the picker grid.
+    pub preview_url: String,
+    pub preview_width: u32,
+    pub preview_height: u32,
+    /// The GIF that is sent (below ~2 MB).
+    pub url: String,
+}
+
+/// Max. length of a GIF search query.
+pub const MAX_GIF_QUERY_LEN: usize = 100;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelInfo {
     pub id: u64,
@@ -259,6 +277,15 @@ pub enum ClientMessage {
     DeleteChat {
         message_id: u64,
     },
+    /// GIF search; empty query = trending. `offset` for the next page.
+    GifSearch {
+        query: String,
+        offset: u32,
+    },
+    /// Set (or remove) the server's GIPHY API key. The server checks it first.
+    SetGifKey {
+        key: Option<String>,
+    },
     SetMuteState {
         muted: bool,
         deafened: bool,
@@ -296,6 +323,8 @@ pub enum ServerMessage {
         spawn_log: Vec<LogEntry>,
         /// Letzte Nachrichten der Text-Channels (Persistenz, aelteste zuerst).
         chat_history: Vec<ChatRecord>,
+        /// The server has a GIPHY key (GIF button works).
+        gif_search: bool,
     },
     UserJoined {
         user: UserInfo,
@@ -345,6 +374,17 @@ pub enum ServerMessage {
     ChatDeleted {
         channel_id: u64,
         message_id: u64,
+    },
+    /// Answer to `GifSearch` (only to the asking client).
+    GifResults {
+        query: String,
+        offset: u32,
+        results: Vec<GifInfo>,
+        error: Option<String>,
+    },
+    /// GIF search was switched on/off (key set or removed).
+    GifSearchChanged {
+        available: bool,
     },
     MuteStateChanged {
         client_id: u64,
@@ -429,6 +469,9 @@ mod tests {
             ClientMessage::Chat { channel_id: 1, text: String::new(), image: Some(vec![0xFF, 0xD8]), reply_to: Some(4) },
             ClientMessage::EditChat { message_id: 4, text: "neu".into() },
             ClientMessage::DeleteChat { message_id: 4 },
+            ClientMessage::GifSearch { query: "cat".into(), offset: 24 },
+            ClientMessage::SetGifKey { key: Some("abc".into()) },
+            ClientMessage::SetGifKey { key: None },
             ClientMessage::SetMuteState { muted: true, deafened: false },
             ClientMessage::SetSharing { sharing: true },
             ClientMessage::VideoFrame { kind: VideoKind::Camera, data: vec![1, 2, 3] },
@@ -481,6 +524,7 @@ mod tests {
                 users: vec![user.clone()],
                 spawn_log: vec![entry.clone()],
                 chat_history: vec![record],
+                gif_search: true,
             },
             ServerMessage::UserJoined { user: user.clone() },
             ServerMessage::UserLeft { client_id: 1 },
@@ -504,6 +548,20 @@ mod tests {
             },
             ServerMessage::ChatEdited { channel_id: 1, message_id: 5, text: "moin!".into() },
             ServerMessage::ChatDeleted { channel_id: 1, message_id: 5 },
+            ServerMessage::GifResults {
+                query: "cat".into(),
+                offset: 0,
+                results: vec![GifInfo {
+                    id: "x".into(),
+                    title: "Cat".into(),
+                    preview_url: "https://p".into(),
+                    preview_width: 200,
+                    preview_height: 100,
+                    url: "https://g".into(),
+                }],
+                error: None,
+            },
+            ServerMessage::GifSearchChanged { available: true },
             ServerMessage::MuteStateChanged { client_id: 1, muted: true, deafened: true },
             ServerMessage::SharingChanged { client_id: 1, sharing: true },
             ServerMessage::VideoFrame { from_id: 1, kind: VideoKind::Screen, data: vec![9, 8, 7] },

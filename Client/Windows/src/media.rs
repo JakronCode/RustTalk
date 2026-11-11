@@ -1,5 +1,5 @@
 //! Medien-Helfer: Bild-Decoding zu egui-Textures (inkl. animierter GIFs)
-//! + GIPHY-Suche/Download.
+//! + downloads (GIFs from the server's GIF search).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -87,7 +87,9 @@ impl TextureCache {
 
     /// Entfernt eine Textur (z. B. wenn ein User aufhoert zu teilen).
     pub fn remove_bytes(&mut self, data: &[u8]) {
-        self.map.remove(&hash_bytes(data));
+        let key = hash_bytes(data);
+        self.map.remove(&key);
+        self.anims.remove(&key);
     }
 
     /// Like [`texture_for`](Self::texture_for), but plays animated GIFs when
@@ -146,51 +148,6 @@ fn decode_animation(ctx: &egui::Context, data: &[u8], name: &str) -> Option<Anim
     (frames.len() > 1).then_some(Animation { frames, total: end })
 }
 
-/// Ein GIPHY-Suchergebnis.
-#[derive(Debug, Clone, PartialEq)]
-pub struct GifResult {
-    pub id: String,
-    /// Small animated preview for the picker grid.
-    pub preview_url: String,
-    /// What gets attached: `downsized` (GIPHY keeps it below ~2 MB), else original.
-    pub full_url: String,
-}
-
-/// GIPHY-Suche (Free-API; Key von developers.giphy.com).
-pub fn giphy_search(api_key: &str, query: &str) -> anyhow::Result<Vec<GifResult>> {
-    let result = ureq::get("https://api.giphy.com/v1/gifs/search")
-        .query("api_key", api_key)
-        .query("q", query)
-        .query("limit", "18")
-        .query("rating", "pg-13")
-        .call();
-    let resp = match result {
-        Ok(r) => r,
-        Err(ureq::Error::Status(401 | 403, _)) => anyhow::bail!("GIPHY rejected the API key (check Settings > Advanced)"),
-        Err(ureq::Error::Status(429, _)) => anyhow::bail!("GIPHY rate limit reached - try again later"),
-        Err(ureq::Error::Status(code, _)) => anyhow::bail!("GIPHY returned HTTP {code}"),
-        // Transport errors print the URL - which contains the API key.
-        Err(e) => anyhow::bail!("{}", e.to_string().replace(api_key, "***")),
-    };
-    let json: serde_json::Value = resp.into_json()?;
-    Ok(parse_search(&json))
-}
-
-/// Extracts the results from a GIPHY search response.
-pub fn parse_search(json: &serde_json::Value) -> Vec<GifResult> {
-    let url = |g: &serde_json::Value, rendition: &str| {
-        g["images"][rendition]["url"].as_str().filter(|u| !u.is_empty()).map(str::to_string)
-    };
-    let Some(arr) = json.get("data").and_then(|d| d.as_array()) else { return Vec::new() };
-    arr.iter()
-        .filter_map(|g| {
-            let full_url = url(g, "downsized").or_else(|| url(g, "original"))?;
-            let preview_url = url(g, "fixed_height_small").unwrap_or_else(|| full_url.clone());
-            Some(GifResult { id: g["id"].as_str().unwrap_or_default().to_string(), preview_url, full_url })
-        })
-        .collect()
-}
-
 /// Laedt Bytes von einer URL (GIF, Vorschau). Fails above `MAX_MEDIA_BYTES`,
 /// the most the server accepts for a chat image.
 pub fn download(url: &str) -> anyhow::Result<Vec<u8>> {
@@ -235,27 +192,6 @@ mod tests {
         assert_eq!(t1.unwrap().id(), t2.unwrap().id(), "Cache-Treffer");
         // Muell gibt None statt Panic:
         assert!(cache.texture_for(&ctx, b"kein bild", "test").is_none());
-    }
-
-    #[test]
-    fn giphy_parse_prefers_downsized() {
-        let json = serde_json::json!({
-            "data": [
-                { "id": "a", "images": {
-                    "fixed_height_small": { "url": "https://x/a-small.gif" },
-                    "downsized": { "url": "https://x/a-down.gif" },
-                    "original": { "url": "https://x/a-orig.gif" } } },
-                { "id": "b", "images": { "original": { "url": "https://x/b-orig.gif" } } },
-                { "id": "c", "images": {} }
-            ]
-        });
-        let r = parse_search(&json);
-        assert_eq!(r.len(), 2, "entries without any URL are skipped");
-        assert_eq!(r[0].full_url, "https://x/a-down.gif");
-        assert_eq!(r[0].preview_url, "https://x/a-small.gif");
-        assert_eq!(r[1].full_url, "https://x/b-orig.gif", "fallback to original");
-        assert_eq!(r[1].preview_url, r[1].full_url, "no preview -> full image");
-        assert!(parse_search(&serde_json::json!({ "meta": {} })).is_empty());
     }
 
     /// Animated 2x2 GIF with `frames` frames.

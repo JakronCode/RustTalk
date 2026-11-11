@@ -1,6 +1,6 @@
 # RustTalk – Roadmap
 
-Checklist of planned features, by priority. Status as of 2026-11-11 (protocol v9). Categories A and B done.
+Checklist of planned features, by priority. Status as of 2026-11-11 (protocol v10). Categories A and B done.
 
 ## A – Quick wins (WIP spots already visible in the UI)
 
@@ -12,9 +12,9 @@ Checklist of planned features, by priority. Status as of 2026-11-11 (protocol v9
 ## B – Core feature gaps
 
 - [x] **B1 Global push-to-talk** – PTT also works while the window is not focused (opt-in, keys + Mouse4/5)
-- [x] **B2 Fix GIPHY** – GIF search in the composer, animated GIFs in chat
+- [x] **B2 GIFs** – Discord-style GIF picker, one GIPHY key per server (searched + cached by the server), animated GIFs in chat
 - [x] **B3 Notifications** – sounds for join/leave/message/mute, taskbar flash
-  - [ ] Desktop pop-up notifications (Windows toasts) – still open
+- [ ] Desktop pop-up notifications (Windows toasts) – still open
 - [x] **B4 Chat features** – edit/delete messages, replies, @mentions, search
 
 ## C – Moderation & permissions
@@ -25,6 +25,8 @@ Checklist of planned features, by priority. Status as of 2026-11-11 (protocol v9
 
 ## D – Larger projects
 
+- [ ] Keine Portable mehr haben, sprich installieren und dann persistenten client haben
+	-> dazu natürlich auch die update function die sich die akutelleste version vom repo zieht
 - [ ] **D1 Echo cancellation (AEC)** – e.g. `webrtc-audio-processing`
 - [ ] **D2 Share audio with screen** – WASAPI loopback
 - [ ] **D3 Encryption** – QUIC (`quinn`) or TLS

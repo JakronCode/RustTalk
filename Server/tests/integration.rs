@@ -41,8 +41,13 @@ fn write_config(port: u16, extra: &str) -> PathBuf {
 }
 
 fn spawn_server(port: u16, extra_config: &str) -> ServerGuard {
+    spawn_server_with_env(port, extra_config, &[])
+}
+
+fn spawn_server_with_env(port: u16, extra_config: &str, env: &[(&str, String)]) -> ServerGuard {
     let config = write_config(port, extra_config);
     let child = Command::new(env!("CARGO_BIN_EXE_rusttalk-server"))
+        .envs(env.iter().map(|(k, v)| (*k, v.as_str())))
         .arg(&config)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -70,6 +75,7 @@ struct Welcome {
     spawn_log: Vec<LogEntry>,
     chat_history: Vec<ChatRecord>,
     settings: ServerSettings,
+    gif_search: bool,
 }
 
 async fn connect(port: u16, name: &str, password: Option<String>) -> (Conn, Welcome) {
@@ -84,8 +90,8 @@ async fn connect(port: u16, name: &str, password: Option<String>) -> (Conn, Welc
     let mut conn = (reader, writer);
     let first: ServerMessage = read_frame(&mut conn.0).await.unwrap().expect("erste Nachricht");
     match first {
-        ServerMessage::Welcome { client_id, channels, users, spawn_log, chat_history, settings, .. } => {
-            (conn, Welcome { client_id, channels, users, spawn_log, chat_history, settings })
+        ServerMessage::Welcome { client_id, channels, users, spawn_log, chat_history, settings, gif_search, .. } => {
+            (conn, Welcome { client_id, channels, users, spawn_log, chat_history, settings, gif_search })
         }
         other => panic!("kein Welcome erhalten: {other:?}"),
     }
@@ -490,6 +496,117 @@ async fn chat_reply_edit_delete() {
     }
     send(&mut b, &ClientMessage::DeleteChat { message_id: answer }).await;
     assert!(matches!(recv(&mut b, 2000).await, Some(ServerMessage::Error { .. })));
+}
+
+#[tokio::test]
+async fn gif_search_needs_a_server_key() {
+    let port = free_port();
+    let _server = spawn_server(port, "");
+    wait_for_port(port);
+    let (mut a, _) = connect(port, "alice", None).await;
+    drain(&mut a, 300).await;
+
+    // No key: answer with an error, nothing goes to GIPHY.
+    send(&mut a, &ClientMessage::GifSearch { query: "cat".into(), offset: 0 }).await;
+    match recv(&mut a, 2000).await {
+        Some(ServerMessage::GifResults { query, results, error: Some(e), .. }) => {
+            assert_eq!(query, "cat");
+            assert!(results.is_empty());
+            assert!(e.contains("not set up"), "{e}");
+        }
+        other => panic!("GifResults mit Fehler erwartet, bekam: {other:?}"),
+    }
+    // Obviously invalid key: rejected locally.
+    send(&mut a, &ClientMessage::SetGifKey { key: Some("not a key!".into()) }).await;
+    assert!(matches!(recv(&mut a, 2000).await, Some(ServerMessage::Error { .. })));
+    // Removing the key is broadcast.
+    send(&mut a, &ClientMessage::SetGifKey { key: None }).await;
+    assert!(matches!(recv(&mut a, 2000).await, Some(ServerMessage::GifSearchChanged { available: false })));
+}
+
+/// Minimal fake GIPHY API on a local port: accepts the key "goodkey", answers
+/// with two GIFs and counts the API requests.
+fn fake_giphy() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::io::{BufRead, BufReader};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = hits.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request_line = String::new();
+            let _ = reader.read_line(&mut request_line);
+            let mut line = String::new();
+            while reader.read_line(&mut line).map(|n| n > 2).unwrap_or(false) {
+                line.clear(); // skip headers
+            }
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (status, body) = if request_line.contains("api_key=goodkey") {
+                let gif = |id: &str| format!(
+                    r#"{{"id":"{id}","title":"t {id}","images":{{"downsized":{{"url":"http://x/{id}.gif","width":"100","height":"50"}}}}}}"#
+                );
+                ("200 OK", format!(r#"{{"data":[{},{}]}}"#, gif("a"), gif("b")))
+            } else {
+                ("401 Unauthorized", String::new())
+            };
+            let mut s = stream;
+            let _ = write!(
+                s,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (port, hits)
+}
+
+#[tokio::test]
+async fn gif_key_is_checked_and_search_is_cached() {
+    let (giphy_port, hits) = fake_giphy();
+    let port = free_port();
+    let _server = spawn_server_with_env(port, "", &[("RUSTTALK_GIPHY_API", format!("http://127.0.0.1:{giphy_port}"))]);
+    wait_for_port(port);
+    let (mut a, wa) = connect(port, "alice", None).await;
+    let (mut b, _) = connect(port, "bob", None).await;
+    assert!(!wa.settings.name.is_empty());
+    drain(&mut a, 300).await;
+    drain(&mut b, 300).await;
+
+    // Wrong key: rejected by "GIPHY", nothing changes.
+    send(&mut a, &ClientMessage::SetGifKey { key: Some("badkey".into()) }).await;
+    match recv(&mut a, 5000).await {
+        Some(ServerMessage::Error { message }) => assert!(message.contains("rejected"), "{message}"),
+        other => panic!("Error erwartet, bekam: {other:?}"),
+    }
+    assert!(recv(&mut b, 400).await.is_none());
+
+    // Good key: everyone learns that GIFs work, the setter gets a notice.
+    send(&mut a, &ClientMessage::SetGifKey { key: Some("goodkey".into()) }).await;
+    let msgs = drain(&mut a, 1500).await;
+    assert!(msgs.iter().any(|m| matches!(m, ServerMessage::GifSearchChanged { available: true })), "{msgs:?}");
+    assert!(matches!(recv(&mut b, 2000).await, Some(ServerMessage::GifSearchChanged { available: true })));
+    let after_check = hits.load(std::sync::atomic::Ordering::SeqCst);
+
+    // Trending was fetched while checking the key -> answered from the cache.
+    send(&mut b, &ClientMessage::GifSearch { query: String::new(), offset: 0 }).await;
+    match recv(&mut b, 3000).await {
+        Some(ServerMessage::GifResults { results, error: None, .. }) => {
+            assert_eq!(results.len(), 2);
+            assert_eq!(results[0].url, "http://x/a.gif");
+        }
+        other => panic!("GifResults erwartet, bekam: {other:?}"),
+    }
+    // A search goes to GIPHY once, the repeat comes from the cache.
+    for _ in 0..2 {
+        send(&mut b, &ClientMessage::GifSearch { query: "Cat".into(), offset: 0 }).await;
+        assert!(matches!(recv(&mut b, 3000).await, Some(ServerMessage::GifResults { error: None, .. })));
+    }
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), after_check + 1, "one request for 'Cat', rest cached");
+
+    // A new client sees GIFs as available.
+    let (_c, wc) = connect(port, "carol", None).await;
+    assert!(wc.gif_search);
 }
 
 #[tokio::test]

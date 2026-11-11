@@ -4,6 +4,7 @@
 
 mod config;
 mod db;
+mod gif;
 mod state;
 mod tcp;
 mod udp;

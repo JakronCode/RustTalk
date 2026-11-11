@@ -692,31 +692,70 @@ impl RustTalkApp {
         }
     }
 
-    /// GIPHY window: search, animated preview grid, click = attach.
-    pub(super) fn ui_giphy(&mut self, ctx: &egui::Context) {
-        // Collect background results also while the window is closed
-        // (a chosen GIF may finish downloading after closing it).
+    pub(super) fn open_gif_picker(&mut self) {
+        self.giphy.open = true;
+        self.giphy.focus = true;
+        if self.giphy.shown_query.is_none() {
+            self.gif_request(String::new(), 0); // trending
+        }
+    }
+
+    /// Closes the picker and frees the preview images.
+    pub(super) fn close_gif_picker(&mut self) {
+        for bytes in self.giphy.previews.values() {
+            self.textures.remove_bytes(bytes);
+        }
+        self.giphy = GifPicker::default();
+    }
+
+    /// Asks the server for a result page (`offset` 0 = new search).
+    fn gif_request(&mut self, query: String, offset: u32) {
+        if !self.gif_available {
+            return;
+        }
+        let Some(tx) = self.cmd_tx.clone() else { return };
+        if offset == 0 {
+            self.giphy.results.clear();
+            self.giphy.end = false;
+            self.giphy.error = None;
+        }
+        self.giphy.shown_query = Some(query.clone());
+        self.giphy.loading = true;
+        let _ = tx.send(Command::GifSearch { query, offset });
+    }
+
+    /// A result page from the server (stale pages are ignored).
+    pub(super) fn on_gif_results(&mut self, query: String, offset: u32, results: Vec<GifInfo>, error: Option<String>) {
+        let p = &mut self.giphy;
+        if p.shown_query.as_deref() != Some(query.as_str()) || offset as usize != p.results.len() {
+            return;
+        }
+        p.loading = false;
+        p.error = error;
+        p.end = results.len() < GIF_PAGE as usize;
+        p.results.extend(results);
+    }
+
+    /// GIF picker popup above the GIF button.
+    pub(super) fn ui_gif_picker(&mut self, ctx: &egui::Context) {
+        // Background downloads (also after closing: a chosen GIF may still arrive).
         while let Ok(msg) = self.giphy_rx.try_recv() {
             match msg {
-                GiphyMsg::Results(Ok(results)) => {
-                    self.giphy.loading = false;
-                    self.giphy.error = if results.is_empty() { Some("No GIFs found.".into()) } else { None };
-                    self.giphy.results = results;
-                }
-                GiphyMsg::Results(Err(e)) => {
-                    self.giphy.loading = false;
-                    self.giphy.error = Some(e);
-                }
                 GiphyMsg::Preview(url, bytes) => {
-                    self.giphy.previews.insert(url, bytes);
+                    if self.giphy.open {
+                        self.giphy.previews.insert(url, bytes);
+                    }
                 }
                 GiphyMsg::Full(bytes) => {
-                    self.giphy.attaching = false;
-                    self.pending_image = Some(("giphy.gif".to_string(), bytes));
-                    self.giphy.open = false;
+                    self.giphy.sending = false;
+                    if let (Some((channel_id, reply_to)), Some(tx)) = (self.gif_target.take(), self.cmd_tx.clone()) {
+                        let _ = tx.send(Command::SendChat { channel_id, text: String::new(), image: Some(bytes), reply_to });
+                    }
+                    self.close_gif_picker();
                 }
                 GiphyMsg::FullFailed(e) => {
-                    self.giphy.attaching = false;
+                    self.giphy.sending = false;
+                    self.gif_target = None;
                     self.giphy.error = Some(e);
                 }
             }
@@ -724,128 +763,231 @@ impl RustTalkApp {
         if !self.giphy.open {
             return;
         }
-        let mut open = self.giphy.open;
+        if !self.is_connected() || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.close_gif_picker();
+            return;
+        }
+        // Search while typing (debounced).
+        let typed = self.giphy.query.trim().chars().take(rusttalk_shared::protocol::MAX_GIF_QUERY_LEN).collect::<String>();
+        if let Some(at) = self.giphy.typed_at {
+            if at.elapsed() >= Duration::from_millis(350) {
+                self.giphy.typed_at = None;
+                if self.giphy.shown_query.as_deref() != Some(typed.as_str()) {
+                    self.gif_request(typed, 0);
+                }
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+        }
+
+        const W: f32 = 430.0;
+        const H: f32 = 470.0;
+        let screen = ctx.screen_rect();
+        let anchor = self.gif_button_rect.unwrap_or_else(|| egui::Rect::from_min_size(screen.right_bottom() - egui::vec2(60.0, 70.0), egui::vec2(24.0, 24.0)));
+        let pos = egui::pos2(
+            (anchor.right() - W + 8.0).clamp(screen.left() + 8.0, (screen.right() - W - 8.0).max(screen.left() + 8.0)),
+            (anchor.top() - H - 10.0).max(screen.top() + 8.0),
+        );
         let animate = self.config.animate_gifs;
-        let mut open_settings = false;
-        egui::Window::new(format!("{}  Search GIFs (GIPHY)", icons::regular::GIF))
-            .open(&mut open)
-            .collapsible(false)
-            .default_size([460.0, 420.0])
+        let mut choose: Option<GifInfo> = None;
+        let mut want_more = false;
+        let mut open_server_settings = false;
+        let area = egui::Area::new(egui::Id::new("gif_picker"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
             .show(ctx, |ui| {
-                let Some(key) = self.config.giphy_api_key.clone() else {
-                    ui.label(
-                        egui::RichText::new(
-                            "No GIPHY API key set.\nCreate one for free at developers.giphy.com and enter it under Settings > Advanced.",
-                        )
-                        .color(theme::MUTED),
-                    );
-                    if ui.button(format!("{}  Open settings", icons::regular::GEAR_SIX)).clicked() {
-                        open_settings = true;
-                    }
-                    return;
-                };
-                let search = ui
-                    .horizontal(|ui| {
+                egui::Frame::default()
+                    .fill(theme::SIDEBAR)
+                    .corner_radius(10.0)
+                    .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
+                    .shadow(egui::epaint::Shadow { offset: [0, 8], blur: 24, spread: 0, color: egui::Color32::from_black_alpha(120) })
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.set_width(W - 20.0);
+                        ui.set_height(H - 20.0);
+                        if !self.gif_available {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(110.0);
+                                ui.label(egui::RichText::new(icons::regular::GIF).size(46.0).color(theme::MUTED));
+                                ui.label(egui::RichText::new("GIFs are not set up on this server").size(16.0).strong().color(theme::HEADER));
+                                ui.label(
+                                    egui::RichText::new("Someone has to add a GIPHY API key once under\nServer Settings > Integrations - then everyone can use GIFs.")
+                                        .color(theme::MUTED),
+                                );
+                                ui.add_space(8.0);
+                                if theme::primary_button(ui, &format!("{}  Open Server Settings", icons::regular::GEAR_SIX)).clicked() {
+                                    open_server_settings = true;
+                                }
+                            });
+                            return;
+                        }
+                        // Search field.
                         let resp = ui.add(
                             egui::TextEdit::singleline(&mut self.giphy.query)
-                                .hint_text("Search GIPHY...")
-                                .desired_width(ui.available_width() - 90.0),
+                                .hint_text(format!("{}  Search GIPHY", icons::regular::MAGNIFYING_GLASS))
+                                .desired_width(f32::INFINITY),
                         );
-                        let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        if enter {
+                        if std::mem::take(&mut self.giphy.focus) {
                             resp.request_focus();
                         }
-                        enter || ui.button(format!("{}  Search", icons::regular::MAGNIFYING_GLASS)).clicked()
-                    })
-                    .inner;
-                if search && !self.giphy.query.trim().is_empty() && !self.giphy.loading {
-                    self.giphy.loading = true;
-                    self.giphy.error = None;
-                    self.giphy.results.clear();
-                    self.giphy.requested.clear();
-                    self.giphy.previews.clear();
-                    let q = self.giphy.query.trim().to_string();
-                    let tx = self.giphy_tx.clone();
-                    let repaint = ctx.clone();
-                    std::thread::spawn(move || {
-                        let res = media::giphy_search(&key, &q).map_err(|e| format!("{e:#}"));
-                        let _ = tx.send(GiphyMsg::Results(res));
-                        repaint.request_repaint();
-                    });
-                }
-                if self.giphy.loading {
-                    ui.label(egui::RichText::new("Searching...").color(theme::MUTED));
-                }
-                if self.giphy.attaching {
-                    ui.label(egui::RichText::new("Downloading GIF...").color(theme::MUTED));
-                }
-                if let Some(e) = &self.giphy.error {
-                    ui.label(egui::RichText::new(e).color(theme::RED));
-                }
-                ui.separator();
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        let results = self.giphy.results.clone();
-                        for gif in results {
-                            let tex = self
-                                .giphy
-                                .previews
-                                .get(&gif.preview_url)
-                                .and_then(|bytes| self.textures.image_for(ctx, bytes, &gif.id, animate));
-                            match tex {
-                                Some(tex) => {
-                                    let clicked = ui
-                                        .add_enabled(
-                                            !self.giphy.attaching,
-                                            egui::ImageButton::new(egui::Image::new(&tex).max_width(130.0).max_height(100.0)).frame(true),
-                                        )
-                                        .on_hover_text("Attach")
-                                        .clicked();
-                                    if clicked {
-                                        self.giphy.attaching = true;
-                                        self.giphy.error = None;
-                                        let tx = self.giphy_tx.clone();
-                                        let url = gif.full_url.clone();
-                                        let repaint = ctx.clone();
-                                        std::thread::spawn(move || {
-                                            let msg = match media::download(&url) {
-                                                Ok(bytes) => GiphyMsg::Full(bytes),
-                                                Err(e) => GiphyMsg::FullFailed(format!("{e:#}")),
-                                            };
-                                            let _ = tx.send(msg);
-                                            repaint.request_repaint();
-                                        });
+                        if resp.changed() {
+                            self.giphy.typed_at = Some(Instant::now());
+                        }
+                        ui.horizontal(|ui| {
+                            let title = match self.giphy.shown_query.as_deref() {
+                                Some("") | None => "Trending".to_string(),
+                                Some(q) => format!("Results for \"{q}\""),
+                            };
+                            ui.label(egui::RichText::new(title).strong().color(theme::HEADER));
+                            if self.giphy.loading || self.giphy.sending {
+                                ui.spinner();
+                            }
+                            if self.giphy.sending {
+                                ui.label(egui::RichText::new("Sending...").color(theme::MUTED));
+                            }
+                        });
+                        if let Some(e) = &self.giphy.error {
+                            ui.label(egui::RichText::new(e).color(theme::RED));
+                        }
+                        let scroll = egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(H - 110.0).show(ui, |ui| {
+                            let width = ui.available_width();
+                            let sizes: Vec<(u32, u32)> = self.giphy.results.iter().map(|g| (g.preview_width, g.preview_height)).collect();
+                            let (rects, total) = masonry(&sizes, width, 6.0);
+                            let (outer, _) = ui.allocate_exact_size(egui::vec2(width, total.max(1.0)), egui::Sense::hover());
+                            let results = self.giphy.results.clone();
+                            for (i, (g, r)) in results.iter().zip(rects).enumerate() {
+                                let rect = r.translate(outer.min.to_vec2());
+                                if !ui.is_rect_visible(rect) {
+                                    continue; // only visible previews are downloaded
+                                }
+                                let resp = ui.interact(rect, egui::Id::new(("gif", i, &g.id)), egui::Sense::click());
+                                let hovered = resp.hovered();
+                                let tex = self.giphy.previews.get(&g.preview_url).and_then(|bytes| {
+                                    if hovered && animate {
+                                        self.textures.image_for(ctx, bytes, &g.id, true)
+                                    } else {
+                                        self.textures.texture_for(ctx, bytes, &g.id)
+                                    }
+                                });
+                                match tex {
+                                    Some(tex) => {
+                                        egui::Image::new(&tex).corner_radius(6.0).paint_at(ui, rect);
+                                    }
+                                    None => {
+                                        ui.painter().rect_filled(rect, 6.0, theme::HOVER);
+                                        if self.giphy.requested.insert(g.preview_url.clone()) {
+                                            let tx = self.giphy_tx.clone();
+                                            let url = g.preview_url.clone();
+                                            let repaint = ctx.clone();
+                                            std::thread::spawn(move || {
+                                                if let Ok(bytes) = media::download(&url) {
+                                                    let _ = tx.send(GiphyMsg::Preview(url, bytes));
+                                                    repaint.request_repaint();
+                                                }
+                                            });
+                                        }
                                     }
                                 }
-                                None => {
-                                    // Load the preview once (by URL).
-                                    if self.giphy.requested.insert(gif.preview_url.clone()) {
-                                        let tx = self.giphy_tx.clone();
-                                        let url = gif.preview_url.clone();
-                                        let repaint = ctx.clone();
-                                        std::thread::spawn(move || {
-                                            if let Ok(bytes) = media::download(&url) {
-                                                let _ = tx.send(GiphyMsg::Preview(url, bytes));
-                                                repaint.request_repaint();
-                                            }
-                                        });
-                                    }
-                                    ui.add_enabled(false, egui::Button::new("...").min_size(egui::vec2(100.0, 75.0)));
+                                if hovered {
+                                    ui.painter().rect_stroke(rect, 6.0, egui::Stroke::new(2.0_f32, theme::ACCENT), egui::StrokeKind::Inside);
+                                }
+                                let resp = if g.title.is_empty() { resp } else { resp.on_hover_text(&g.title) };
+                                if resp.clicked() && !self.giphy.sending {
+                                    choose = Some(g.clone());
                                 }
                             }
+                            if self.giphy.results.is_empty() && !self.giphy.loading && self.giphy.error.is_none() {
+                                ui.label(egui::RichText::new("No GIFs found.").color(theme::MUTED));
+                            }
+                        });
+                        // Near the end: load the next page.
+                        let s = &scroll;
+                        if s.state.offset.y + s.inner_rect.height() >= s.content_size.y - 250.0 {
+                            want_more = true;
                         }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(egui::RichText::new("Powered by GIPHY").size(11.0).color(theme::DISABLED));
+                        });
                     });
-                });
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new("Powered by GIPHY").size(11.0).color(theme::DISABLED));
             });
-        self.giphy.open = open && self.giphy.open;
-        if open_settings {
-            self.giphy.open = false;
-            self.open_settings(SettingsPage::Advanced);
+
+        if open_server_settings {
+            self.close_gif_picker();
+            self.open_server_settings(super::server_settings::ServerTab::Integrations);
+            return;
+        }
+        if let Some(g) = choose {
+            let Some(ch) = self.selected_channel else { return };
+            self.gif_target = Some((ch, self.reply_to.take()));
+            self.giphy.sending = true;
+            self.giphy.error = None;
+            let tx = self.giphy_tx.clone();
+            let repaint = ctx.clone();
+            std::thread::spawn(move || {
+                let msg = match media::download(&g.url) {
+                    Ok(bytes) => GiphyMsg::Full(bytes),
+                    Err(e) => GiphyMsg::FullFailed(format!("{e:#}")),
+                };
+                let _ = tx.send(msg);
+                repaint.request_repaint();
+            });
+        }
+        let p = &self.giphy;
+        if want_more && !p.loading && !p.end && p.error.is_none() && !p.results.is_empty() {
+            let q = p.shown_query.clone().unwrap_or_default();
+            let offset = p.results.len() as u32;
+            self.gif_request(q, offset);
+        }
+        // Click outside the popup (and not on the GIF button) closes it.
+        let popup = area.response.rect;
+        let clicked_outside = ctx.input(|i| {
+            i.pointer.any_pressed()
+                && i.pointer.interact_pos().is_some_and(|p| !popup.contains(p) && !self.gif_button_rect.is_some_and(|b| b.contains(p)))
+        });
+        if clicked_outside && !self.giphy.sending {
+            self.close_gif_picker();
         }
     }
 
+}
+
+/// GIFs per page (must match the server's page size).
+const GIF_PAGE: u32 = 24;
+
+/// Two-column masonry layout: rects (relative to the grid origin) for items
+/// of the given sizes, each placed into the shorter column, plus total height.
+pub(super) fn masonry(sizes: &[(u32, u32)], width: f32, gap: f32) -> (Vec<egui::Rect>, f32) {
+    let col_w = ((width - gap) / 2.0).max(1.0);
+    let mut heights = [0.0f32; 2];
+    let mut rects = Vec::with_capacity(sizes.len());
+    for &(w, h) in sizes {
+        let col = if heights[0] <= heights[1] { 0 } else { 1 };
+        let item_h = (col_w * h.max(1) as f32 / w.max(1) as f32).clamp(40.0, 360.0);
+        let min = egui::pos2(col as f32 * (col_w + gap), heights[col]);
+        rects.push(egui::Rect::from_min_size(min, egui::vec2(col_w, item_h)));
+        heights[col] += item_h + gap;
+    }
+    (rects, (heights[0].max(heights[1]) - gap).max(0.0))
+}
+
+#[cfg(test)]
+mod gif_tests {
+    use super::*;
+
+    #[test]
+    fn masonry_fills_the_shorter_column() {
+        // Tall, wide, wide: the two wide ones go to the right column.
+        let (r, total) = masonry(&[(100, 200), (200, 100), (200, 100)], 206.0, 6.0);
+        assert_eq!(r[0].left(), 0.0);
+        assert_eq!(r[1].left(), 106.0, "second column");
+        assert_eq!(r[2].left(), 106.0, "right column is still shorter");
+        assert_eq!(r[2].top(), r[1].bottom() + 6.0);
+        assert!((r[0].height() - 200.0).abs() < 0.01, "aspect ratio kept");
+        assert!((total - 200.0).abs() < 0.01);
+        assert!(r.iter().all(|x| x.width() == 100.0));
+        let (none, h) = masonry(&[], 300.0, 6.0);
+        assert!(none.is_empty() && h == 0.0);
+    }
 }
 
 /// Karte im Bildschirm-Auswahldialog: Vorschaubild + Titel (+ App-Name).

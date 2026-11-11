@@ -159,6 +159,29 @@ impl Db {
         Ok(())
     }
 
+    // --- GIPHY key (stored apart from ServerSettings: never sent to clients) ---
+
+    pub fn load_gif_key(&self) -> Result<Option<String>> {
+        let row = self.conn.query_row("SELECT value FROM settings WHERE key = 'giphy_key'", [], |r| r.get::<_, Vec<u8>>(0));
+        match row {
+            Ok(bytes) => Ok(String::from_utf8(bytes).ok().filter(|k| !k.is_empty())),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn save_gif_key(&self, key: Option<&str>) -> Result<()> {
+        match key {
+            Some(k) => self.conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('giphy_key', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = ?1",
+                params![k.as_bytes()],
+            )?,
+            None => self.conn.execute("DELETE FROM settings WHERE key = 'giphy_key'", [])?,
+        };
+        Ok(())
+    }
+
     // --- Servereinstellungen (bincode-BLOB, ein Eintrag) ---
 
     pub fn load_settings(&self) -> Result<Option<ServerSettings>> {
@@ -422,6 +445,22 @@ mod tests {
         db.delete_message(a).unwrap();
         assert_eq!(db.message_meta(a).unwrap(), None);
         assert_eq!(db.recent_messages().unwrap().len(), 1);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn gif_key_roundtrip() {
+        let path = temp_db("gif-key");
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.load_gif_key().unwrap(), None);
+        db.save_gif_key(Some("abc123")).unwrap();
+        assert_eq!(db.load_gif_key().unwrap().as_deref(), Some("abc123"));
+        db.save_gif_key(Some("def456")).unwrap();
+        assert_eq!(db.load_gif_key().unwrap().as_deref(), Some("def456"));
+        db.save_gif_key(None).unwrap();
+        assert_eq!(db.load_gif_key().unwrap(), None);
+        // Settings blob is untouched by the key.
+        assert!(db.load_settings().unwrap().is_none());
         std::fs::remove_file(&path).ok();
     }
 

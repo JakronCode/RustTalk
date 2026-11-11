@@ -91,6 +91,9 @@ pub struct State {
     messages: HashMap<u64, (u64, String)>,
     /// Without persistence: next message id (high range, never clashes with DB ids).
     next_message_id: u64,
+    /// GIPHY key for the GIF search (None = GIF button off for everyone).
+    gif_key: Option<String>,
+    gif_cache: crate::gif::GifCache,
 }
 
 fn now_secs() -> u64 {
@@ -121,6 +124,8 @@ impl State {
             db: None,
             messages: HashMap::new(),
             next_message_id: 1 << 48,
+            gif_key: None,
+            gif_cache: Default::default(),
         };
 
         let spawn_entries: Vec<_> =
@@ -200,6 +205,7 @@ impl State {
             if let Some(saved) = db.load_settings()? {
                 state.settings = saved;
             }
+            state.gif_key = db.load_gif_key()?;
             if state.settings.afk_channel.is_some_and(|id| !state.is_afk_target(id)) {
                 state.settings.afk_channel = None;
             }
@@ -276,6 +282,35 @@ impl State {
 
     pub fn settings(&self) -> &ServerSettings {
         &self.settings
+    }
+
+    // --- GIF search ---
+
+    pub fn gif_available(&self) -> bool {
+        self.gif_key.is_some()
+    }
+
+    pub fn gif_key(&self) -> Option<String> {
+        self.gif_key.clone()
+    }
+
+    /// Sets/removes the (already checked) key and persists it.
+    pub fn set_gif_key(&mut self, key: Option<String>) {
+        self.gif_key = key;
+        self.gif_cache.clear();
+        if let Some(db) = &self.db {
+            if let Err(e) = db.save_gif_key(self.gif_key.as_deref()) {
+                tracing::warn!("GIPHY-Key speichern fehlgeschlagen: {e}");
+            }
+        }
+    }
+
+    pub fn gif_cached(&self, query: &str, offset: u32) -> Option<Vec<rusttalk_shared::protocol::GifInfo>> {
+        self.gif_cache.get(query, offset, Instant::now())
+    }
+
+    pub fn gif_store(&mut self, query: &str, offset: u32, results: Vec<rusttalk_shared::protocol::GifInfo>) {
+        self.gif_cache.put(query, offset, results, Instant::now());
     }
 
     /// Kann ein Channel AFK-Ziel sein? (Voice oder Lobby)

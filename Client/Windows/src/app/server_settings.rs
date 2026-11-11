@@ -13,6 +13,7 @@ pub(super) enum ServerTab {
     Overview,
     Afk,
     Messages,
+    Integrations,
     Roles,
     Bans,
     Invites,
@@ -20,10 +21,11 @@ pub(super) enum ServerTab {
 }
 
 impl ServerTab {
-    const ALL: [(ServerTab, &'static str, &'static str, bool); 7] = [
+    const ALL: [(ServerTab, &'static str, &'static str, bool); 8] = [
         (ServerTab::Overview, icons::regular::HOUSE_LINE, "Overview", false),
         (ServerTab::Afk, icons::regular::MOON, "AFK", false),
         (ServerTab::Messages, icons::regular::CHAT_CENTERED_TEXT, "Messages", false),
+        (ServerTab::Integrations, icons::regular::PLUGS_CONNECTED, "Integrations", false),
         (ServerTab::Roles, icons::regular::SHIELD_CHECK, "Roles", true),
         (ServerTab::Bans, icons::regular::PROHIBIT, "Bans", true),
         (ServerTab::Invites, icons::regular::LINK, "Invites", true),
@@ -36,12 +38,14 @@ pub(super) struct ServerSettingsDialog {
     tab: ServerTab,
     draft: ServerSettings,
     error: Option<String>,
+    /// Input for a new GIPHY key (sent on its own, not with "Save Changes").
+    gif_key: String,
 }
 
 impl RustTalkApp {
     pub(super) fn open_server_settings(&mut self, tab: ServerTab) {
         self.server_settings_dialog =
-            Some(ServerSettingsDialog { tab, draft: self.server_settings.clone(), error: None });
+            Some(ServerSettingsDialog { tab, draft: self.server_settings.clone(), error: None, gif_key: String::new() });
     }
 
     pub(super) fn ui_server_settings(&mut self, ctx: &egui::Context) {
@@ -92,6 +96,7 @@ impl RustTalkApp {
                                 ServerTab::Overview => self.server_overview(ui, &mut dlg),
                                 ServerTab::Afk => self.server_afk(ui, &mut dlg),
                                 ServerTab::Messages => self.server_messages(ui, &mut dlg),
+                                ServerTab::Integrations => self.server_integrations(ui, &mut dlg),
                                 ServerTab::Roles => server_wip(ui, "Roles", "Create roles like Admin or Moderator and decide who may manage channels, move users or change these settings."),
                                 ServerTab::Bans => server_wip(ui, "Bans", "Ban users by name or address and see the ban list."),
                                 ServerTab::Invites => server_wip(ui, "Invites", "Create invite links that open RustTalk and connect directly to this server."),
@@ -232,6 +237,54 @@ impl RustTalkApp {
 }
 
 impl RustTalkApp {
+    fn server_integrations(&mut self, ui: &mut egui::Ui, dlg: &mut ServerSettingsDialog) {
+        card(ui, |ui| {
+            caption(ui, "GIFs (GIPHY)");
+            ui.horizontal(|ui| {
+                let (icon, text, color) = if self.gif_available {
+                    (icons::regular::CHECK_CIRCLE, "GIF search is active for everyone on this server", theme::GREEN)
+                } else {
+                    (icons::regular::X_CIRCLE, "GIF search is off - no API key set", theme::MUTED)
+                };
+                ui.label(egui::RichText::new(icon).size(18.0).color(color));
+                ui.label(egui::RichText::new(text).color(theme::HEADER));
+            });
+            ui.label(
+                egui::RichText::new(
+                    "The key is stored on the server only - members never see it and don't have to enter anything. \
+                     The server searches GIPHY for everyone and caches results.",
+                )
+                .size(12.0)
+                .color(theme::MUTED),
+            );
+            ui.separator();
+            let label = if self.gif_available { "Replace API key" } else { "GIPHY API key" };
+            setting_row(ui, label, Some("Free at developers.giphy.com (create an app, type \"API\")"), false, |ui| {
+                ui.add(egui::TextEdit::singleline(&mut dlg.gif_key).password(true).hint_text("paste key").desired_width(200.0));
+            });
+            ui.horizontal(|ui| {
+                let key = dlg.gif_key.trim().to_string();
+                if ui.add_enabled(!key.is_empty(), egui::Button::new(format!("{}  Check & save", icons::regular::FLOPPY_DISK))).clicked() {
+                    if let Some(tx) = &self.cmd_tx {
+                        let _ = tx.send(Command::SetGifKey(Some(key)));
+                    }
+                    dlg.gif_key.clear();
+                    self.set_status("Checking the GIPHY key...");
+                }
+                if self.gif_available
+                    && ui.add(egui::Button::new(egui::RichText::new(format!("{}  Remove key", icons::regular::TRASH)).color(theme::RED))).clicked()
+                {
+                    if let Some(tx) = &self.cmd_tx {
+                        let _ = tx.send(Command::SetGifKey(None));
+                    }
+                }
+                if ui.link("Get a free key").clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab("https://developers.giphy.com/dashboard/"));
+                }
+            });
+        });
+    }
+
     fn server_messages(&mut self, ui: &mut egui::Ui, dlg: &mut ServerSettingsDialog) {
         use rusttalk_shared::protocol::{MAX_SERVER_MESSAGE_LEN, MAX_WELCOME_LEN};
         card(ui, |ui| {

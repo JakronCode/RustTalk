@@ -17,7 +17,7 @@ Lightweight voice chat in Rust — a Discord-style client with a TeamSpeak-style
 - **Channel types:** Lobby (exactly one, join log, no talking/video), Category (grouping), Voice (voice + media chat), Text (chat); order via **drag & drop** (stored on the server)
 - **Discord-style UI:** server menu, voice panel, user panel, settings window with categories, channel settings (partly WIP)
 - **Text chat** with history, images (PNG/JPEG/GIF, **animated**), unread markers, **replies**, **edit/delete** own messages, **@mentions** (highlight, sound, autocomplete), **search** per channel
-- **GIF search (GIPHY):** GIF button in the composer (API key in Settings > Advanced)
+- **GIF picker (GIPHY), Discord style:** trending on open, search while typing, two-column grid, click = send. One GIPHY key per **server** (Server Settings > Integrations) – members enter nothing; the server searches and caches, the key never leaves it
 - **Notifications:** sounds for join/leave in your voice channel, new messages and mute; taskbar flash while in the background
 - **SQLite persistence** (server): channels (incl. order), chat history (retention 10k per channel) and the lobby log survive restarts
 - **Client UI:** dark mode, procedural logo, saved servers, settings in a separate window, mic level meter, avatars with talking ring, per-user local mute and **per-user volume** 0–200 % (right click, remembered by name), **input volume**, UI scaling
@@ -42,7 +42,8 @@ Lightweight voice chat in Rust — a Discord-style client with a TeamSpeak-style
 | Audio | `cpal` (I/O), `audiopus` (Opus), `nnnoiseless` (RNNoise), `ringbuf` (lock-free) |
 | Network | `tokio`; TCP (control, length-prefixed `bincode`) + UDP (audio, custom 20-byte header) |
 | Server DB | `rusqlite` (bundled SQLite, WAL) |
-| Media | `image`, `rfd` (file dialog), `nokhwa` (camera, Media Foundation), `xcap` (screens/windows), `ureq` + `serde_json` (GIPHY) |
+| Media | `image`, `rfd` (file dialog), `nokhwa` (camera, Media Foundation), `xcap` (screens/windows), `ureq` (GIF downloads) |
+| Server GIF search | `ureq` + `serde_json` (GIPHY API, cached) |
 | Hotkeys | `device_query` (global push-to-talk by polling, no keyboard hook) |
 | Server ops | systemd unit (hardened: `ProtectSystem=strict` + `ReadWritePaths`) |
 
@@ -58,7 +59,7 @@ Client (Windows)                          Server (Debian)
                                             └──────────────┘
 ```
 
-- **TCP:** login, channels, chat (text + images), events, video frames (camera/screen), channel order, server settings, chat edits/replies (protocol v9)
+- **TCP:** login, channels, chat (text + images), events, video frames (camera/screen), channel order, server settings, chat edits/replies, GIF search (protocol v10)
 - **UDP:** Opus audio only (20 ms frames, token + sequence header); the server relays 1:1 within the voice channel
 - **Lobby:** everyone lands here when connecting; talking is blocked on the server; join log
 
@@ -124,7 +125,7 @@ bash Server/Test_Scripts/e2e_local.sh
 ## Project structure
 
 ```
-├── shared/            # protocol (v9), framing, UDP packet format
+├── shared/            # protocol (v10), framing, UDP packet format
 ├── Server/            # Linux server (+ test_client CLI, integration tests, deploy/, Test_Scripts/)
 │   └── src/           #   main, config, state (RAM), db (SQLite), tcp, udp
 └── Client/Windows/    # egui client
@@ -138,5 +139,5 @@ bash Server/Test_Scripts/e2e_local.sh
 
 - No encryption/authentication apart from the optional server password (meant for LAN use)
 - No echo cancellation → headphones recommended
-- GIPHY needs your own free API key (developers.giphy.com)
+- GIFs need one free GIPHY API key per server (developers.giphy.com), entered under Server Settings > Integrations
 - Video is MJPEG over TCP: "High" needs ~5–6 MB/s per screen stream and viewer — meant for LAN (pick "Balanced" on Wi-Fi). On very large monitors (3440×1440) "High" reaches ~19 fps

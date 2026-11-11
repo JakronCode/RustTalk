@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use rusttalk_shared::protocol::{
-    ChannelInfo, ChannelKind, ServerMessage, ServerSettings, UserInfo, VideoKind, MAX_MEDIA_BYTES,
+    GifInfo, ChannelInfo, ChannelKind, ServerMessage, ServerSettings, UserInfo, VideoKind, MAX_MEDIA_BYTES,
 };
 
 use crate::audio::sfx::{self, Sound};
@@ -110,20 +110,30 @@ fn mention_prefix(input: &str) -> Option<&str> {
     last.strip_prefix('@')
 }
 
-/// Zustand des GIPHY-Fensters.
+/// GIF picker popup (Discord style): trending on open, search while typing,
+/// two-column grid, click = send. Searches go through the server.
 #[derive(Default)]
-struct GiphyState {
+struct GifPicker {
     open: bool,
+    /// Text in the search field.
     query: String,
-    results: Vec<media::GifResult>,
+    /// When the search field last changed (debounce).
+    typed_at: Option<Instant>,
+    /// Query of the shown results (`Some("")` = trending).
+    shown_query: Option<String>,
+    results: Vec<GifInfo>,
     loading: bool,
+    /// No more pages.
+    end: bool,
     error: Option<String>,
-    /// Bereits angefragte Vorschau-URLs (gegen Doppel-Downloads).
-    requested: HashSet<String>,
-    /// Downloaded previews by URL (decoded via the texture cache).
+    /// Downloaded previews by URL.
     previews: HashMap<String, Vec<u8>>,
-    /// A GIF is being downloaded for attaching.
-    attaching: bool,
+    /// Preview URLs already being downloaded.
+    requested: HashSet<String>,
+    /// The chosen GIF is being downloaded.
+    sending: bool,
+    /// Focus the search field in the next frame.
+    focus: bool,
 }
 
 /// Kamera-Dialog: Geraeteauswahl + Live-Vorschau vor dem Teilen.
@@ -191,7 +201,6 @@ fn reconnect_delay(attempt: u32) -> Duration {
 
 /// Nachrichten aus Hintergrund-Threads (GIPHY-Suche/Downloads).
 enum GiphyMsg {
-    Results(Result<Vec<media::GifResult>, String>),
     Preview(String, Vec<u8>),
     Full(Vec<u8>),
     /// Download of the chosen GIF failed.
@@ -223,6 +232,8 @@ pub struct RustTalkApp {
     chat_search: Option<String>,
     /// Picked on a message; executed in the next frame (needs the command sender).
     chat_action: Option<ChatAction>,
+    /// Focus the message input in the next frame (after Reply / Edit).
+    focus_composer: bool,
     new_channel_name: String,
     new_channel_kind: ChannelKind,
     new_channel_parent: Option<u64>,
@@ -294,7 +305,13 @@ pub struct RustTalkApp {
     local_preview_tex: Option<(u64, egui::TextureHandle)>,
     /// Fehler aus dem Kamera-Thread fuer die Anzeige im Kamera-Dialog.
     cam_error: Arc<Mutex<Option<String>>>,
-    giphy: GiphyState,
+    giphy: GifPicker,
+    /// The server offers GIF search (it has a GIPHY key).
+    gif_available: bool,
+    /// Where the GIF that is downloading goes: (channel, reply_to).
+    gif_target: Option<(u64, Option<u64>)>,
+    /// Screen rect of the GIF button (the picker opens above it).
+    gif_button_rect: Option<egui::Rect>,
     giphy_tx: std::sync::mpsc::Sender<GiphyMsg>,
     giphy_rx: std::sync::mpsc::Receiver<GiphyMsg>,
 }
@@ -332,6 +349,7 @@ impl RustTalkApp {
             editing: None,
             chat_search: None,
             chat_action: None,
+            focus_composer: false,
             new_channel_name: String::new(),
             new_channel_kind: ChannelKind::Text,
             new_channel_parent: None,
@@ -375,7 +393,10 @@ impl RustTalkApp {
             local_preview: Arc::new(Mutex::new(None)),
             local_preview_tex: None,
             cam_error: Arc::new(Mutex::new(None)),
-            giphy: GiphyState::default(),
+            giphy: GifPicker::default(),
+            gif_available: false,
+            gif_target: None,
+            gif_button_rect: None,
             giphy_tx: giphy_tx.clone(),
             giphy_rx,
         }
@@ -444,6 +465,9 @@ impl RustTalkApp {
         self.editing = None;
         self.chat_search = None;
         self.chat_action = None;
+        self.close_gif_picker();
+        self.gif_available = false;
+        self.gif_target = None;
         self.talking.lock().unwrap().clear();
         self.local_muted.lock().unwrap().clear();
         self.user_volumes.lock().unwrap().clear();
@@ -633,8 +657,11 @@ impl RustTalkApp {
         let Some(action) = self.chat_action.take() else { return };
         match action {
             ChatAction::Reply(id) => {
-                self.editing = None;
+                if self.editing.take().is_some() {
+                    self.chat_input.clear();
+                }
                 self.reply_to = Some(id);
+                self.focus_composer = true;
             }
             ChatAction::Edit(id) => {
                 let text = self.chat.values().flatten().find(|l| l.id == id).map(|l| l.text.clone());
@@ -642,6 +669,7 @@ impl RustTalkApp {
                     self.reply_to = None;
                     self.editing = Some(id);
                     self.chat_input = text;
+                    self.focus_composer = true;
                 }
             }
             ChatAction::Delete(id) => {
@@ -673,11 +701,13 @@ impl RustTalkApp {
                 udp_token,
                 spawn_log,
                 chat_history,
+                gif_search,
             } => {
                 if self.cmd_tx.is_none() {
                     return; // attempt was cancelled meanwhile; the net thread ends on its own
                 }
                 self.connected = true;
+                self.gif_available = gif_search;
                 self.server_settings = settings;
                 self.my_id = my_id;
                 self.channels = channels.into_iter().map(|c| (c.id, c)).collect();
@@ -878,6 +908,12 @@ impl RustTalkApp {
                     self.unread.insert(channel_id);
                 }
             }
+            ServerMessage::GifResults { query, offset, results, error } => self.on_gif_results(query, offset, results, error),
+            ServerMessage::GifSearchChanged { available } => {
+                self.gif_available = available;
+                self.giphy.shown_query = None; // reload the picker
+                self.giphy.results.clear();
+            }
             ServerMessage::ChatEdited { channel_id, message_id, text } => {
                 if let Some(line) = self.chat.get_mut(&channel_id).and_then(|v| v.iter_mut().find(|l| l.id == message_id)) {
                     line.text = text;
@@ -984,7 +1020,7 @@ impl eframe::App for RustTalkApp {
         self.ui_channel_settings(ctx);
         self.ui_server_settings(ctx);
         self.ui_confirm_delete(ctx);
-        self.ui_giphy(ctx);
+        self.ui_gif_picker(ctx);
         self.ui_camera_dialog(ctx);
         self.ui_screen_picker(ctx);
 
@@ -1101,9 +1137,11 @@ impl RustTalkApp {
                             }
                         }
                         "new_channel" => self.open_new_channel(None, ChannelKind::Text),
+                        "gif" => self.open_gif_picker(),
                         "server" => self.open_server_settings(match arg {
                             "afk" => server_settings::ServerTab::Afk,
                             "messages" => server_settings::ServerTab::Messages,
+                            "integrations" => server_settings::ServerTab::Integrations,
                             _ => server_settings::ServerTab::Overview,
                         }),
                         _ => {}

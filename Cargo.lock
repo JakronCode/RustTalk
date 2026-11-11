@@ -3950,11 +3950,13 @@ dependencies = [
  "rusqlite",
  "rusttalk-shared",
  "serde",
+ "serde_json",
  "socket2",
  "tokio",
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
+ "ureq",
 ]
 
 [[package]]

@@ -34,9 +34,6 @@ pub struct ClientConfig {
     /// Automatische Lautstaerke fuer das eigene Mikro (AGC + Limiter).
     #[serde(default = "default_true")]
     pub auto_gain: bool,
-    /// GIPHY-API-Key (kostenlos unter developers.giphy.com).
-    #[serde(default)]
-    pub giphy_api_key: Option<String>,
     #[serde(default)]
     pub bookmarks: Vec<ServerBookmark>,
     #[serde(default)]
@@ -114,7 +111,6 @@ impl Default for ClientConfig {
             vad_threshold: default_vad_threshold(),
             noise_suppression: true,
             auto_gain: true,
-            giphy_api_key: None,
             bookmarks: Vec::new(),
             input_device: None,
             output_device: None,
@@ -175,7 +171,6 @@ mod tests {
             vad_threshold: 0.05,
             noise_suppression: false,
             auto_gain: false,
-            giphy_api_key: Some("test-key".into()),
             bookmarks: vec![
                 ServerBookmark { name: "Home".into(), address: "10.69.40.101:7331".into(), password: None },
                 ServerBookmark { name: "LAN".into(), address: "192.168.1.5".into(), password: Some("pw".into()) },

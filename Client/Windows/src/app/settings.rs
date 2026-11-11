@@ -494,15 +494,6 @@ impl RustTalkApp {
 
     fn page_advanced(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
-            caption(ui, "Integrations");
-            setting_row(ui, "GIPHY API key", Some("For the GIF button in the chat. Free at developers.giphy.com"), false, |ui| {
-                let mut key = self.config.giphy_api_key.clone().unwrap_or_default();
-                if ui.add(egui::TextEdit::singleline(&mut key).password(true).desired_width(220.0)).changed() {
-                    self.config.giphy_api_key = if key.trim().is_empty() { None } else { Some(key.trim().to_string()) };
-                }
-            });
-        });
-        card(ui, |ui| {
             caption(ui, "Data");
             setting_row(ui, "Settings file", Some(ClientConfig::PATH), false, |ui| {
                 if ui.button(format!("{}  Show in folder", icons::regular::FOLDER_OPEN)).clicked() {

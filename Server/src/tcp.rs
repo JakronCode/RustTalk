@@ -109,6 +109,7 @@ async fn handle_connection(stream: TcpStream, peer: SocketAddr, state: SharedSta
             users: st.all_users(),
             spawn_log: st.spawn_log(),
             chat_history: st.chat_history(),
+            gif_search: st.gif_available(),
         };
         let client = st.client(id).expect("frisch registrierter Client");
         let user = client.info();
@@ -199,9 +200,24 @@ async fn message_loop(
         let msg: Option<ClientMessage> = read_frame(reader).await?;
         let Some(msg) = msg else { return Ok(()) };
 
+        // GIF requests talk to GIPHY (HTTP): in their own task, never under the lock.
+        let msg = match msg {
+            ClientMessage::GifSearch { query, offset } => {
+                spawn_gif_search(state.clone(), client_id, query, offset);
+                continue;
+            }
+            ClientMessage::SetGifKey { key } => {
+                spawn_set_gif_key(state.clone(), client_id, key);
+                continue;
+            }
+            other => other,
+        };
+
         // Lock nur fuer die State-Aenderung halten (Sends sind synchron, kein await).
         let mut st = state.lock().unwrap();
         match msg {
+            // Handled above (outside the lock).
+            ClientMessage::GifSearch { .. } | ClientMessage::SetGifKey { .. } => {}
             ClientMessage::Hello { .. } => {
                 st.send_to(client_id, &ServerMessage::Error {
                     message: "Already logged in".to_string(),
@@ -346,4 +362,81 @@ fn sanitize_username(name: &str, fallback_id: u64) -> String {
         s = format!("User{fallback_id}");
     }
     s
+}
+
+/// GIF search: cached page right away, otherwise ask GIPHY in a blocking task.
+fn spawn_gif_search(state: SharedState, client_id: u64, query: String, offset: u32) {
+    let query: String = query.trim().chars().take(MAX_GIF_QUERY_LEN).collect();
+    let offset = offset.min(crate::gif::MAX_OFFSET);
+    let reply = move |results: Vec<GifInfo>, error: Option<String>, query: &str| ServerMessage::GifResults {
+        query: query.to_string(),
+        offset,
+        results,
+        error,
+    };
+    let key = {
+        let st = state.lock().unwrap();
+        if let Some(results) = st.gif_cached(&query, offset) {
+            st.send_to(client_id, &reply(results, None, &query));
+            return;
+        }
+        st.gif_key()
+    };
+    let Some(key) = key else {
+        let st = state.lock().unwrap();
+        let msg = "GIF search is not set up on this server (Server Settings > Integrations)".to_string();
+        st.send_to(client_id, &reply(Vec::new(), Some(msg), &query));
+        return;
+    };
+    tokio::spawn(async move {
+        let q = query.clone();
+        let res = tokio::task::spawn_blocking(move || crate::gif::fetch(&key, &q, offset))
+            .await
+            .unwrap_or_else(|e| Err(format!("GIF search failed: {e}")));
+        let mut st = state.lock().unwrap();
+        match res {
+            Ok(results) => {
+                st.gif_store(&query, offset, results.clone());
+                st.send_to(client_id, &reply(results, None, &query));
+            }
+            Err(e) => {
+                tracing::warn!("GIF-Suche fehlgeschlagen: {e}");
+                st.send_to(client_id, &reply(Vec::new(), Some(e), &query));
+            }
+        }
+    });
+}
+
+/// Sets or removes the GIPHY key. A new key is tested with one request first.
+fn spawn_set_gif_key(state: SharedState, client_id: u64, key: Option<String>) {
+    let key = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+    let Some(key) = key else {
+        let mut st = state.lock().unwrap();
+        st.set_gif_key(None);
+        info!("GIF-Suche deaktiviert (Client {client_id})");
+        st.broadcast(&ServerMessage::GifSearchChanged { available: false });
+        return;
+    };
+    if key.len() > 100 || !key.chars().all(|c| c.is_ascii_alphanumeric()) {
+        let st = state.lock().unwrap();
+        st.send_to(client_id, &ServerMessage::Error { message: "That does not look like a GIPHY API key".to_string() });
+        return;
+    }
+    tokio::spawn(async move {
+        let k = key.clone();
+        let res = tokio::task::spawn_blocking(move || crate::gif::fetch(&k, "", 0))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+        let mut st = state.lock().unwrap();
+        match res {
+            Ok(trending) => {
+                st.set_gif_key(Some(key));
+                st.gif_store("", 0, trending);
+                info!("GIF-Suche aktiviert (Client {client_id})");
+                st.broadcast(&ServerMessage::GifSearchChanged { available: true });
+                st.send_to(client_id, &ServerMessage::Notice { message: "GIF search is now active for everyone".to_string() });
+            }
+            Err(e) => st.send_to(client_id, &ServerMessage::Error { message: format!("Key not saved: {e}") }),
+        }
+    });
 }
