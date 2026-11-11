@@ -237,7 +237,8 @@ impl RustTalkApp {
         let animate = self.config.animate_gifs;
         let me = self.config.username.clone();
         let query = self.chat_search.as_ref().map(|q| q.trim().to_lowercase()).filter(|q| !q.is_empty());
-        let highlight = self.reply_to.or(self.editing);
+        let replying = self.reply_to;
+        let editing = self.editing;
         let mut action = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -269,8 +270,17 @@ impl RustTalkApp {
                                 (ChatKind::Message { from, .. }, Some((pf, pt))) => pf == from && line.timestamp.saturating_sub(pt) < 300,
                                 _ => false,
                             };
-                        let ctx = LineCtx { lines, me: &me, grouped, show_ts, animate, highlighted: highlight == Some(line.id) && line.id != 0 };
-                        if let Some(a) = chat_line(ui, line, &mut self.textures, &ctx) {
+                        let is_edit = editing == Some(line.id) && line.id != 0;
+                        let ctx = LineCtx {
+                            lines,
+                            me: &me,
+                            grouped: grouped && !is_edit,
+                            show_ts,
+                            animate,
+                            replying: replying == Some(line.id) && line.id != 0,
+                        };
+                        let edit = is_edit.then_some(EditBox { text: &mut self.edit_text, focus: &mut self.focus_edit });
+                        if let Some(a) = chat_line(ui, line, &mut self.textures, &ctx, edit) {
                             action = Some(a);
                         }
                         prev = match &line.kind {
@@ -350,12 +360,9 @@ impl RustTalkApp {
                         }
                     }
                     let enter = resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-                    // Esc cancels reply/edit; Up in an empty input edits the last own message.
-                    if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    // Esc cancels a reply; Up in an empty input edits the last own message.
+                    if (resp.has_focus() || resp.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         self.reply_to = None;
-                        if self.editing.take().is_some() {
-                            self.chat_input.clear();
-                        }
                     }
                     if resp.has_focus() && self.chat_input.is_empty() && self.editing.is_none() && ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
                         let last_own = self.chat.get(&ch_id).and_then(|v| {
@@ -397,16 +404,9 @@ impl RustTalkApp {
             });
     }
 
-    /// Sends text + attached image (or the edit of an own message).
+    /// Sends text + attached image (as a reply if one is selected).
     pub(super) fn send_chat(&mut self, ch_id: u64, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>) {
         let text = self.chat_input.trim().to_string();
-        if let Some(message_id) = self.editing.take() {
-            if !text.is_empty() {
-                let _ = cmd_tx.send(Command::EditChat { message_id, text });
-            }
-            self.chat_input.clear();
-            return;
-        }
         let image = self.pending_image.take().map(|(_, b)| b);
         if text.is_empty() && image.is_none() {
             return;
@@ -416,11 +416,10 @@ impl RustTalkApp {
         self.chat_input.clear();
     }
 
-    /// "Replying to ..." / "Editing message" bar above the input.
+    /// "Replying to ..." bar above the input.
     fn composer_context_bar(&mut self, ui: &mut egui::Ui, ch_id: u64) {
-        let (icon, title, target) = match (self.editing, self.reply_to) {
-            (Some(id), _) => (icons::regular::PENCIL_SIMPLE, "Editing message".to_string(), id),
-            (None, Some(id)) => {
+        let (icon, title, target) = match self.reply_to {
+            Some(id) => {
                 let who = self
                     .chat
                     .get(&ch_id)
@@ -432,7 +431,7 @@ impl RustTalkApp {
                     .unwrap_or_default();
                 (icons::regular::ARROW_BEND_UP_LEFT, format!("Replying to {who}"), id)
             }
-            (None, None) => return,
+            None => return,
         };
         let snippet = self
             .chat
@@ -460,9 +459,75 @@ impl RustTalkApp {
             });
         if cancel {
             self.reply_to = None;
-            if self.editing.take().is_some() {
-                self.chat_input.clear();
+        }
+    }
+
+    /// "Delete message?" dialog with a preview of the message.
+    pub(super) fn ui_confirm_delete_message(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.confirm_delete_msg else { return };
+        let Some(line) = self.chat.values().flatten().find(|l| l.id == id) else {
+            self.confirm_delete_msg = None;
+            return;
+        };
+        let from = match &line.kind {
+            ChatKind::Message { from, .. } => from.clone(),
+            ChatKind::System => String::new(),
+        };
+        let preview = snippet(&line.text, line.image.is_some());
+        let time = format_time(line.timestamp);
+        let mut open = true;
+        let mut confirm = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+        let mut cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        egui::Window::new("Delete Message")
+            .id(egui::Id::new("confirm_delete_message"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .fixed_size([420.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new("Are you sure you want to delete this message? This cannot be undone.").color(theme::TEXT));
+                ui.add_space(6.0);
+                egui::Frame::default()
+                    .fill(theme::DARK)
+                    .corner_radius(8.0)
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            theme::draw_avatar(ui, &from, 28.0, false);
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(&from).strong().color(theme::HEADER));
+                                    ui.label(egui::RichText::new(&time).size(11.0).color(theme::MUTED));
+                                });
+                                ui.add(egui::Label::new(egui::RichText::new(&preview).color(theme::TEXT)).wrap());
+                            });
+                        });
+                    });
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(format!("{}  Tip: hold Shift while clicking the trash icon to delete without asking.", icons::regular::INFO))
+                        .size(11.5)
+                        .color(theme::MUTED),
+                );
+                ui.add_space(8.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::danger_button(ui, &format!("{}  Delete", icons::regular::TRASH)).clicked() {
+                        confirm = true;
+                    }
+                    if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if confirm && !cancel {
+            if let Some(tx) = &self.cmd_tx {
+                let _ = tx.send(Command::DeleteChat(id));
             }
+        }
+        if confirm || cancel || !open {
+            self.confirm_delete_msg = None;
         }
     }
 
@@ -606,8 +671,15 @@ pub(super) struct LineCtx<'a> {
     grouped: bool,
     show_ts: bool,
     animate: bool,
-    /// Target of the current reply / edit.
-    highlighted: bool,
+    /// This message is being answered (composer "Replying to").
+    replying: bool,
+}
+
+/// Inline editor of the message being edited.
+pub(super) struct EditBox<'a> {
+    text: &'a mut String,
+    /// Focus the field (once, after "Edit").
+    focus: &'a mut bool,
 }
 
 /// Short one-line preview of a message.
@@ -630,6 +702,7 @@ pub(super) fn chat_line(
     line: &ChatLine,
     textures: &mut TextureCache,
     c: &LineCtx,
+    edit: Option<EditBox>,
 ) -> Option<ChatAction> {
     let (from, own) = match &line.kind {
         ChatKind::System => {
@@ -651,6 +724,8 @@ pub(super) fn chat_line(
         ui.add_space(10.0);
     }
     let mentioned = !own && mentions(&line.text, c.me);
+    let editing = edit.is_some();
+    let mut action = None;
     // Background (mention / reply target) is painted below the content afterwards.
     let bg = ui.painter().add(egui::Shape::Noop);
     let row = ui
@@ -689,7 +764,9 @@ pub(super) fn chat_line(
                         }
                     });
                 }
-                if !line.text.is_empty() {
+                if let Some(edit) = edit {
+                    action = inline_editor(ui, line.id, edit);
+                } else if !line.text.is_empty() {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         ui.add(egui::Label::new(egui::RichText::new(&line.text).color(theme::TEXT)).wrap());
@@ -713,10 +790,10 @@ pub(super) fn chat_line(
         .response
         .rect;
 
-    let tint = if mentioned {
+    let tint = if c.replying || editing {
+        Some((theme::ACCENT.gamma_multiply(0.22), theme::ACCENT))
+    } else if mentioned {
         Some((theme::YELLOW.gamma_multiply(0.12), theme::YELLOW))
-    } else if c.highlighted {
-        Some((theme::ACCENT.gamma_multiply(0.12), theme::ACCENT))
     } else {
         None
     };
@@ -724,12 +801,23 @@ pub(super) fn chat_line(
         let r = row.expand2(egui::vec2(8.0, 2.0));
         ui.painter().set(bg, egui::Shape::rect_filled(r, 4.0, fill));
         ui.painter().rect_filled(egui::Rect::from_min_max(r.left_top(), egui::pos2(r.left() + 3.0, r.bottom())), 0.0, bar);
+        if c.replying {
+            // Small badge top right: this is the message you are answering.
+            ui.painter().text(
+                egui::pos2(r.right() - 8.0, r.top() + 4.0),
+                egui::Align2::RIGHT_TOP,
+                format!("{}  Replying", icons::regular::ARROW_BEND_UP_LEFT),
+                egui::FontId::proportional(11.5),
+                theme::ACCENT,
+            );
+        }
     }
 
-    if line.id == 0 {
-        return None; // no id (old server / local line): no actions
+    if line.id == 0 || editing {
+        return action; // no id (old server / local line) or inline editor open: no other actions
     }
-    let mut action = None;
+    let shift = ui.input(|i| i.modifiers.shift);
+    let delete = |id| if shift { ChatAction::DeleteNow(id) } else { ChatAction::Delete(id) };
     // Right click: same actions as the hover buttons.
     let resp = ui.interact(row, ui.id().with(("chat-line", line.id)), egui::Sense::click());
     resp.context_menu(|ui| {
@@ -743,7 +831,7 @@ pub(super) fn chat_line(
                 ui.close_menu();
             }
             if ui.button(egui::RichText::new(format!("{}  Delete", icons::regular::TRASH)).color(theme::RED)).clicked() {
-                action = Some(ChatAction::Delete(line.id));
+                action = Some(delete(line.id));
                 ui.close_menu();
             }
         }
@@ -757,7 +845,7 @@ pub(super) fn chat_line(
     let mut buttons: Vec<(&str, &str, ChatAction)> = vec![(icons::regular::ARROW_BEND_UP_LEFT, "Reply", ChatAction::Reply(line.id))];
     if own {
         buttons.push((icons::regular::PENCIL_SIMPLE, "Edit", ChatAction::Edit(line.id)));
-        buttons.push((icons::regular::TRASH, "Delete", ChatAction::Delete(line.id)));
+        buttons.push((icons::regular::TRASH, "Delete  (Shift: without asking)", ChatAction::Delete(line.id)));
     }
     let width = buttons.len() as f32 * 28.0 + 8.0;
     let tools_id = egui::Id::new(("chat-tools", line.id));
@@ -787,13 +875,72 @@ pub(super) fn chat_line(
                                     .on_hover_text(tip)
                                     .clicked()
                                 {
-                                    action = Some(a);
+                                    action = Some(match a {
+                                        ChatAction::Delete(id) => delete(id),
+                                        other => other,
+                                    });
                                 }
                             }
                         });
                     });
             });
     }
+    action
+}
+
+/// Inline editor: text field + check (save) / x (cancel). Enter saves,
+/// Shift+Enter = new line, Esc cancels.
+fn inline_editor(ui: &mut egui::Ui, id: u64, edit: EditBox) -> Option<ChatAction> {
+    let field_id = egui::Id::new(("edit-message", id));
+    let resp = egui::Frame::default()
+        .fill(theme::INPUT)
+        .corner_radius(6.0)
+        .stroke(egui::Stroke::new(1.0_f32, theme::ACCENT))
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(edit.text)
+                    .id(field_id)
+                    .frame(false)
+                    .desired_rows(1)
+                    .desired_width(ui.available_width().min(640.0)),
+            )
+        })
+        .inner;
+    if std::mem::take(edit.focus) {
+        resp.request_focus();
+        if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), field_id) {
+            let end = egui::text::CCursor::new(edit.text.chars().count());
+            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
+            state.store(ui.ctx(), field_id);
+        }
+    }
+    let mut action = None;
+    // egui drops the focus on Esc before we look -> also accept "just lost it".
+    if (resp.has_focus() || resp.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        action = Some(ChatAction::CancelEdit);
+    }
+    if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift) {
+        while edit.text.ends_with('\n') {
+            edit.text.pop(); // egui already inserted the newline
+        }
+        action = Some(ChatAction::SaveEdit);
+    }
+    ui.horizontal(|ui| {
+        let save = ui
+            .add(egui::Button::new(egui::RichText::new(format!("{}  Save", icons::regular::CHECK)).color(egui::Color32::WHITE)).fill(theme::GREEN))
+            .on_hover_text("Save (Enter)");
+        if save.clicked() {
+            action = Some(ChatAction::SaveEdit);
+        }
+        let cancel = ui
+            .add(egui::Button::new(egui::RichText::new(format!("{}  Cancel", icons::regular::X)).color(theme::HEADER)))
+            .on_hover_text("Cancel (Esc)");
+        if cancel.clicked() {
+            action = Some(ChatAction::CancelEdit);
+        }
+        ui.label(egui::RichText::new("Enter = save  -  Esc = cancel  -  Shift+Enter = new line").size(11.0).color(theme::MUTED));
+    });
     action
 }
 
@@ -811,8 +958,8 @@ mod tests {
         let mut action = None;
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let c = LineCtx { lines, me: "me", grouped: false, show_ts: true, animate: false, highlighted: false };
-                action = chat_line(ui, &lines[0], textures, &c);
+                let c = LineCtx { lines, me: "me", grouped: false, show_ts: true, animate: false, replying: false };
+                action = chat_line(ui, &lines[0], textures, &c, None);
             });
         });
         action
@@ -854,6 +1001,34 @@ mod tests {
         let mut got = frame(&ctx, &lines, &mut textures, vec![press(true)]);
         got = got.or(frame(&ctx, &lines, &mut textures, vec![press(false)]));
         assert_eq!(got, Some(ChatAction::Edit(7)));
+    }
+
+    /// Inline editor: Enter saves, Esc cancels (field gets the focus itself).
+    #[test]
+    fn inline_editor_keys() {
+        let ctx = egui::Context::default();
+        let run = |text: &mut String, focus: &mut bool, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 400.0))),
+                events,
+                ..Default::default()
+            };
+            let mut action = None;
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    action = inline_editor(ui, 1, EditBox { text, focus });
+                });
+            });
+            action
+        };
+        let key = |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() };
+        let (mut text, mut focus) = ("hello".to_string(), true);
+        assert_eq!(run(&mut text, &mut focus, vec![]), None);
+        assert!(!focus, "focus request consumed");
+        run(&mut text, &mut focus, vec![]); // focus is active from now on
+        assert_eq!(run(&mut text, &mut focus, vec![key(egui::Key::Enter)]), Some(ChatAction::SaveEdit));
+        assert_eq!(text.trim_end(), "hello", "no newline left behind");
+        assert_eq!(run(&mut text, &mut focus, vec![key(egui::Key::Escape)]), Some(ChatAction::CancelEdit));
     }
 
     #[test]

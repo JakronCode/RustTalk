@@ -80,8 +80,15 @@ impl ChatLine {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChatAction {
     Reply(u64),
+    /// Start editing inline.
     Edit(u64),
+    /// Ask "really delete?".
     Delete(u64),
+    /// Delete without asking (Shift + click).
+    DeleteNow(u64),
+    /// Inline edit: save (check) / cancel (x).
+    SaveEdit,
+    CancelEdit,
 }
 
 /// Does `text` mention `name` ("@name", case-insensitive, not inside a longer name)?
@@ -226,8 +233,13 @@ pub struct RustTalkApp {
     chat_input: String,
     /// Composer answers this message.
     reply_to: Option<u64>,
-    /// Composer edits this own message (the text is in `chat_input`).
+    /// Own message being edited inline (text in `edit_text`).
     editing: Option<u64>,
+    edit_text: String,
+    /// Focus the inline edit field in the next frame.
+    focus_edit: bool,
+    /// Message waiting for "really delete?".
+    confirm_delete_msg: Option<u64>,
     /// Search in the current channel (`Some` = search bar open).
     chat_search: Option<String>,
     /// Picked on a message; executed in the next frame (needs the command sender).
@@ -347,6 +359,9 @@ impl RustTalkApp {
             chat_input: String::new(),
             reply_to: None,
             editing: None,
+            edit_text: String::new(),
+            focus_edit: false,
+            confirm_delete_msg: None,
             chat_search: None,
             chat_action: None,
             focus_composer: false,
@@ -463,6 +478,8 @@ impl RustTalkApp {
         self.selected_channel = None;
         self.reply_to = None;
         self.editing = None;
+        self.edit_text.clear();
+        self.confirm_delete_msg = None;
         self.chat_search = None;
         self.chat_action = None;
         self.close_gif_picker();
@@ -657,23 +674,36 @@ impl RustTalkApp {
         let Some(action) = self.chat_action.take() else { return };
         match action {
             ChatAction::Reply(id) => {
-                if self.editing.take().is_some() {
-                    self.chat_input.clear();
-                }
+                self.editing = None;
                 self.reply_to = Some(id);
                 self.focus_composer = true;
             }
             ChatAction::Edit(id) => {
                 let text = self.chat.values().flatten().find(|l| l.id == id).map(|l| l.text.clone());
                 if let Some(text) = text {
-                    self.reply_to = None;
                     self.editing = Some(id);
-                    self.chat_input = text;
-                    self.focus_composer = true;
+                    self.edit_text = text;
+                    self.focus_edit = true;
                 }
             }
-            ChatAction::Delete(id) => {
+            ChatAction::Delete(id) => self.confirm_delete_msg = Some(id),
+            ChatAction::DeleteNow(id) => {
                 let _ = cmd_tx.send(Command::DeleteChat(id));
+            }
+            ChatAction::SaveEdit => {
+                let Some(id) = self.editing.take() else { return };
+                let text = std::mem::take(&mut self.edit_text).trim().to_string();
+                let original = self.chat.values().flatten().find(|l| l.id == id).map(|l| l.text.clone());
+                if text.is_empty() {
+                    // Like Discord: saving an empty message asks to delete it.
+                    self.confirm_delete_msg = Some(id);
+                } else if original.as_deref() != Some(text.as_str()) {
+                    let _ = cmd_tx.send(Command::EditChat { message_id: id, text });
+                }
+            }
+            ChatAction::CancelEdit => {
+                self.editing = None;
+                self.edit_text.clear();
             }
         }
     }
@@ -681,9 +711,7 @@ impl RustTalkApp {
     fn select_channel(&mut self, id: u64) {
         if self.selected_channel != Some(id) {
             self.reply_to = None;
-            if self.editing.take().is_some() {
-                self.chat_input.clear();
-            }
+            self.editing = None;
             self.chat_search = None;
         }
         self.selected_channel = Some(id);
@@ -926,7 +954,9 @@ impl RustTalkApp {
                 }
                 if self.editing == Some(message_id) {
                     self.editing = None;
-                    self.chat_input.clear();
+                }
+                if self.confirm_delete_msg == Some(message_id) {
+                    self.confirm_delete_msg = None;
                 }
                 if self.reply_to == Some(message_id) {
                     self.reply_to = None;
@@ -1020,6 +1050,7 @@ impl eframe::App for RustTalkApp {
         self.ui_channel_settings(ctx);
         self.ui_server_settings(ctx);
         self.ui_confirm_delete(ctx);
+        self.ui_confirm_delete_message(ctx);
         self.ui_gif_picker(ctx);
         self.ui_camera_dialog(ctx);
         self.ui_screen_picker(ctx);
@@ -1079,6 +1110,7 @@ impl RustTalkApp {
             || self.server_settings_dialog.is_some()
             || self.show_new_channel
             || self.confirm_delete.is_some()
+            || self.confirm_delete_msg.is_some()
             || self.cam_dialog.is_some()
             || self.screen_picker.is_some();
         if !dialog_open {
@@ -1138,6 +1170,21 @@ impl RustTalkApp {
                         }
                         "new_channel" => self.open_new_channel(None, ChannelKind::Text),
                         "gif" => self.open_gif_picker(),
+                        // Message actions on the last own / last other message of the selected channel.
+                        "edit" | "delete" | "reply" => {
+                            let want_own = what != "reply";
+                            let id = self.selected_channel.and_then(|ch| self.chat.get(&ch)).and_then(|v| {
+                                v.iter()
+                                    .rev()
+                                    .find(|l| l.id != 0 && matches!(l.kind, ChatKind::Message { own, .. } if own == want_own))
+                                    .map(|l| l.id)
+                            });
+                            self.chat_action = id.map(|id| match what {
+                                "edit" => ChatAction::Edit(id),
+                                "delete" => ChatAction::Delete(id),
+                                _ => ChatAction::Reply(id),
+                            });
+                        }
                         "server" => self.open_server_settings(match arg {
                             "afk" => server_settings::ServerTab::Afk,
                             "messages" => server_settings::ServerTab::Messages,

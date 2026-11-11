@@ -2,6 +2,22 @@
 
 > Pflichtdokumentation aller Testläufe. Neueste oben.
 
+## 2026-11-11 (19) – Klarere UI fürs Löschen, Antworten und Bearbeiten
+
+**Wünsche:** Beim Löschen nachfragen, beim Antworten die Nachricht hervorheben, beim Bearbeiten Haken/X zum Bestätigen/Abbrechen.
+
+**Client:**
+- **Löschen:** Dialog „Delete Message“ mit Vorschau der Nachricht (Avatar, Name, Zeit, Text), rotes „Delete“ / „Cancel“, Enter/Esc. Shift+Klick auf den Papierkorb löscht ohne Nachfrage (wie Discord).
+- **Antworten:** Ziel-Nachricht deutlich hervorgehoben (Akzentfarbe + Balken + Hinweis „Replying“ oben rechts), dazu die Leiste „Replying to …“ über dem Eingabefeld.
+- **Bearbeiten:** jetzt direkt in der Nachricht statt im Eingabefeld: Textfeld mit grünem „✓ Save“ und „✗ Cancel“, Enter = speichern, Esc = abbrechen, Shift+Enter = neue Zeile; leer speichern fragt nach Löschen; unveränderter Text wird nicht gesendet. Pfeil-hoch im leeren Eingabefeld öffnet die letzte eigene Nachricht im Inline-Editor.
+- **Bugfix:** Esc in Textfeldern wurde ignoriert (egui gibt den Fokus bei Esc ab, bevor die Prüfung lief) – betraf auch das Abbrechen einer Antwort. Gefunden durch den neuen Test.
+
+**Tests:** Client 67 ✅ (neu: Inline-Editor Enter/Esc mit simulierten Tasten), Server 43 ✅, Integration 12 ✅, Shared 13 ✅.
+**Live geprüft (Screenshots, Testserver 7444):** Inline-Editor, Lösch-Dialog, Antwort-Hervorhebung (neue Debug-Hooks `edit`, `delete`, `reply` in `RUSTTALK_DEV_OPEN`).
+**Nicht geprüft:** mit echter Maus/Tastatur; Release-Client nicht neu gebaut (lief gerade).
+
+---
+
 ## 2026-11-11 (18) – Chat-Bugfixes, GIF-Picker wie Discord, GIPHY-Key pro Server (Protokoll v10)
 
 **Rückmeldung:** Hover-Leiste, Bearbeiten/Löschen und Antworten/Erwähnungen „buggen“; GIF-Fenster wie bei Discord; kein API-Key im Client, sondern pro Server (Server Settings).
