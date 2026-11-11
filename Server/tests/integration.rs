@@ -69,6 +69,7 @@ struct Welcome {
     users: Vec<UserInfo>,
     spawn_log: Vec<LogEntry>,
     chat_history: Vec<ChatRecord>,
+    settings: ServerSettings,
 }
 
 async fn connect(port: u16, name: &str, password: Option<String>) -> (Conn, Welcome) {
@@ -83,8 +84,8 @@ async fn connect(port: u16, name: &str, password: Option<String>) -> (Conn, Welc
     let mut conn = (reader, writer);
     let first: ServerMessage = read_frame(&mut conn.0).await.unwrap().expect("erste Nachricht");
     match first {
-        ServerMessage::Welcome { client_id, channels, users, spawn_log, chat_history, .. } => {
-            (conn, Welcome { client_id, channels, users, spawn_log, chat_history })
+        ServerMessage::Welcome { client_id, channels, users, spawn_log, chat_history, settings, .. } => {
+            (conn, Welcome { client_id, channels, users, spawn_log, chat_history, settings })
         }
         other => panic!("kein Welcome erhalten: {other:?}"),
     }
@@ -304,6 +305,44 @@ async fn mute_state_wird_verteilt() {
             other => panic!("MuteStateChanged erwartet, bekam: {other:?}"),
         }
     }
+}
+
+/// Servereinstellungen: Aenderung wird an alle verteilt, ungueltige abgelehnt.
+#[tokio::test]
+async fn server_settings_werden_verteilt() {
+    let port = free_port();
+    let _server = spawn_server(port, "");
+    wait_for_port(port);
+
+    let (mut a, _) = connect(port, "alice", None).await;
+    let (mut b, _) = connect(port, "bob", None).await;
+    // Join-Events wegraeumen.
+    while recv(&mut a, 300).await.is_some() {}
+    while recv(&mut b, 300).await.is_some() {}
+
+    let new = ServerSettings {
+        name: "LAN Party".into(),
+        welcome_message: "Hallo!".into(),
+        afk_timeout_mins: 5,
+        ..ServerSettings::default()
+    };
+    send(&mut a, &ClientMessage::UpdateServerSettings { settings: new.clone() }).await;
+    for conn in [&mut a, &mut b] {
+        match recv(conn, 2000).await {
+            Some(ServerMessage::ServerSettingsChanged { settings }) => assert_eq!(settings, new),
+            other => panic!("ServerSettingsChanged erwartet, bekam: {other:?}"),
+        }
+    }
+
+    // Ungueltig (Timeout 0) -> Fehler nur an den Absender, keine Aenderung.
+    let bad = ServerSettings { afk_timeout_mins: 0, ..new.clone() };
+    send(&mut a, &ClientMessage::UpdateServerSettings { settings: bad }).await;
+    assert!(matches!(recv(&mut a, 2000).await, Some(ServerMessage::Error { .. })));
+    assert!(recv(&mut b, 400).await.is_none(), "b bekommt nichts");
+
+    // Neuer Client sieht die Einstellungen im Welcome.
+    let (_c, wc) = connect(port, "carol", None).await;
+    assert_eq!(wc.settings, new);
 }
 
 #[tokio::test]

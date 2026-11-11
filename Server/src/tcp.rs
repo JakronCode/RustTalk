@@ -102,7 +102,7 @@ async fn handle_connection(stream: TcpStream, peer: SocketAddr, state: SharedSta
         let username = sanitize_username(&username, st.next_client_id_hint());
         let (id, token) = st.add_client(username.clone(), tx);
         let welcome = ServerMessage::Welcome {
-            server_name: st.server_name().to_string(),
+            settings: st.settings().clone(),
             client_id: id,
             udp_token: token,
             channels: st.all_channels(),
@@ -221,6 +221,10 @@ async fn message_loop(
                     Err(e) => st.send_to(client_id, &ServerMessage::Error { message: e }),
                 }
             }
+            ClientMessage::UpdateServerSettings { settings } => match st.update_settings(settings) {
+                Ok(settings) => st.broadcast(&ServerMessage::ServerSettingsChanged { settings }),
+                Err(e) => st.send_to(client_id, &ServerMessage::Error { message: e }),
+            },
             ClientMessage::RenameChannel { channel_id, name } => {
                 match st.rename_channel(channel_id, &name) {
                     Ok(()) => st.broadcast(&ServerMessage::ChannelRenamed { channel_id, name }),

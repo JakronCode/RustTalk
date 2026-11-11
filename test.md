@@ -2,6 +2,26 @@
 
 > Pflichtdokumentation aller Testläufe. Neueste oben.
 
+## 2026-11-11 (15) – Servereinstellungen, AFK-Mover, Disconnect, Bug-Report (Protokoll v7)
+
+**Wünsche:** Servereinstellungen (Auto-AFK nach 10 min stumm, Logo + Name, Platzhalter für Nachrichten), sichtbarer Disconnect soll den Server trennen (nicht in die Lobby), Disconnect raus aus dem Server-Menü, dort „Server Settings“ rein, Menü wurde immer breiter, Lobby per Klick beitreten, „Report a Bug“-Button.
+
+**Protokoll v7:** `ServerSettings { name, icon, welcome_message, afk_enabled, afk_timeout_mins, afk_channel }` im `Welcome`, `UpdateServerSettings` → `ServerSettingsChanged` (an alle), `Notice` (Hinweis an einen Client).
+
+**Server:** Einstellungen validiert (Name, Icon ≤ 256 KiB, Willkommenstext ≤ 1000 Zeichen, Timeout 1–240 min, AFK-Ziel nur Voice/Lobby) und in SQLite gespeichert (Tabelle `settings`, bincode); Config-`server_name` nur als Startwert. **AFK-Mover:** Server merkt sich, seit wann ein Client stumm/taub ist; alle 15 s werden Voice-Nutzer über dem Limit ins AFK-Ziel (Standard: Lobby) verschoben, bekommen eine `Notice` und bleiben stumm. Gelöschter AFK-Channel → zurück auf Lobby. Kein Rollen-System: jeder darf ändern (LAN).
+
+**Client:**
+- Neuer Dialog „Server Settings“: Overview (Icon hochladen → quadratisch 128 px PNG, Name), AFK (an/aus, Timeout, Ziel-Channel), Messages (Willkommenstext funktioniert; Join/Leave/Regeln/AFK-Hinweis/MOTD als WIP), Roles/Bans/Invites/Audit Log als WIP.
+- Server-Icon (oder Initialen) im Sidebar-Kopf und in der Lobby; Lobby zeigt den Willkommenstext.
+- Server-Menü: Server Settings, Create Channel/Category, App Settings, Report a Bug; Disconnect entfernt. **Breiten-Bug** behoben (Einträge nahmen `available_width`, die Zeile mit WIP-Badge machte das Popup jedes Frame breiter → feste Breite).
+- Roter Button im Voice-Panel = **vom Server trennen** (immer sichtbar, auch in der Lobby). Voice verlassen = Klick auf die Lobby, die jetzt per Klick beitretbar ist.
+- „Report a Bug“ (Server-Menü + About) öffnet ein neues GitHub-Issue mit Version/Protokoll vorausgefüllt.
+
+**Tests:** Client 53 ✅ (neu: Icon-PNG 128×128, URL-Kodierung, Initialen), Server 35 ✅ (neu: Validierung, AFK-Sweep inkl. Taub/Entstummen/Aus, Einstellungen überleben Neustart), Integration 8 ✅ (neu: `server_settings_werden_verteilt`), Shared 12 ✅ – Windows + Linux. Screenshots: Server Settings (Overview, AFK, Messages), Voice-Panel mit Disconnect.
+**Nicht geprüft:** AFK-Verschiebung live (minimal 1 min, nur Unit-Test), Menü-Popup per Screenshot (nicht automatisiert öffenbar), Icon-Upload per Dateidialog.
+
+---
+
 ## 2026-11-11 (14) – UI-Rework (Englisch), Channel Drag & Drop, Einstellungen (Protokoll v6)
 
 **Wünsche:** Channels per Drag & Drop verschieben, Channel-Einstellungen (vorerst visuell, WIP), Haupt-UI polieren/Icons sinnvoll anordnen, im Spawn Mikro/Kamera/Bildschirm ausgrauen, anderes Text-Channel-Icon, neutrale Standard-Channelnamen, komplette UI auf Englisch, Einstellungsmenü mit Kategorien.

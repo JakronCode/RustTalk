@@ -14,11 +14,13 @@
 //!     `StopVideo`/`VideoStopped` beendet einen einzelnen Stream.
 //! v6: Channel-Reihenfolge (`position`, `MoveChannel`/`ChannelsReordered`),
 //!     Servername im `Welcome`.
+//! v7: Servereinstellungen (`ServerSettings`: Name, Icon, Willkommenstext,
+//!     AFK-Mover) statt nur Servername; `Notice` fuer Hinweise.
 
 use serde::{Deserialize, Serialize};
 
 /// Aktuelle Protokollversion. Client und Server müssen übereinstimmen.
-pub const PROTOCOL_VERSION: u16 = 6;
+pub const PROTOCOL_VERSION: u16 = 7;
 
 /// Art eines Video-Streams. Ein User kann beide gleichzeitig senden.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -29,6 +31,39 @@ pub enum VideoKind {
 
 /// Maximale Groesse eines Bildes/Video-Frames in Bytes (4 MiB).
 pub const MAX_MEDIA_BYTES: usize = 4 * 1024 * 1024;
+
+/// Max. Groesse des Server-Icons (Client verkleinert vorher auf 128x128).
+pub const MAX_ICON_BYTES: usize = 256 * 1024;
+/// Max. Laenge des Willkommenstexts.
+pub const MAX_WELCOME_LEN: usize = 1000;
+
+/// Serverweite Einstellungen (im Client unter "Server Settings" editierbar).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerSettings {
+    pub name: String,
+    /// Server-Icon (PNG), None = aus dem Namen generiert.
+    pub icon: Option<Vec<u8>>,
+    /// Wird in der Lobby angezeigt. Leer = keiner.
+    pub welcome_message: String,
+    /// Auto-AFK: wer so lange stumm ist, wird verschoben.
+    pub afk_enabled: bool,
+    pub afk_timeout_mins: u32,
+    /// Ziel-Channel (Voice oder Lobby); None = Lobby.
+    pub afk_channel: Option<u64>,
+}
+
+impl Default for ServerSettings {
+    fn default() -> Self {
+        Self {
+            name: "RustTalk Server".to_string(),
+            icon: None,
+            welcome_message: String::new(),
+            afk_enabled: true,
+            afk_timeout_mins: 10,
+            afk_channel: None,
+        }
+    }
+}
 
 /// Standard-Port für TCP (Steuerung) und UDP (Audio).
 pub const DEFAULT_PORT: u16 = 7331;
@@ -152,6 +187,10 @@ pub enum ClientMessage {
         parent: Option<u64>,
         index: u32,
     },
+    /// Servereinstellungen aendern (kein Rollen-System: jeder darf, LAN).
+    UpdateServerSettings {
+        settings: ServerSettings,
+    },
     RenameChannel {
         channel_id: u64,
         name: String,
@@ -188,8 +227,8 @@ pub enum ClientMessage {
 pub enum ServerMessage {
     /// Antwort auf `Hello`. Enthält den kompletten Anfangszustand.
     Welcome {
-        /// Anzeigename des Servers (aus `server.toml`).
-        server_name: String,
+        /// Servereinstellungen (Name, Icon, Willkommenstext, AFK).
+        settings: ServerSettings,
         client_id: u64,
         /// Token, mit dem sich der Client per UDP beim Server registriert.
         udp_token: u64,
@@ -257,6 +296,14 @@ pub enum ServerMessage {
         from_id: u64,
         kind: VideoKind,
     },
+    /// Neue Servereinstellungen (an alle).
+    ServerSettingsChanged {
+        settings: ServerSettings,
+    },
+    /// Hinweis an einen Client (z. B. "wegen Inaktivitaet verschoben").
+    Notice {
+        message: String,
+    },
     Error {
         message: String,
     },
@@ -314,6 +361,7 @@ mod tests {
             ClientMessage::SetSharing { sharing: true },
             ClientMessage::VideoFrame { kind: VideoKind::Camera, data: vec![1, 2, 3] },
             ClientMessage::StopVideo { kind: VideoKind::Screen },
+            ClientMessage::UpdateServerSettings { settings: ServerSettings { icon: Some(vec![1, 2]), ..Default::default() } },
             ClientMessage::Disconnect,
         ];
         for msg in msgs {
@@ -351,7 +399,7 @@ mod tests {
         };
         let msgs = vec![
             ServerMessage::Welcome {
-                server_name: "Test".into(),
+                settings: ServerSettings::default(),
                 client_id: 1,
                 udp_token: u64::MAX,
                 channels: vec![channel.clone()],
@@ -381,6 +429,8 @@ mod tests {
             ServerMessage::SharingChanged { client_id: 1, sharing: true },
             ServerMessage::VideoFrame { from_id: 1, kind: VideoKind::Screen, data: vec![9, 8, 7] },
             ServerMessage::VideoStopped { from_id: 1, kind: VideoKind::Camera },
+            ServerMessage::ServerSettingsChanged { settings: ServerSettings::default() },
+            ServerMessage::Notice { message: "AFK".into() },
             ServerMessage::Error { message: "Fehler".into() },
         ];
         for msg in msgs {

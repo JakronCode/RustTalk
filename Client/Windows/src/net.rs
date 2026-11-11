@@ -24,6 +24,7 @@ pub enum Command {
     DeleteChannel(u64),
     RenameChannel(u64, String),
     MoveChannel { channel_id: u64, parent: Option<u64>, index: u32 },
+    UpdateServerSettings(ServerSettings),
     SendChat { channel_id: u64, text: String, image: Option<Vec<u8>> },
     SetMute { muted: bool, deafened: bool },
     SetSharing(bool),
@@ -38,7 +39,7 @@ pub enum NetEvent {
     /// Login erfolgreich; enthaelt den initialen Server-State und den UDP-Socket.
     Connected {
         my_id: u64,
-        server_name: String,
+        settings: ServerSettings,
         users: Vec<UserInfo>,
         channels: Vec<ChannelInfo>,
         udp_socket: Option<std::net::UdpSocket>,
@@ -121,9 +122,9 @@ async fn run(
     let first: Option<ServerMessage> = timeout(CONNECT_TIMEOUT, read_frame(&mut reader))
         .await
         .map_err(|_| anyhow::anyhow!("Timeout while waiting for the server"))??;
-    let (client_id, server_name, udp_token, channels, users, spawn_log, chat_history) = match first {
-        Some(ServerMessage::Welcome { client_id, udp_token, channels, users, spawn_log, chat_history, server_name }) => {
-            (client_id, server_name, udp_token, channels, users, spawn_log, chat_history)
+    let (client_id, settings, udp_token, channels, users, spawn_log, chat_history) = match first {
+        Some(ServerMessage::Welcome { client_id, udp_token, channels, users, spawn_log, chat_history, settings }) => {
+            (client_id, settings, udp_token, channels, users, spawn_log, chat_history)
         }
         Some(ServerMessage::Error { message }) => anyhow::bail!("{message}"),
         other => anyhow::bail!("Unexpected server response: {other:?}"),
@@ -134,7 +135,7 @@ async fn run(
     udp.connect(peer)?;
     let _ = event_tx.send(NetEvent::Connected {
         my_id: client_id,
-        server_name,
+        settings,
         users,
         channels,
         udp_socket: Some(udp),
@@ -188,6 +189,9 @@ async fn run(
                                 ClientMessage::CreateChannel { name, kind, parent }
                             }
                             Command::DeleteChannel(channel_id) => ClientMessage::DeleteChannel { channel_id },
+                            Command::UpdateServerSettings(settings) => {
+                                ClientMessage::UpdateServerSettings { settings }
+                            }
                             Command::MoveChannel { channel_id, parent, index } => {
                                 ClientMessage::MoveChannel { channel_id, parent, index }
                             }
@@ -247,7 +251,7 @@ mod tests {
             }
         });
         let welcome = ServerMessage::Welcome {
-            server_name: "Fake".into(),
+            settings: ServerSettings::default(),
             client_id: 1,
             udp_token: 7,
             channels: vec![],

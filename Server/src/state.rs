@@ -7,11 +7,11 @@ use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusttalk_shared::protocol::{
     ChannelInfo, ChannelKind, ChannelPlacement, ChatRecord, LogEntry, ServerMessage, UserInfo,
-    MAX_NAME_LEN,
+    ServerSettings, MAX_ICON_BYTES, MAX_NAME_LEN, MAX_WELCOME_LEN,
     SPAWN_LOG_CAP,
 };
 use tokio::sync::mpsc;
@@ -37,6 +37,8 @@ pub struct Client {
     pub sharing: bool,
     pub udp_token: u64,
     pub udp_addr: Option<SocketAddr>,
+    /// Seit wann stumm (fuer den AFK-Mover). None = nicht stumm.
+    pub muted_since: Option<Instant>,
     /// Video-Bytes, die fuer diesen Client in `tx` warten (Writer zieht ab).
     /// Ueber `MAX_VIDEO_BACKLOG` werden Frames verworfen statt gestaut.
     pub video_backlog: Arc<AtomicUsize>,
@@ -78,7 +80,8 @@ pub struct State {
     spawn_log: VecDeque<LogEntry>,
     max_clients: usize,
     password: Option<String>,
-    server_name: String,
+    /// Servereinstellungen (Name, Icon, Willkommenstext, AFK).
+    settings: ServerSettings,
     /// SQLite-Persistenz (None = alles nur in Memory).
     db: Option<Db>,
 }
@@ -107,7 +110,7 @@ impl State {
             spawn_log: VecDeque::new(),
             max_clients: cfg.max_clients,
             password: cfg.password.clone(),
-            server_name: cfg.server_name.clone(),
+            settings: ServerSettings { name: cfg.server_name.clone(), ..ServerSettings::default() },
             db: None,
         };
 
@@ -184,6 +187,13 @@ impl State {
         }
 
         if let Some(db) = db {
+            // Gespeicherte Servereinstellungen haben Vorrang vor der Config.
+            if let Some(saved) = db.load_settings()? {
+                state.settings = saved;
+            }
+            if state.settings.afk_channel.is_some_and(|id| !state.is_afk_target(id)) {
+                state.settings.afk_channel = None;
+            }
             for entry in db.load_events()? {
                 if state.spawn_log.len() >= SPAWN_LOG_CAP {
                     state.spawn_log.pop_front();
@@ -252,8 +262,71 @@ impl State {
         id
     }
 
-    pub fn server_name(&self) -> &str {
-        &self.server_name
+    pub fn settings(&self) -> &ServerSettings {
+        &self.settings
+    }
+
+    /// Kann ein Channel AFK-Ziel sein? (Voice oder Lobby)
+    fn is_afk_target(&self, id: u64) -> bool {
+        self.channels
+            .get(&id)
+            .is_some_and(|c| matches!(c.kind, ChannelKind::Voice | ChannelKind::Spawn))
+    }
+
+    /// Neue Servereinstellungen pruefen, uebernehmen und speichern.
+    pub fn update_settings(&mut self, new: ServerSettings) -> Result<ServerSettings, String> {
+        let name = validate_name(&new.name)?;
+        if new.icon.as_ref().is_some_and(|i| i.len() > MAX_ICON_BYTES) {
+            return Err(format!("Server icon too large (max. {} KiB)", MAX_ICON_BYTES / 1024));
+        }
+        let welcome = new.welcome_message.trim().to_string();
+        if welcome.chars().count() > MAX_WELCOME_LEN {
+            return Err(format!("Welcome message too long (max. {MAX_WELCOME_LEN} characters)"));
+        }
+        if !(1..=240).contains(&new.afk_timeout_mins) {
+            return Err("AFK timeout must be between 1 and 240 minutes".to_string());
+        }
+        if let Some(id) = new.afk_channel {
+            if !self.is_afk_target(id) {
+                return Err("AFK channel must be a voice channel or the lobby".to_string());
+            }
+        }
+        self.settings = ServerSettings { name, welcome_message: welcome, ..new };
+        if let Some(db) = &self.db {
+            if let Err(e) = db.save_settings(&self.settings) {
+                tracing::warn!("Einstellungen speichern fehlgeschlagen: {e}");
+            }
+        }
+        Ok(self.settings.clone())
+    }
+
+    /// Auto-AFK: Clients in Voice-Channels, die laenger als das Limit stumm
+    /// sind, ins AFK-Ziel verschieben. Rueckgabe: (Client, Ziel-Channel).
+    pub fn afk_sweep(&mut self, now: Instant) -> Vec<(u64, u64)> {
+        if !self.settings.afk_enabled {
+            return Vec::new();
+        }
+        let target = self
+            .settings
+            .afk_channel
+            .filter(|id| self.is_afk_target(*id))
+            .unwrap_or(self.spawn_channel_id);
+        let limit = Duration::from_secs(u64::from(self.settings.afk_timeout_mins) * 60);
+        let voice: std::collections::HashSet<u64> = self
+            .channels
+            .values()
+            .filter(|c| c.kind == ChannelKind::Voice)
+            .map(|c| c.id)
+            .collect();
+        let mut moved = Vec::new();
+        for c in self.clients.values_mut() {
+            let idle = c.muted_since.is_some_and(|t| now.saturating_duration_since(t) >= limit);
+            if idle && voice.contains(&c.channel_id) && c.channel_id != target {
+                c.channel_id = target;
+                moved.push((c.id, target));
+            }
+        }
+        moved
     }
 
     /// Geschwister (gleicher Parent, ohne Spawn) in Anzeige-Reihenfolge.
@@ -425,6 +498,7 @@ impl State {
                 sharing: false,
                 udp_token: token,
                 udp_addr: None,
+                muted_since: None,
                 video_backlog: Arc::new(AtomicUsize::new(0)),
                 tx,
             },
@@ -520,6 +594,12 @@ impl State {
         }
         let was_category = channel.kind == ChannelKind::Category;
         self.channels.remove(&id);
+        if self.settings.afk_channel == Some(id) {
+            self.settings.afk_channel = None;
+            if let Some(db) = &self.db {
+                let _ = db.save_settings(&self.settings);
+            }
+        }
         if was_category {
             for ch in self.channels.values_mut() {
                 if ch.parent == Some(id) {
@@ -578,6 +658,12 @@ impl State {
 
     pub fn set_mute_state(&mut self, client_id: u64, muted: bool, deafened: bool) {
         if let Some(client) = self.clients.get_mut(&client_id) {
+            let now_muted = muted || deafened;
+            if now_muted && client.muted_since.is_none() {
+                client.muted_since = Some(Instant::now());
+            } else if !now_muted {
+                client.muted_since = None;
+            }
             client.muted = muted;
             client.deafened = deafened;
         }
@@ -1088,6 +1174,83 @@ kind = "spawn"
         drop(st);
         let st2 = State::new(&cfg).unwrap();
         assert_eq!(order(&st2, None), vec!["B", "A"]);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn settings_validation() {
+        let mut st = test_state();
+        assert_eq!(st.settings().name, "Test", "Name aus der Config");
+        let voice = st.all_channels().iter().find(|c| c.name == "Funkturm").unwrap().id;
+        let text = st.all_channels().iter().find(|c| c.name == "quasselbude").unwrap().id;
+        let ok = ServerSettings {
+            name: "  Neuer Name  ".into(),
+            welcome_message: "Willkommen!".into(),
+            afk_channel: Some(voice),
+            ..ServerSettings::default()
+        };
+        let saved = st.update_settings(ok).unwrap();
+        assert_eq!(saved.name, "Neuer Name", "getrimmt");
+        for bad in [
+            ServerSettings { name: " ".into(), ..ServerSettings::default() },
+            ServerSettings { icon: Some(vec![0; MAX_ICON_BYTES + 1]), ..ServerSettings::default() },
+            ServerSettings { welcome_message: "x".repeat(MAX_WELCOME_LEN + 1), ..ServerSettings::default() },
+            ServerSettings { afk_timeout_mins: 0, ..ServerSettings::default() },
+            ServerSettings { afk_channel: Some(text), ..ServerSettings::default() },
+        ] {
+            assert!(st.update_settings(bad).is_err());
+        }
+        assert_eq!(st.settings().name, "Neuer Name", "Fehler aendern nichts");
+        // AFK-Ziel geloescht -> zurueck auf Lobby.
+        st.delete_channel(voice).unwrap();
+        assert_eq!(st.settings().afk_channel, None);
+    }
+
+    #[test]
+    fn afk_sweep_moves_long_muted_voice_users() {
+        let mut st = test_state();
+        let voice = st.all_channels().iter().find(|c| c.name == "Funkturm").unwrap().id;
+        let (a, _) = add_test_client(&mut st, "a");
+        let (b, _) = add_test_client(&mut st, "b");
+        let (c, _) = add_test_client(&mut st, "c");
+        for id in [a, b, c] {
+            st.move_client(id, voice).unwrap();
+        }
+        st.set_mute_state(a, true, false); // stumm
+        st.set_mute_state(b, false, true); // taub zaehlt auch
+        let now = Instant::now();
+        assert!(st.afk_sweep(now + Duration::from_secs(9 * 60)).is_empty(), "noch keine 10 min");
+        let mut moved = st.afk_sweep(now + Duration::from_secs(11 * 60));
+        moved.sort_unstable();
+        let lobby = st.spawn_channel_id();
+        assert_eq!(moved, vec![(a, lobby), (b, lobby)], "c redet, bleibt");
+        assert!(st.afk_sweep(now + Duration::from_secs(20 * 60)).is_empty(), "nur einmal");
+
+        // Entstummen setzt den Timer zurueck; abgeschaltet -> nichts.
+        st.move_client(a, voice).unwrap();
+        st.set_mute_state(a, false, false);
+        assert!(st.afk_sweep(now + Duration::from_secs(60 * 60)).is_empty());
+        st.set_mute_state(a, true, false);
+        let off = ServerSettings { afk_enabled: false, ..st.settings().clone() };
+        st.update_settings(off).unwrap();
+        assert!(st.afk_sweep(Instant::now() + Duration::from_secs(60 * 60)).is_empty());
+    }
+
+    #[test]
+    fn settings_survive_restart() {
+        let (path, cfg) = temp_db_cfg("settings", "");
+        let mut st = State::new(&cfg).unwrap();
+        let s = ServerSettings {
+            name: "Gespeichert".into(),
+            icon: Some(vec![1, 2, 3]),
+            welcome_message: "Hallo".into(),
+            afk_timeout_mins: 30,
+            ..ServerSettings::default()
+        };
+        st.update_settings(s.clone()).unwrap();
+        drop(st);
+        let st2 = State::new(&cfg).unwrap();
+        assert_eq!(st2.settings(), &s);
         std::fs::remove_file(&path).ok();
     }
 }

@@ -36,6 +36,31 @@ async fn main() -> anyhow::Result<()> {
     );
     let state = Arc::new(Mutex::new(State::new(&cfg)?));
 
+    // Auto-AFK: alle 15 s stumme Clients verschieben (Einstellung im Client).
+    tokio::spawn({
+        let state = state.clone();
+        async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
+            loop {
+                tick.tick().await;
+                let mut st = state.lock().unwrap();
+                let moved = st.afk_sweep(std::time::Instant::now());
+                for (client_id, channel_id) in moved {
+                    let target = st.channel(channel_id).map(|c| c.name.clone()).unwrap_or_default();
+                    let mins = st.settings().afk_timeout_mins;
+                    info!("AFK: Client {client_id} -> {target}");
+                    st.broadcast(&rusttalk_shared::protocol::ServerMessage::UserMoved { client_id, channel_id });
+                    st.send_to(
+                        client_id,
+                        &rusttalk_shared::protocol::ServerMessage::Notice {
+                            message: format!("You were moved to {target} after {mins} min muted (AFK)"),
+                        },
+                    );
+                }
+            }
+        }
+    });
+
     // TCP und UDP laufen auf derselben Port-Nummer (wie TeamSpeak).
     let tcp = tcp::run_listener(state.clone(), &cfg.bind_address);
     let udp = udp::run_udp(state.clone(), &cfg.bind_address);

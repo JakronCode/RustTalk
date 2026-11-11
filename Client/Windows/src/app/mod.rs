@@ -16,6 +16,7 @@
 mod channel_settings;
 mod connect;
 mod media_ui;
+mod server_settings;
 mod settings;
 mod sidebar;
 mod theme;
@@ -28,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use rusttalk_shared::protocol::{
-    ChannelInfo, ChannelKind, ServerMessage, UserInfo, VideoKind, MAX_MEDIA_BYTES,
+    ChannelInfo, ChannelKind, ServerMessage, ServerSettings, UserInfo, VideoKind, MAX_MEDIA_BYTES,
 };
 
 use crate::audio::{capture, playback, AudioControl, AudioEngine, LocalMuteSet, TalkingMap};
@@ -151,7 +152,9 @@ pub struct RustTalkApp {
     pending_disconnect: bool,
     /// Login finished (Welcome received). `cmd_tx` alone = connecting.
     connected: bool,
-    server_name: String,
+    server_settings: ServerSettings,
+    /// Open "Server Settings" dialog (edit copy).
+    server_settings_dialog: Option<server_settings::ServerSettingsDialog>,
     status: String,
     status_is_error: bool,
     /// When `status` last changed (toast fade-out).
@@ -239,7 +242,8 @@ impl RustTalkApp {
             confirm_delete: None,
             pending_disconnect: false,
             connected: false,
-            server_name: String::new(),
+            server_settings: ServerSettings::default(),
+            server_settings_dialog: None,
             status: String::new(),
             status_is_error: false,
             status_at: Instant::now(),
@@ -321,6 +325,7 @@ impl RustTalkApp {
         }
         self.connected = false;
         self.channel_settings = None;
+        self.server_settings_dialog = None;
         self.confirm_delete = None;
         self.show_new_channel = false;
         self.audio = None; // stops the audio threads
@@ -379,7 +384,7 @@ impl RustTalkApp {
         match ev {
             NetEvent::Connected {
                 my_id,
-                server_name,
+                settings,
                 users,
                 channels,
                 udp_socket,
@@ -388,7 +393,7 @@ impl RustTalkApp {
                 chat_history,
             } => {
                 self.connected = true;
-                self.server_name = server_name;
+                self.server_settings = settings;
                 self.my_id = my_id;
                 self.channels = channels.into_iter().map(|c| (c.id, c)).collect();
                 self.users = users.into_iter().map(|u| (u.id, u)).collect();
@@ -417,7 +422,7 @@ impl RustTalkApp {
                         image: rec.image,
                     });
                 }
-                self.set_status(format!("Connected to {}", self.server_name));
+                self.set_status(format!("Connected to {}", self.server_settings.name));
                 if let Some(sock) = udp_socket {
                     match AudioEngine::start(
                         sock,
@@ -583,6 +588,12 @@ impl RustTalkApp {
             ServerMessage::VideoStopped { from_id, kind } => {
                 self.clear_video_of(from_id, Some(kind));
             }
+            ServerMessage::ServerSettingsChanged { settings } => {
+                self.server_settings = settings;
+            }
+            ServerMessage::Notice { message } => {
+                self.set_status(message);
+            }
             ServerMessage::Error { message } => {
                 self.set_error(message);
             }
@@ -626,6 +637,7 @@ impl eframe::App for RustTalkApp {
         }
         self.ui_new_channel(ctx);
         self.ui_channel_settings(ctx);
+        self.ui_server_settings(ctx);
         self.ui_confirm_delete(ctx);
         self.ui_giphy(ctx);
         self.ui_camera_dialog(ctx);
@@ -682,6 +694,7 @@ impl RustTalkApp {
         self.ui_main(ctx, &cmd_tx);
         // Toast only without an open dialog (it would cover dialog buttons).
         let dialog_open = self.channel_settings.is_some()
+            || self.server_settings_dialog.is_some()
             || self.show_new_channel
             || self.confirm_delete.is_some()
             || self.cam_dialog.is_some()
@@ -742,6 +755,11 @@ impl RustTalkApp {
                             }
                         }
                         "new_channel" => self.open_new_channel(None, ChannelKind::Text),
+                        "server" => self.open_server_settings(match arg {
+                            "afk" => server_settings::ServerTab::Afk,
+                            "messages" => server_settings::ServerTab::Messages,
+                            _ => server_settings::ServerTab::Overview,
+                        }),
                         _ => {}
                     }
                 }

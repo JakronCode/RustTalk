@@ -183,16 +183,25 @@ impl RustTalkApp {
     /// Lobby: hint banner + join log.
     fn ui_lobby(&mut self, ui: &mut egui::Ui, ch_id: u64) {
         egui::Frame::default().inner_margin(egui::Margin::same(16)).show(ui, |ui| {
+            let settings = self.server_settings.clone();
             theme::card(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(icons::regular::HOUSE).size(28.0).color(theme::ACCENT));
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(56.0, 56.0), egui::Sense::hover());
+                    super::server_settings::paint_server_icon(ui, r, &settings, &mut self.textures);
+                    ui.add_space(4.0);
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new("Welcome to the lobby").size(17.0).strong().color(theme::HEADER));
+                        ui.label(egui::RichText::new(format!("Welcome to {}", settings.name)).size(18.0).strong().color(theme::HEADER));
+                        if !settings.welcome_message.is_empty() {
+                            ui.add(egui::Label::new(egui::RichText::new(&settings.welcome_message).color(theme::TEXT)).wrap());
+                            ui.add_space(2.0);
+                        }
                         ui.label(
-                            egui::RichText::new(
-                                "Everyone lands here when connecting. Microphone, camera and screen sharing are disabled - \
-                                 click a voice channel on the left to start talking.",
-                            )
+                            egui::RichText::new(format!(
+                                "{}  This is the lobby: microphone, camera and screen sharing are disabled here. \
+                                 Click a voice channel on the left to start talking.",
+                                icons::regular::INFO
+                            ))
+                            .size(12.5)
                             .color(theme::MUTED),
                         );
                     });

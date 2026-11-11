@@ -520,6 +520,14 @@ impl RustTalkApp {
                 });
             }
         });
+        card(ui, |ui| {
+            caption(ui, "Feedback");
+            setting_row(ui, "Found a bug?", Some("Opens a new GitHub issue with your version pre-filled"), false, |ui| {
+                if ui.button(format!("{}  Report a Bug", icons::regular::BUG)).clicked() {
+                    super::server_settings::open_bug_report(ui.ctx());
+                }
+            });
+        });
     }
 
     // ----- keybind capture -------------------------------------------------

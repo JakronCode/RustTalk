@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
-use rusttalk_shared::protocol::{ChannelKind, ChatRecord, LogEntry};
+use rusttalk_shared::protocol::{ChannelKind, ChatRecord, LogEntry, ServerSettings};
 
 /// Aufbewahrung: letzte N Nachrichten pro Text-Channel.
 const CHANNEL_MSG_CAP: i64 = 10_000;
@@ -71,6 +71,10 @@ impl Db {
                 timestamp INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, id);
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value BLOB NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp INTEGER NOT NULL,
@@ -141,6 +145,32 @@ impl Db {
             params![id as i64],
         )?;
         self.conn.execute("DELETE FROM messages WHERE channel_id = ?1", params![id as i64])?;
+        Ok(())
+    }
+
+    // --- Servereinstellungen (bincode-BLOB, ein Eintrag) ---
+
+    pub fn load_settings(&self) -> Result<Option<ServerSettings>> {
+        let blob: Option<Vec<u8>> = self
+            .conn
+            .query_row("SELECT value FROM settings WHERE key = 'server'", [], |r| r.get(0))
+            .ok();
+        Ok(blob.and_then(|b| match bincode::deserialize(&b) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::warn!("Gespeicherte Einstellungen unlesbar, nutze Config: {e}");
+                None
+            }
+        }))
+    }
+
+    pub fn save_settings(&self, s: &ServerSettings) -> Result<()> {
+        let blob = bincode::serialize(s)?;
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('server', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = ?1",
+            params![blob],
+        )?;
         Ok(())
     }
 

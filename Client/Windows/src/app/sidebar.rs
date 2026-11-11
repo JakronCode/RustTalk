@@ -22,6 +22,8 @@ struct DropSlot {
 
 const ROW_H: f32 = 30.0;
 const CAT_H: f32 = 30.0;
+/// Width of the server dropdown menu.
+const MENU_W: f32 = 230.0;
 
 impl RustTalkApp {
     /// Children of `parent` (without the lobby), in display order.
@@ -92,7 +94,7 @@ impl RustTalkApp {
             });
     }
 
-    /// Server name with dropdown menu (create, settings, disconnect).
+    /// Server icon + name with dropdown menu (server settings, create, ...).
     fn ui_server_header(&mut self, ui: &mut egui::Ui) {
         let rect = ui.max_rect();
         let resp = ui.interact(rect, ui.id().with("server_menu_btn"), egui::Sense::click());
@@ -101,11 +103,16 @@ impl RustTalkApp {
         }
         let popup_id = ui.make_persistent_id("server_menu");
         let open = ui.memory(|m| m.is_popup_open(popup_id));
+        let icon_rect = egui::Rect::from_center_size(rect.left_center() + egui::vec2(14.0, 0.0), egui::vec2(28.0, 28.0));
+        let settings = self.server_settings.clone();
+        server_settings::paint_server_icon(ui, icon_rect, &settings, &mut self.textures);
+        let font = egui::FontId::proportional(15.5);
+        let name = elide(ui, &settings.name, &font, rect.width() - 64.0);
         ui.painter().text(
-            rect.left_center(),
+            rect.left_center() + egui::vec2(36.0, 0.0),
             egui::Align2::LEFT_CENTER,
-            &self.server_name,
-            egui::FontId::proportional(15.5),
+            name,
+            font,
             theme::HEADER,
         );
         ui.painter().text(
@@ -124,7 +131,13 @@ impl RustTalkApp {
             &resp,
             egui::PopupCloseBehavior::CloseOnClick,
             |ui| {
-                ui.set_min_width(220.0);
+                // Fixed width: items sized from available_width() made the
+                // popup grow every frame.
+                ui.set_width(MENU_W);
+                if menu_item(ui, icons::regular::SHIELD_CHECK, "Server Settings", theme::TEXT).clicked() {
+                    self.open_server_settings(server_settings::ServerTab::Overview);
+                }
+                ui.separator();
                 if menu_item(ui, icons::regular::PLUS_CIRCLE, "Create Channel", theme::TEXT).clicked() {
                     self.open_new_channel(None, ChannelKind::Text);
                 }
@@ -135,19 +148,12 @@ impl RustTalkApp {
                 if menu_item(ui, icons::regular::GEAR_SIX, "App Settings", theme::TEXT).clicked() {
                     self.open_settings(SettingsPage::Voice);
                 }
-                ui.add_enabled_ui(false, |ui| {
-                    ui.horizontal(|ui| {
-                        menu_item(ui, icons::regular::SHIELD_CHECK, "Server Settings", theme::TEXT);
-                        theme::wip_badge(ui);
-                    });
-                });
-                ui.separator();
-                if menu_item(ui, icons::regular::SIGN_OUT, "Disconnect", theme::RED).clicked() {
-                    self.pending_disconnect = true;
+                if menu_item(ui, icons::regular::BUG, "Report a Bug", theme::TEXT).clicked() {
+                    server_settings::open_bug_report(ui.ctx());
                 }
             },
         );
-        resp.on_hover_text(format!("{}  -  {}", self.server_name, self.config.server_address));
+        resp.on_hover_text(format!("{}  -  {}", settings.name, self.config.server_address));
     }
 
     /// Channel tree: lobby pinned on top, then top-level channels and
@@ -485,7 +491,8 @@ impl RustTalkApp {
 
         if resp.clicked() && !action_hit {
             match ch.kind {
-                ChannelKind::Voice => {
+                // Voice channels and the lobby: click = join (back to the lobby too).
+                ChannelKind::Voice | ChannelKind::Spawn => {
                     self.select_channel(ch.id);
                     if !i_am_here {
                         let _ = cmd_tx.send(Command::JoinChannel(ch.id));
@@ -500,7 +507,8 @@ impl RustTalkApp {
         let hover_text = match ch.kind {
             ChannelKind::Voice if i_am_here => "You are here",
             ChannelKind::Voice => "Click to join  -  drag to move",
-            ChannelKind::Spawn => "Lobby: everyone lands here, talking is disabled",
+            ChannelKind::Spawn if i_am_here => "Lobby: everyone lands here, talking is disabled",
+            ChannelKind::Spawn => "Click to go back to the lobby (talking is disabled there)",
             _ => "Click to open  -  drag to move",
         };
         let resp = resp.on_hover_text_at_pointer(hover_text);
@@ -667,15 +675,14 @@ impl RustTalkApp {
                     ui.label(egui::RichText::new(self.channel_name(my_ch)).size(12.0).color(theme::MUTED));
                 }
             });
-            if !in_lobby {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if theme::icon_button(ui, icons::regular::PHONE_X, IconState::Danger, "Leave voice channel").clicked() {
-                        if let Some(lobby) = self.spawn_channel_id() {
-                            let _ = cmd_tx.send(Command::JoinChannel(lobby));
-                        }
-                    }
-                });
-            }
+            // Always visible: disconnect from the SERVER (leaving a voice
+            // channel = click the lobby in the channel list).
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let tip = format!("Disconnect from {}", self.server_settings.name);
+                if theme::icon_button(ui, icons::regular::PHONE_DISCONNECT, IconState::Danger, &tip).clicked() {
+                    self.pending_disconnect = true;
+                }
+            });
         });
 
         // Camera / screen: disabled in the lobby.
@@ -794,7 +801,7 @@ fn menu_item(ui: &mut egui::Ui, icon: &str, label: &str, color: egui::Color32) -
     ui.add(
         egui::Button::new(egui::RichText::new(format!("{icon}   {label}")).color(color))
             .frame(false)
-            .min_size(egui::vec2(ui.available_width(), 28.0)),
+            .min_size(egui::vec2(MENU_W, 28.0)),
     )
 }
 
