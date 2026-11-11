@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusttalk_shared::protocol::{
     ChannelInfo, ChannelKind, ChannelPlacement, ChatRecord, LogEntry, ServerMessage, UserInfo,
-    ServerSettings, MAX_ICON_BYTES, MAX_NAME_LEN, MAX_SERVER_MESSAGE_LEN, MAX_WELCOME_LEN,
+    ServerSettings, MAX_CHAT_LEN, MAX_ICON_BYTES, MAX_NAME_LEN, MAX_SERVER_MESSAGE_LEN, MAX_WELCOME_LEN,
     SPAWN_LOG_CAP, DEFAULT_AFK_NOTICE, fill_template,
 };
 use tokio::sync::mpsc;
@@ -87,6 +87,10 @@ pub struct State {
     settings: ServerSettings,
     /// SQLite-Persistenz (None = alles nur in Memory).
     db: Option<Db>,
+    /// Without persistence: owner of each message (id -> channel, sender).
+    messages: HashMap<u64, (u64, String)>,
+    /// Without persistence: next message id (high range, never clashes with DB ids).
+    next_message_id: u64,
 }
 
 fn now_secs() -> u64 {
@@ -115,6 +119,8 @@ impl State {
             password: cfg.password.clone(),
             settings: ServerSettings { name: cfg.server_name.clone(), ..ServerSettings::default() },
             db: None,
+            messages: HashMap::new(),
+            next_message_id: 1 << 48,
         };
 
         let spawn_entries: Vec<_> =
@@ -342,21 +348,23 @@ impl State {
     /// Join/leave announcement: builds the chat message for the announcement
     /// channel (and persists it). None if no channel is set or the template is empty.
     /// `template` is `settings.join_message` or `settings.leave_message`.
-    pub fn announcement(&self, template: &str, username: &str) -> Option<ServerMessage> {
+    pub fn announcement(&mut self, template: &str, username: &str) -> Option<ServerMessage> {
         let channel_id = self.settings.announce_channel.filter(|id| self.is_text_channel(*id))?;
         if template.trim().is_empty() {
             return None;
         }
         let text = fill_template(template, &[("user", username)]);
         let timestamp = now_secs();
-        self.persist_message(channel_id, ANNOUNCER_NAME, &text, timestamp, None);
+        let id = self.post_message(channel_id, ANNOUNCER_NAME, &text, timestamp, None, None);
         Some(ServerMessage::Chat {
+            id,
             channel_id,
             from_id: 0,
             from_name: ANNOUNCER_NAME.to_string(),
             text,
             timestamp,
             image: None,
+            reply_to: None,
         })
     }
 
@@ -511,20 +519,74 @@ impl State {
         entry
     }
 
-    /// Speichert eine Chat-Nachricht (no-op ohne Persistenz).
-    pub fn persist_message(
-        &self,
+    /// Stores a chat message (DB or memory) and returns its id.
+    pub fn post_message(
+        &mut self,
         channel_id: u64,
         from_name: &str,
         text: &str,
         timestamp: u64,
         image: Option<&[u8]>,
-    ) {
+        reply_to: Option<u64>,
+    ) -> u64 {
         if let Some(db) = &self.db {
-            if let Err(e) = db.add_message(channel_id, from_name, text, timestamp, image) {
-                tracing::warn!("Chat-Persistenz fehlgeschlagen: {e}");
+            match db.add_message(channel_id, from_name, text, timestamp, image, reply_to) {
+                Ok(id) => return id,
+                Err(e) => tracing::warn!("Chat-Persistenz fehlgeschlagen: {e}"),
             }
         }
+        let id = self.next_message_id;
+        self.next_message_id += 1;
+        self.messages.insert(id, (channel_id, from_name.to_string()));
+        id
+    }
+
+    /// (channel, sender name) of a message, if it still exists.
+    fn message_meta(&self, id: u64) -> Option<(u64, String)> {
+        if let Some(m) = self.messages.get(&id) {
+            return Some(m.clone());
+        }
+        self.db.as_ref().and_then(|db| db.message_meta(id).ok().flatten())
+    }
+
+    /// Keeps `reply_to` only if it points to a message in the same channel.
+    pub fn valid_reply(&self, channel_id: u64, reply_to: Option<u64>) -> Option<u64> {
+        reply_to.filter(|id| self.message_meta(*id).is_some_and(|(ch, _)| ch == channel_id))
+    }
+
+    /// Checks that `editor` wrote message `id`; returns its channel.
+    fn own_message(&self, editor: &str, id: u64) -> Result<u64, String> {
+        match self.message_meta(id) {
+            None => Err("Message does not exist (anymore)".to_string()),
+            Some((_, from)) if from != editor => Err("You can only change your own messages".to_string()),
+            Some((channel_id, _)) => Ok(channel_id),
+        }
+    }
+
+    /// Edits an own message. Returns (channel, new text).
+    pub fn edit_message(&mut self, editor: &str, id: u64, text: &str) -> Result<(u64, String), String> {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return Err("Empty message (delete it instead)".to_string());
+        }
+        if text.chars().count() > MAX_CHAT_LEN {
+            return Err(format!("Message too long (max. {MAX_CHAT_LEN} characters)"));
+        }
+        let channel_id = self.own_message(editor, id)?;
+        if let Some(db) = &self.db {
+            db.edit_message(id, &text).map_err(|e| format!("Could not save the change: {e}"))?;
+        }
+        Ok((channel_id, text))
+    }
+
+    /// Deletes an own message. Returns its channel.
+    pub fn delete_message(&mut self, editor: &str, id: u64) -> Result<u64, String> {
+        let channel_id = self.own_message(editor, id)?;
+        if let Some(db) = &self.db {
+            db.delete_message(id).map_err(|e| format!("Could not delete the message: {e}"))?;
+        }
+        self.messages.remove(&id);
+        Ok(channel_id)
     }
 
     /// Letzte Nachrichten aller Text-Channels (fuer Welcome). Leer ohne Persistenz.
@@ -1120,7 +1182,7 @@ kind = "spawn"
         {
             let mut st = State::new(&cfg).unwrap();
             ch_id = st.create_channel("Memo", ChannelKind::Text, None).unwrap().id;
-            st.persist_message(ch_id, "alice", "bleibt erhalten", 1000, None);
+            st.post_message(ch_id, "alice", "bleibt erhalten", 1000, None, None);
             st.push_spawn_log("alice ist erschienen".into());
         } // Drop -> Neustart simulieren
 
@@ -1300,6 +1362,27 @@ kind = "spawn"
         st.delete_channel(text).unwrap();
         assert_eq!(st.settings().announce_channel, None);
         assert!(st.announcement("hi {user}", "anna").is_none());
+    }
+
+    #[test]
+    fn edit_delete_only_own_messages_and_reply_validation() {
+        let mut st = test_state();
+        let text = st.all_channels().iter().find(|c| c.name == "quasselbude").unwrap().id;
+        let voice = st.all_channels().iter().find(|c| c.name == "Funkturm").unwrap().id;
+        let a = st.post_message(text, "anna", "hi", 1, None, None);
+        let b = st.post_message(text, "ben", "yo", 2, None, None);
+        assert_ne!(a, b);
+        assert_eq!(st.valid_reply(text, Some(a)), Some(a));
+        assert_eq!(st.valid_reply(voice, Some(a)), None, "other channel");
+        assert_eq!(st.valid_reply(text, Some(424242)), None, "unknown id");
+        assert!(st.edit_message("ben", a, "hijack").is_err(), "not own");
+        assert_eq!(st.edit_message("anna", a, "  hi!  ").unwrap(), (text, "hi!".to_string()));
+        assert!(st.edit_message("anna", a, "   ").is_err(), "empty");
+        assert!(st.edit_message("anna", a, &"x".repeat(MAX_CHAT_LEN + 1)).is_err());
+        assert!(st.delete_message("anna", b).is_err(), "not own");
+        assert_eq!(st.delete_message("anna", a).unwrap(), text);
+        assert!(st.delete_message("anna", a).is_err(), "already gone");
+        assert_eq!(st.valid_reply(text, Some(a)), None, "deleted");
     }
 
     #[test]

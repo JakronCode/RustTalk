@@ -12,6 +12,7 @@ pub mod encoder;
 pub mod jitter;
 pub mod playback;
 pub mod resample;
+pub mod sfx;
 
 use std::collections::{HashMap, HashSet};
 use std::net::UdpSocket;
@@ -138,6 +139,7 @@ impl AudioEngine {
         talking: TalkingMap,
         local_muted: LocalMuteSet,
         user_volumes: UserVolumeMap,
+        sfx: sfx::SfxQueue,
         input_device: Option<&str>,
         output_device: Option<&str>,
     ) -> Result<Self> {
@@ -174,7 +176,7 @@ impl AudioEngine {
             .context("Encoder-Thread starten")?;
 
         // Wiedergabe: Mixer -> Lautsprecher.
-        let output = playback::build_output_stream(output_device, mixer, control, local_muted, user_volumes)
+        let output = playback::build_output_stream(output_device, mixer, control, local_muted, user_volumes, sfx)
             .context("Audio-Ausgabe konnte nicht gestartet werden")?;
 
         Ok(Self { _input: input, _output: output, stop })

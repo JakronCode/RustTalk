@@ -186,7 +186,7 @@ async fn run(args: &Args) -> Result<()> {
     }
     if let Some(text) = &args.chat {
         let channel_id = args.chat_channel.or(join_target).unwrap_or(1);
-        write_frame(&mut writer, &ClientMessage::Chat { channel_id, text: text.clone(), image: None }).await?;
+        write_frame(&mut writer, &ClientMessage::Chat { channel_id, text: text.clone(), image: None, reply_to: None }).await?;
     }
 
     let start = Instant::now();

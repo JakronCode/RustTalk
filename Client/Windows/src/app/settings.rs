@@ -254,8 +254,8 @@ impl RustTalkApp {
                 toggle(ui, &mut false.clone());
             });
             ui.separator();
-            setting_row(ui, "Animated GIFs", Some("Play GIFs in chat"), true, |ui| {
-                toggle(ui, &mut true.clone());
+            setting_row(ui, "Animated GIFs", Some("Play GIFs in chat (off = first frame only)"), false, |ui| {
+                toggle(ui, &mut self.config.animate_gifs);
             });
         });
     }
@@ -418,7 +418,8 @@ impl RustTalkApp {
     fn page_keybinds(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
             caption(ui, "Voice");
-            setting_row(ui, "Push to talk", Some("Hold to transmit (window must be focused)"), false, |ui| {
+            let ptt_desc = if self.config.global_ptt { "Hold to transmit (works in the background)" } else { "Hold to transmit (window must be focused)" };
+            setting_row(ui, "Push to talk", Some(ptt_desc), false, |ui| {
                 self.keybind_button(ui);
             });
             for (label, desc) in [
@@ -434,30 +435,59 @@ impl RustTalkApp {
         });
         card(ui, |ui| {
             caption(ui, "Global hotkeys");
-            setting_row(ui, "Work while RustTalk is in the background", Some("Needs a system-wide keyboard hook"), true, |ui| {
-                toggle(ui, &mut false.clone());
+            setting_row(ui, "Push to talk in the background", Some("Also works while another app is focused (e.g. in a game). The key still reaches that app."), false, |ui| {
+                if toggle(ui, &mut self.config.global_ptt).changed() {
+                    self.config.save();
+                }
             });
+            ui.label(
+                egui::RichText::new(format!(
+                    "{}  Tip: side mouse buttons (Mouse4 / Mouse5) make good push-to-talk keys - click the key button and press one.",
+                    icons::regular::INFO
+                ))
+                .size(12.0)
+                .color(theme::MUTED),
+            );
         });
     }
 
     fn page_notifications(&mut self, ui: &mut egui::Ui) {
-        theme::wip_banner(ui, "Notifications are not implemented yet - these options are placeholders.");
         card(ui, |ui| {
             caption(ui, "Desktop");
-            for (label, desc) in [
-                ("Desktop notifications", "Pop-up for new messages while RustTalk is in the background"),
-                ("Flash taskbar", "Highlight the taskbar icon on new messages"),
-            ] {
-                setting_row(ui, label, Some(desc), true, |ui| {
-                    toggle(ui, &mut true.clone());
-                });
-                ui.separator();
-            }
+            setting_row(ui, "Flash taskbar", Some("Highlight the taskbar icon on new messages while RustTalk is in the background"), false, |ui| {
+                toggle(ui, &mut self.config.flash_taskbar);
+            });
+            ui.separator();
+            setting_row(ui, "Desktop notifications", Some("Pop-up for new messages while RustTalk is in the background"), true, |ui| {
+                toggle(ui, &mut false.clone());
+            });
+        });
+        card(ui, |ui| {
             caption(ui, "Sounds");
-            for label in ["User joins your channel", "User leaves your channel", "New message", "Mute / unmute"] {
-                setting_row(ui, label, None, true, |ui| {
-                    toggle(ui, &mut true.clone());
+            let rows: [(&str, Option<&str>, Sound, &mut bool); 4] = [
+                ("User joins your channel", None, Sound::Join, &mut self.config.sound_join),
+                ("User leaves your channel", None, Sound::Leave, &mut self.config.sound_leave),
+                ("New message", Some("In another channel, while RustTalk is in the background, or when you are @mentioned"), Sound::Message, &mut self.config.sound_message),
+                ("Mute / unmute", Some("Also for deafen"), Sound::Mute, &mut self.config.sound_mute),
+            ];
+            let mut preview = None;
+            for (i, (label, desc, sound, value)) in rows.into_iter().enumerate() {
+                if i > 0 {
+                    ui.separator();
+                }
+                setting_row(ui, label, desc, false, |ui| {
+                    toggle(ui, value);
+                    if ui.small_button(icons::regular::PLAY).on_hover_text("Preview (while connected)").clicked() {
+                        preview = Some(sound);
+                    }
                 });
+            }
+            if let Some(sound) = preview {
+                if self.audio.is_some() {
+                    crate::audio::sfx::play(&self.sfx, sound);
+                } else {
+                    self.set_status("Connect to a server to preview sounds");
+                }
             }
         });
     }
@@ -465,7 +495,7 @@ impl RustTalkApp {
     fn page_advanced(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
             caption(ui, "Integrations");
-            setting_row(ui, "GIPHY API key", Some("For GIF search (search itself is WIP). Free at developers.giphy.com"), false, |ui| {
+            setting_row(ui, "GIPHY API key", Some("For the GIF button in the chat. Free at developers.giphy.com"), false, |ui| {
                 let mut key = self.config.giphy_api_key.clone().unwrap_or_default();
                 if ui.add(egui::TextEdit::singleline(&mut key).password(true).desired_width(220.0)).changed() {
                     self.config.giphy_api_key = if key.trim().is_empty() { None } else { Some(key.trim().to_string()) };
@@ -543,7 +573,7 @@ impl RustTalkApp {
         };
         let resp = ui
             .add(egui::Button::new(label).min_size(egui::vec2(140.0, 28.0)))
-            .on_hover_text("Click, then press the key you want to use (Esc cancels)");
+            .on_hover_text("Click, then press the key or side mouse button you want to use (Esc cancels)");
         if resp.clicked() {
             self.recording_key = !self.recording_key;
         }
@@ -554,15 +584,20 @@ impl RustTalkApp {
         if !self.recording_key {
             return;
         }
-        let pressed = ctx.input(|i| {
+        // Next key press or side mouse button (Esc cancels).
+        let pressed: Option<Option<String>> = ctx.input(|i| {
             i.events.iter().find_map(|e| match e {
-                egui::Event::Key { key, pressed: true, .. } => Some(*key),
+                egui::Event::Key { key: egui::Key::Escape, pressed: true, .. } => Some(None),
+                egui::Event::Key { key, pressed: true, .. } => Some(Some(key.name().to_string())),
+                egui::Event::PointerButton { button, pressed: true, .. } => {
+                    crate::hotkey::mouse_name(*button).map(|n| Some(n.to_string()))
+                }
                 _ => None,
             })
         });
-        if let Some(key) = pressed {
-            if key != egui::Key::Escape {
-                self.config.ptt_key = key.name().to_string();
+        if let Some(choice) = pressed {
+            if let Some(name) = choice {
+                self.config.ptt_key = name;
                 self.config.save();
             }
             self.recording_key = false;

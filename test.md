@@ -2,6 +2,24 @@
 
 > Pflichtdokumentation aller Testläufe. Neueste oben.
 
+## 2026-11-11 (17) – Kategorie B: globales PTT, GIPHY, Benachrichtigungen, Chat-Funktionen (Protokoll v9)
+
+**Wünsche:** Kategorie B aus [ROADMAP.md](ROADMAP.md) umsetzen, testen, pushen.
+
+**Client:**
+- **B1 Globales Push-to-Talk:** Neues Modul `hotkey.rs`. Ein Thread fragt die PTT-Taste alle 10 ms per `device_query` (`GetAsyncKeyState`) ab – kein Tastatur-Hook, kein `unsafe` im Projekt, die Taste kommt weiter bei anderen Apps an. Opt-in unter Keybinds („Push to talk in the background“). Neu: Maus-Seitentasten Mouse4/Mouse5 als PTT-Taste (auch im fokussierten Modus).
+- **B2 GIPHY repariert:** Ursache – das Vorschau-Grid suchte Texturen per Hash der *URL*, der Download legte sie per Hash der *Bilddaten* ab → Vorschauen blieben ewig „...“. Außerdem waren Originale oft > 4 MiB (Server lehnt ab) und Fehler wurden verschluckt. Jetzt: Vorschauen nach URL gecacht, Anhang = `downsized`-Variante, Größenlimit mit Meldung, 401/429 verständlich, API-Key nie in Fehlertexten. GIF-Button im Composer aktiv. **Animierte GIFs** im Chat und im Picker (Einstellung „Animated GIFs“).
+- **B3 Benachrichtigungen:** Töne (im Code erzeugt, keine Dateien) für Join/Leave im eigenen Voice-Channel, neue Nachricht (anderer Channel, Fenster im Hintergrund oder @Erwähnung) und Mute/Unmute/Deafen; Taskleiste blinkt bei neuen Nachrichten im Hintergrund. Einstellungen mit Vorhör-Button. Desktop-Pop-ups bleiben WIP.
+- **B4 Chat:** Antworten (Zitat über der Nachricht), eigene Nachrichten bearbeiten („(edited)“) und löschen – per Hover-Leiste oder Rechtsklick, Esc bricht ab, Pfeil-hoch bearbeitet die letzte eigene Nachricht. @Erwähnungen: gelbe Hervorhebung, Ton, Autovervollständigung beim Tippen von „@“. Suche im Channel-Kopf (Lupe).
+
+**Server / Protokoll v9:** Nachrichten-IDs (DB-Zeilen-ID bzw. Zähler ohne Persistenz), `reply_to`, `EditChat`/`DeleteChat` → `ChatEdited`/`ChatDeleted`. Nur eigene Nachrichten (per Name, wie der Chat-Verlauf), Antwort-ID wird verworfen, wenn sie nicht im selben Channel existiert. DB-Migration: Spalten `reply_to`, `edited`.
+
+**Tests:** Client 64 ✅ (neu u. a.: Tastenbelegung/Maus, OS-Tastenabfrage, GIPHY-Parsing, GIF-Animation, Töne, Erwähnungen), Server 40 ✅ (neu: Bearbeiten/Löschen/Antworten, Nachrichten-IDs in der DB), Integration 10 ✅ (neu: `chat_reply_edit_delete`), Shared 13 ✅ – Windows, Release-Client via `cargo.ps1`.
+**Live geprüft:** Isolierter Testserver (Port 7444, eigene DB mit eingespielten Nachrichten) + Debug-Client, Fenster-Screenshots (nur das RustTalk-Fenster): Erwähnung hervorgehoben, Antwort-Zitate, „(edited)“, „Original message was deleted“, GIF-Button, Lupe; Einstellungsseiten Keybinds und Notifications. Bestehende `rusttalk.db` (v8) beim Serverstart live auf v9 migriert. GIPHY: ungültiger Key → HTTP 401 (wird als „GIPHY rejected the API key“ angezeigt).
+**Nicht geprüft:** Globales PTT mit echtem Tastendruck im Hintergrund, Töne mit echtem Hören, GIPHY-Suche mit gültigem Key, Hover-Leiste/Suche/Autovervollständigung per Maus und Tastatur.
+
+---
+
 ## 2026-11-11 (16) – Kategorie A: Lautstärke pro Nutzer, Auto-Reconnect, Eingangslautstärke, Servernachrichten (Protokoll v8)
 
 **Wünsche:** Checkliste ([ROADMAP.md](ROADMAP.md)), Kategorie A umsetzen, testen, pushen.

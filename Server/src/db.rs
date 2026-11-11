@@ -89,6 +89,17 @@ impl Db {
         if !has_image {
             conn.execute("ALTER TABLE messages ADD COLUMN image BLOB", [])?;
         }
+        // Migration (v9): replies + edited flag.
+        let message_cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(messages)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<Result<_, _>>()?;
+        if !message_cols.iter().any(|c| c == "reply_to") {
+            conn.execute("ALTER TABLE messages ADD COLUMN reply_to INTEGER", [])?;
+        }
+        if !message_cols.iter().any(|c| c == "edited") {
+            conn.execute("ALTER TABLE messages ADD COLUMN edited INTEGER NOT NULL DEFAULT 0", [])?;
+        }
         // Migration (v6): Sortierposition der Channels nachruesten.
         let has_position = conn
             .prepare("PRAGMA table_info(channels)")?
@@ -210,12 +221,14 @@ impl Db {
         text: &str,
         timestamp: u64,
         image: Option<&[u8]>,
-    ) -> Result<()> {
+        reply_to: Option<u64>,
+    ) -> Result<u64> {
         self.conn.execute(
-            "INSERT INTO messages (channel_id, from_name, text, timestamp, image)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![channel_id as i64, from_name, text, timestamp as i64, image],
+            "INSERT INTO messages (channel_id, from_name, text, timestamp, image, reply_to)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![channel_id as i64, from_name, text, timestamp as i64, image, reply_to.map(|r| r as i64)],
         )?;
+        let id = self.conn.last_insert_rowid() as u64;
         // Retention: nur die letzten CHANNEL_MSG_CAP je Channel behalten.
         self.conn.execute(
             "DELETE FROM messages WHERE channel_id = ?1 AND id NOT IN (
@@ -223,6 +236,30 @@ impl Db {
             )",
             params![channel_id as i64, CHANNEL_MSG_CAP],
         )?;
+        Ok(id)
+    }
+
+    /// (channel, sender name) of a stored message.
+    pub fn message_meta(&self, id: u64) -> Result<Option<(u64, String)>> {
+        let row = self.conn.query_row(
+            "SELECT channel_id, from_name FROM messages WHERE id = ?1",
+            params![id as i64],
+            |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, String>(1)?)),
+        );
+        match row {
+            Ok(m) => Ok(Some(m)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn edit_message(&self, id: u64, text: &str) -> Result<()> {
+        self.conn.execute("UPDATE messages SET text = ?2, edited = 1 WHERE id = ?1", params![id as i64, text])?;
+        Ok(())
+    }
+
+    pub fn delete_message(&self, id: u64) -> Result<()> {
+        self.conn.execute("DELETE FROM messages WHERE id = ?1", params![id as i64])?;
         Ok(())
     }
 
@@ -237,7 +274,7 @@ impl Db {
             .collect::<Result<_, _>>()?;
 
         let mut stmt = self.conn.prepare(
-            "SELECT channel_id, from_name, text, timestamp, image FROM messages
+            "SELECT channel_id, from_name, text, timestamp, image, id, reply_to, edited FROM messages
              WHERE channel_id = ?1 ORDER BY id DESC LIMIT ?2",
         )?;
         let mut out = Vec::new();
@@ -249,6 +286,9 @@ impl Db {
                     text: r.get(2)?,
                     timestamp: r.get::<_, i64>(3)? as u64,
                     image: r.get::<_, Option<Vec<u8>>>(4)?,
+                    id: r.get::<_, i64>(5)? as u64,
+                    reply_to: r.get::<_, Option<i64>>(6)?.map(|v| v as u64),
+                    edited: r.get::<_, i64>(7)? != 0,
                 })
             })?;
             let mut per_channel: Vec<ChatRecord> = rows.collect::<Result<_, _>>()?;
@@ -364,6 +404,28 @@ mod tests {
     }
 
     #[test]
+    fn message_ids_edit_delete_and_replies() {
+        let path = temp_db("msg-edit");
+        let db = Db::open(&path).unwrap();
+        let a = db.add_message(4, "alice", "frage?", 10, None, None).unwrap();
+        let b = db.add_message(4, "bob", "antwort", 11, None, Some(a)).unwrap();
+        assert!(b > a, "ids increase");
+        assert_eq!(db.message_meta(a).unwrap(), Some((4, "alice".to_string())));
+        assert_eq!(db.message_meta(9999).unwrap(), None);
+        db.edit_message(a, "frage (neu)?").unwrap();
+        let msgs = db.recent_messages().unwrap();
+        assert_eq!(msgs[0].id, a);
+        assert_eq!(msgs[0].text, "frage (neu)?");
+        assert!(msgs[0].edited);
+        assert_eq!(msgs[1].reply_to, Some(a));
+        assert!(!msgs[1].edited);
+        db.delete_message(a).unwrap();
+        assert_eq!(db.message_meta(a).unwrap(), None);
+        assert_eq!(db.recent_messages().unwrap().len(), 1);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn events_roundtrip() {
         let path = temp_db("events");
         let db = Db::open(&path).unwrap();
@@ -380,9 +442,9 @@ mod tests {
     fn messages_roundtrip_and_order() {
         let path = temp_db("messages");
         let db = Db::open(&path).unwrap();
-        db.add_message(1, "alice", "erste", 1000, None).unwrap();
-        db.add_message(1, "bob", "zweite", 1001, None).unwrap();
-        db.add_message(2, "alice", "anderer channel", 1002, None).unwrap();
+        db.add_message(1, "alice", "erste", 1000, None, None).unwrap();
+        db.add_message(1, "bob", "zweite", 1001, None, None).unwrap();
+        db.add_message(2, "alice", "anderer channel", 1002, None, None).unwrap();
         let msgs = db.recent_messages().unwrap();
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].channel_id, 1);
@@ -397,7 +459,7 @@ mod tests {
         let path = temp_db("images");
         let db = Db::open(&path).unwrap();
         let png = vec![0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
-        db.add_message(1, "alice", "schau", 1000, Some(&png)).unwrap();
+        db.add_message(1, "alice", "schau", 1000, Some(&png), None).unwrap();
         let msgs = db.recent_messages().unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].image.as_deref(), Some(&png[..]));
@@ -427,7 +489,7 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].text, "msg");
         assert!(msgs[0].image.is_none());
-        db.add_message(1, "neu", "mit bild", 2, Some(&[1, 2, 3])).unwrap();
+        db.add_message(1, "neu", "mit bild", 2, Some(&[1, 2, 3]), None).unwrap();
         std::fs::remove_file(&path).ok();
     }
 
@@ -436,7 +498,7 @@ mod tests {
         let path = temp_db("limit");
         let db = Db::open(&path).unwrap();
         for i in 0..(HISTORY_PER_CHANNEL + 25) {
-            db.add_message(1, "a", &format!("msg {i}"), i as u64, None).unwrap();
+            db.add_message(1, "a", &format!("msg {i}"), i as u64, None, None).unwrap();
         }
         let msgs = db.recent_messages().unwrap();
         assert_eq!(msgs.len() as i64, HISTORY_PER_CHANNEL);

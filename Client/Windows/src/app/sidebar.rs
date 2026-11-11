@@ -777,6 +777,7 @@ impl RustTalkApp {
         let deafened = self.control.self_deafened.load(Ordering::Relaxed);
         self.control.self_muted.store(muted, Ordering::Relaxed);
         let _ = cmd_tx.send(Command::SetMute { muted, deafened });
+        self.notify(if muted { crate::audio::sfx::Sound::Mute } else { crate::audio::sfx::Sound::Unmute });
     }
 
     pub(super) fn toggle_deafen(&mut self, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>) {
@@ -790,6 +791,7 @@ impl RustTalkApp {
         self.control.self_deafened.store(new, Ordering::Relaxed);
         let muted = self.control.self_muted.load(Ordering::Relaxed);
         let _ = cmd_tx.send(Command::SetMute { muted, deafened: new });
+        self.notify(if new { crate::audio::sfx::Sound::Mute } else { crate::audio::sfx::Sound::Unmute });
     }
 }
 

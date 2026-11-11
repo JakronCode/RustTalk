@@ -3,6 +3,7 @@
 mod app;
 mod audio;
 mod config;
+mod hotkey;
 mod logo;
 mod media;
 mod net;

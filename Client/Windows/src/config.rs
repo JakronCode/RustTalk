@@ -58,6 +58,24 @@ pub struct ClientConfig {
     /// Playback volume for everyone (1.0 = 100 %, max 2.0).
     #[serde(default = "default_one")]
     pub output_volume: f32,
+    /// Flash the taskbar icon on new messages while RustTalk is in the background.
+    #[serde(default = "default_true")]
+    pub flash_taskbar: bool,
+    /// Notification sounds.
+    #[serde(default = "default_true")]
+    pub sound_join: bool,
+    #[serde(default = "default_true")]
+    pub sound_leave: bool,
+    #[serde(default = "default_true")]
+    pub sound_message: bool,
+    #[serde(default = "default_true")]
+    pub sound_mute: bool,
+    /// Play animated GIFs in chat (off = first frame only).
+    #[serde(default = "default_true")]
+    pub animate_gifs: bool,
+    /// Push-to-talk also works while RustTalk is in the background.
+    #[serde(default)]
+    pub global_ptt: bool,
     /// Manual microphone gain before the processing chain (1.0 = 100 %, max 2.0).
     #[serde(default = "default_one")]
     pub input_volume: f32,
@@ -105,6 +123,13 @@ impl Default for ClientConfig {
             ui_scale: 1.0,
             show_timestamps: true,
             output_volume: 1.0,
+            flash_taskbar: true,
+            sound_join: true,
+            sound_leave: true,
+            sound_message: true,
+            sound_mute: true,
+            animate_gifs: true,
+            global_ptt: false,
             input_volume: 1.0,
             user_volumes: Default::default(),
         }
@@ -162,6 +187,13 @@ mod tests {
             ui_scale: 1.0,
             show_timestamps: true,
             output_volume: 1.0,
+            flash_taskbar: false,
+            sound_join: true,
+            sound_leave: false,
+            sound_message: true,
+            sound_mute: false,
+            animate_gifs: false,
+            global_ptt: true,
             input_volume: 0.5,
             user_volumes: [("anna".to_string(), 1.5)].into_iter().collect(),
         };
@@ -174,6 +206,9 @@ mod tests {
         assert!(!back.noise_suppression);
         assert!(!back.auto_gain);
         assert_eq!(back.input_volume, 0.5);
+        assert!(back.global_ptt);
+        assert!(!back.animate_gifs);
+        assert!(!back.flash_taskbar && !back.sound_leave && back.sound_join);
         assert_eq!(back.user_volumes.get("anna"), Some(&1.5));
     }
 
@@ -187,6 +222,9 @@ mod tests {
         assert!(cfg.auto_gain, "Auto-Lautstaerke default an (alte Configs ohne Feld)");
         assert!(cfg.bookmarks.is_empty());
         assert_eq!(cfg.input_volume, 1.0);
+        assert!(!cfg.global_ptt, "global PTT is opt-in");
+        assert!(cfg.animate_gifs);
+        assert!(cfg.flash_taskbar && cfg.sound_join && cfg.sound_leave && cfg.sound_message && cfg.sound_mute);
         assert!(cfg.user_volumes.is_empty());
         assert!(cfg.server_address.ends_with(":7331"));
     }

@@ -244,7 +244,7 @@ async fn message_loop(
                     Err(e) => st.send_to(client_id, &ServerMessage::Error { message: e }),
                 }
             }
-            ClientMessage::Chat { channel_id, text, image } => {
+            ClientMessage::Chat { channel_id, text, image, reply_to } => {
                 let img_len = image.as_ref().map(|i| i.len()).unwrap_or(0);
                 if text.chars().count() > MAX_CHAT_LEN {
                     st.send_to(client_id, &ServerMessage::Error {
@@ -265,11 +265,33 @@ async fn message_loop(
                         .duration_since(UNIX_EPOCH)
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
-                    // Persistenz (no-op, wenn deaktiviert) + globaler Broadcast.
-                    st.persist_message(channel_id, &from_name, &text, timestamp, image.as_deref());
-                    st.broadcast(
-                        &ServerMessage::Chat { channel_id, from_id: client_id, from_name, text, timestamp, image },
-                    );
+                    // Speichern (DB oder Memory) + globaler Broadcast.
+                    let reply_to = st.valid_reply(channel_id, reply_to);
+                    let id = st.post_message(channel_id, &from_name, &text, timestamp, image.as_deref(), reply_to);
+                    st.broadcast(&ServerMessage::Chat {
+                        id,
+                        channel_id,
+                        from_id: client_id,
+                        from_name,
+                        text,
+                        timestamp,
+                        image,
+                        reply_to,
+                    });
+                }
+            }
+            ClientMessage::EditChat { message_id, text } => {
+                let name = st.client(client_id).map(|c| c.name.clone()).unwrap_or_default();
+                match st.edit_message(&name, message_id, &text) {
+                    Ok((channel_id, text)) => st.broadcast(&ServerMessage::ChatEdited { channel_id, message_id, text }),
+                    Err(e) => st.send_to(client_id, &ServerMessage::Error { message: e }),
+                }
+            }
+            ClientMessage::DeleteChat { message_id } => {
+                let name = st.client(client_id).map(|c| c.name.clone()).unwrap_or_default();
+                match st.delete_message(&name, message_id) {
+                    Ok(channel_id) => st.broadcast(&ServerMessage::ChatDeleted { channel_id, message_id }),
+                    Err(e) => st.send_to(client_id, &ServerMessage::Error { message: e }),
                 }
             }
             ClientMessage::SetMuteState { muted, deafened } => {

@@ -18,11 +18,13 @@
 //!     AFK-Mover) statt nur Servername; `Notice` fuer Hinweise.
 //! v8: Server messages in `ServerSettings`: join/leave messages (posted in an
 //!     announcement text channel), rules (lobby), AFK notice template, MOTD.
+//! v9: Chat message ids: replies (`reply_to`), `EditChat`/`DeleteChat` (own
+//!     messages only, by name) -> `ChatEdited`/`ChatDeleted`.
 
 use serde::{Deserialize, Serialize};
 
 /// Aktuelle Protokollversion. Client und Server müssen übereinstimmen.
-pub const PROTOCOL_VERSION: u16 = 8;
+pub const PROTOCOL_VERSION: u16 = 9;
 
 /// Art eines Video-Streams. Ein User kann beide gleichzeitig senden.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -157,6 +159,8 @@ pub struct LogEntry {
 /// Eine gespeicherte Chat-Nachricht (Persistenz/Verlauf).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatRecord {
+    /// Message id (unique per server).
+    pub id: u64,
     pub channel_id: u64,
     pub from_name: String,
     pub text: String,
@@ -164,6 +168,10 @@ pub struct ChatRecord {
     pub timestamp: u64,
     /// Optionales Bild (PNG/JPEG/GIF-Bytes).
     pub image: Option<Vec<u8>>,
+    /// Id of the message this one answers.
+    pub reply_to: Option<u64>,
+    /// Text was changed after sending.
+    pub edited: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,6 +247,17 @@ pub enum ClientMessage {
         channel_id: u64,
         text: String,
         image: Option<Vec<u8>>,
+        /// Answer to this message (same channel).
+        reply_to: Option<u64>,
+    },
+    /// Change the text of an own message.
+    EditChat {
+        message_id: u64,
+        text: String,
+    },
+    /// Delete an own message.
+    DeleteChat {
+        message_id: u64,
     },
     SetMuteState {
         muted: bool,
@@ -307,6 +326,8 @@ pub enum ServerMessage {
         entry: LogEntry,
     },
     Chat {
+        /// Message id (for replies, edits, deletes).
+        id: u64,
         channel_id: u64,
         from_id: u64,
         from_name: String,
@@ -314,6 +335,16 @@ pub enum ServerMessage {
         /// Unix-Timestamp (Sekunden).
         timestamp: u64,
         image: Option<Vec<u8>>,
+        reply_to: Option<u64>,
+    },
+    ChatEdited {
+        channel_id: u64,
+        message_id: u64,
+        text: String,
+    },
+    ChatDeleted {
+        channel_id: u64,
+        message_id: u64,
     },
     MuteStateChanged {
         client_id: u64,
@@ -394,8 +425,10 @@ mod tests {
             ClientMessage::DeleteChannel { channel_id: 7 },
             ClientMessage::RenameChannel { channel_id: 7, name: "Neu".into() },
             ClientMessage::MoveChannel { channel_id: 7, parent: Some(2), index: 1 },
-            ClientMessage::Chat { channel_id: 1, text: "Hallo Welt".into(), image: None },
-            ClientMessage::Chat { channel_id: 1, text: String::new(), image: Some(vec![0xFF, 0xD8]) },
+            ClientMessage::Chat { channel_id: 1, text: "Hallo Welt".into(), image: None, reply_to: None },
+            ClientMessage::Chat { channel_id: 1, text: String::new(), image: Some(vec![0xFF, 0xD8]), reply_to: Some(4) },
+            ClientMessage::EditChat { message_id: 4, text: "neu".into() },
+            ClientMessage::DeleteChat { message_id: 4 },
             ClientMessage::SetMuteState { muted: true, deafened: false },
             ClientMessage::SetSharing { sharing: true },
             ClientMessage::VideoFrame { kind: VideoKind::Camera, data: vec![1, 2, 3] },
@@ -430,11 +463,14 @@ mod tests {
         };
         let entry = LogEntry { timestamp: 1_763_000_000, text: "alice ist erschienen".into() };
         let record = ChatRecord {
+            id: 12,
             channel_id: 3,
             from_name: "alice".into(),
             text: "moin".into(),
             timestamp: 1_763_000_001,
             image: Some(vec![0x89, 0x50]),
+            reply_to: Some(11),
+            edited: true,
         };
         let msgs = vec![
             ServerMessage::Welcome {
@@ -457,13 +493,17 @@ mod tests {
             },
             ServerMessage::SpawnLogEntry { entry },
             ServerMessage::Chat {
+                id: 5,
                 channel_id: 1,
                 from_id: 1,
                 from_name: "alice".into(),
                 text: "moin".into(),
                 timestamp: 1_763_000_000,
                 image: None,
+                reply_to: Some(4),
             },
+            ServerMessage::ChatEdited { channel_id: 1, message_id: 5, text: "moin!".into() },
+            ServerMessage::ChatDeleted { channel_id: 1, message_id: 5 },
             ServerMessage::MuteStateChanged { client_id: 1, muted: true, deafened: true },
             ServerMessage::SharingChanged { client_id: 1, sharing: true },
             ServerMessage::VideoFrame { from_id: 1, kind: VideoKind::Screen, data: vec![9, 8, 7] },

@@ -11,12 +11,14 @@ Lightweight voice chat in Rust — a Discord-style client with a TeamSpeak-style
 
 ### Working
 
-- **Voice:** push-to-talk + voice activity (VAD using RMS *and* RNNoise speech probability), Opus 64 kbit/s 48 kHz/20 ms over UDP with in-band FEC, jitter buffer with FEC/PLC, sinc resampler for any microphone sample rate
+- **Voice:** push-to-talk (optionally **global**, also while RustTalk is in the background; keys or side mouse buttons) + voice activity (VAD using RMS *and* RNNoise speech probability), Opus 64 kbit/s 48 kHz/20 ms over UDP with in-band FEC, jitter buffer with FEC/PLC, sinc resampler for any microphone sample rate
 - **Automatic gain control** (AGC + limiter): quiet microphones are boosted, loud ones tamed — can be turned off
 - **AI noise suppression** (RNNoise via `nnnoiseless`) — can be turned off
 - **Channel types:** Lobby (exactly one, join log, no talking/video), Category (grouping), Voice (voice + media chat), Text (chat); order via **drag & drop** (stored on the server)
 - **Discord-style UI:** server menu, voice panel, user panel, settings window with categories, channel settings (partly WIP)
-- **Text chat** with history, images (PNG/JPEG/GIF), unread markers
+- **Text chat** with history, images (PNG/JPEG/GIF, **animated**), unread markers, **replies**, **edit/delete** own messages, **@mentions** (highlight, sound, autocomplete), **search** per channel
+- **GIF search (GIPHY):** GIF button in the composer (API key in Settings > Advanced)
+- **Notifications:** sounds for join/leave in your voice channel, new messages and mute; taskbar flash while in the background
 - **SQLite persistence** (server): channels (incl. order), chat history (retention 10k per channel) and the lobby log survive restarts
 - **Client UI:** dark mode, procedural logo, saved servers, settings in a separate window, mic level meter, avatars with talking ring, per-user local mute and **per-user volume** 0–200 % (right click, remembered by name), **input volume**, UI scaling
 - **Auto-reconnect:** on connection loss the client retries with backoff (1 s … 30 s) and rejoins the last voice channel with the same mute state
@@ -25,9 +27,9 @@ Lightweight voice chat in Rust — a Discord-style client with a TeamSpeak-style
 - **Report a Bug** button that opens a pre-filled GitHub issue
 - **Server:** single binary + `server.toml`, systemd service, one port (7331 TCP+UDP), optional password, keepalive/timeouts for dead connections
 
-### Broken — fix in progress (WIP)
+### Not yet (WIP)
 
-- ⛔ **GIPHY search:** the integration exists (`media.rs`, API key in Settings > Advanced) but does not work yet — the button is disabled.
+- Desktop pop-up notifications, toggle-mute/deafen hotkeys, roles/bans/invites — see [ROADMAP.md](ROADMAP.md)
 
 ---
 
@@ -40,7 +42,8 @@ Lightweight voice chat in Rust — a Discord-style client with a TeamSpeak-style
 | Audio | `cpal` (I/O), `audiopus` (Opus), `nnnoiseless` (RNNoise), `ringbuf` (lock-free) |
 | Network | `tokio`; TCP (control, length-prefixed `bincode`) + UDP (audio, custom 20-byte header) |
 | Server DB | `rusqlite` (bundled SQLite, WAL) |
-| Media | `image`, `rfd` (file dialog), `nokhwa` (camera, Media Foundation), `xcap` (screens/windows); WIP: `ureq` + `serde_json` (GIPHY) |
+| Media | `image`, `rfd` (file dialog), `nokhwa` (camera, Media Foundation), `xcap` (screens/windows), `ureq` + `serde_json` (GIPHY) |
+| Hotkeys | `device_query` (global push-to-talk by polling, no keyboard hook) |
 | Server ops | systemd unit (hardened: `ProtectSystem=strict` + `ReadWritePaths`) |
 
 ## Architecture (short)
@@ -55,7 +58,7 @@ Client (Windows)                          Server (Debian)
                                             └──────────────┘
 ```
 
-- **TCP:** login, channels, chat (text + images), events, video frames (camera/screen), channel order, server settings (protocol v8)
+- **TCP:** login, channels, chat (text + images), events, video frames (camera/screen), channel order, server settings, chat edits/replies (protocol v9)
 - **UDP:** Opus audio only (20 ms frames, token + sequence header); the server relays 1:1 within the voice channel
 - **Lobby:** everyone lands here when connecting; talking is blocked on the server; join log
 
@@ -121,7 +124,7 @@ bash Server/Test_Scripts/e2e_local.sh
 ## Project structure
 
 ```
-├── shared/            # protocol (v8), framing, UDP packet format
+├── shared/            # protocol (v9), framing, UDP packet format
 ├── Server/            # Linux server (+ test_client CLI, integration tests, deploy/, Test_Scripts/)
 │   └── src/           #   main, config, state (RAM), db (SQLite), tcp, udp
 └── Client/Windows/    # egui client
@@ -134,7 +137,6 @@ bash Server/Test_Scripts/e2e_local.sh
 ## Known limitations
 
 - No encryption/authentication apart from the optional server password (meant for LAN use)
-- Push-to-talk only works while the window is focused (global hotkey: planned)
 - No echo cancellation → headphones recommended
-- GIPHY: **broken, fix in progress**
+- GIPHY needs your own free API key (developers.giphy.com)
 - Video is MJPEG over TCP: "High" needs ~5–6 MB/s per screen stream and viewer — meant for LAN (pick "Balanced" on Wi-Fi). On very large monitors (3440×1440) "High" reaches ~19 fps

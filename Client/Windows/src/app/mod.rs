@@ -32,8 +32,10 @@ use rusttalk_shared::protocol::{
     ChannelInfo, ChannelKind, ServerMessage, ServerSettings, UserInfo, VideoKind, MAX_MEDIA_BYTES,
 };
 
+use crate::audio::sfx::{self, Sound};
 use crate::audio::{capture, playback, AudioControl, AudioEngine, LocalMuteSet, TalkingMap, UserVolumeMap};
 use crate::config::{ClientConfig, ServerBookmark};
+use crate::hotkey;
 use crate::logo;
 use crate::media::{self, TextureCache};
 use crate::net::{self, Command, NetEvent};
@@ -56,11 +58,56 @@ enum ChatKind {
 }
 
 struct ChatLine {
+    /// Server message id (0 = local/system line).
+    id: u64,
     kind: ChatKind,
     text: String,
     timestamp: u64,
     /// Optionales Bild (PNG/JPEG/GIF-Bytes).
     image: Option<Vec<u8>>,
+    /// Answer to this message id.
+    reply_to: Option<u64>,
+    edited: bool,
+}
+
+impl ChatLine {
+    fn system(text: String, timestamp: u64) -> Self {
+        ChatLine { id: 0, kind: ChatKind::System, text, timestamp, image: None, reply_to: None, edited: false }
+    }
+}
+
+/// What the user picked on a chat message (hover buttons / right click).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatAction {
+    Reply(u64),
+    Edit(u64),
+    Delete(u64),
+}
+
+/// Does `text` mention `name` ("@name", case-insensitive, not inside a longer name)?
+fn mentions(text: &str, name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() {
+        return false;
+    }
+    let hay = text.to_lowercase();
+    let needle = format!("@{}", name.to_lowercase());
+    let mut start = 0;
+    while let Some(pos) = hay[start..].find(&needle) {
+        let end = start + pos + needle.len();
+        let next = hay[end..].chars().next();
+        if !next.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            return true;
+        }
+        start = end;
+    }
+    false
+}
+
+/// The "@prefix" being typed at the end of the input, if any.
+fn mention_prefix(input: &str) -> Option<&str> {
+    let last = input.rsplit(char::is_whitespace).next()?;
+    last.strip_prefix('@')
 }
 
 /// Zustand des GIPHY-Fensters.
@@ -73,6 +120,10 @@ struct GiphyState {
     error: Option<String>,
     /// Bereits angefragte Vorschau-URLs (gegen Doppel-Downloads).
     requested: HashSet<String>,
+    /// Downloaded previews by URL (decoded via the texture cache).
+    previews: HashMap<String, Vec<u8>>,
+    /// A GIF is being downloaded for attaching.
+    attaching: bool,
 }
 
 /// Kamera-Dialog: Geraeteauswahl + Live-Vorschau vor dem Teilen.
@@ -143,6 +194,8 @@ enum GiphyMsg {
     Results(Result<Vec<media::GifResult>, String>),
     Preview(String, Vec<u8>),
     Full(Vec<u8>),
+    /// Download of the chosen GIF failed.
+    FullFailed(String),
 }
 
 pub struct RustTalkApp {
@@ -162,6 +215,14 @@ pub struct RustTalkApp {
 
     // UI-State
     chat_input: String,
+    /// Composer answers this message.
+    reply_to: Option<u64>,
+    /// Composer edits this own message (the text is in `chat_input`).
+    editing: Option<u64>,
+    /// Search in the current channel (`Some` = search bar open).
+    chat_search: Option<String>,
+    /// Picked on a message; executed in the next frame (needs the command sender).
+    chat_action: Option<ChatAction>,
     new_channel_name: String,
     new_channel_kind: ChannelKind,
     new_channel_parent: Option<u64>,
@@ -198,6 +259,10 @@ pub struct RustTalkApp {
     control: Arc<AudioControl>,
     talking: TalkingMap,
     local_muted: LocalMuteSet,
+    /// Notification sounds waiting for the output stream.
+    sfx: sfx::SfxQueue,
+    /// Binding for the global PTT poller (`None` = off / focused window only).
+    global_ptt: hotkey::GlobalBinding,
     /// Per-user playback volume (client id -> gain), filled from `config.user_volumes`.
     user_volumes: UserVolumeMap,
     /// Pegel-Messung ohne Verbindung (Einstellungs-Fenster).
@@ -246,6 +311,7 @@ impl RustTalkApp {
         let control = Arc::new(AudioControl::new(config.voice_activation, config.vad_threshold));
         control.set_output_volume(config.output_volume);
         control.set_input_volume(config.input_volume);
+        let global_ptt = hotkey::spawn_global_ptt(control.clone());
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let (giphy_tx, giphy_rx) = std::sync::mpsc::channel::<GiphyMsg>();
         Self {
@@ -262,6 +328,10 @@ impl RustTalkApp {
             selected_channel: None,
             collapsed: HashMap::new(),
             chat_input: String::new(),
+            reply_to: None,
+            editing: None,
+            chat_search: None,
+            chat_action: None,
             new_channel_name: String::new(),
             new_channel_kind: ChannelKind::Text,
             new_channel_parent: None,
@@ -287,6 +357,8 @@ impl RustTalkApp {
             audio: None,
             talking: Arc::new(Mutex::new(HashMap::new())),
             local_muted: Arc::new(Mutex::new(HashSet::new())),
+            global_ptt,
+            sfx: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             user_volumes: Arc::new(Mutex::new(HashMap::new())),
             mic_monitor: None,
             textures: TextureCache::default(),
@@ -368,9 +440,14 @@ impl RustTalkApp {
         self.chat.clear();
         self.unread.clear();
         self.selected_channel = None;
+        self.reply_to = None;
+        self.editing = None;
+        self.chat_search = None;
+        self.chat_action = None;
         self.talking.lock().unwrap().clear();
         self.local_muted.lock().unwrap().clear();
         self.user_volumes.lock().unwrap().clear();
+        self.sfx.lock().unwrap().clear();
         self.control.transmitting.store(false, Ordering::Relaxed);
         // Video stoppen + Frames rauswerfen.
         self.cam = None;
@@ -389,7 +466,7 @@ impl RustTalkApp {
         self.chat
             .entry(channel_id)
             .or_default()
-            .push(ChatLine { kind: ChatKind::System, text, timestamp, image: None });
+            .push(ChatLine::system(text, timestamp));
         if self.selected_channel != Some(channel_id) {
             self.unread.insert(channel_id);
         }
@@ -511,6 +588,29 @@ impl RustTalkApp {
         self.set_status(format!("Reconnected to {}", self.server_settings.name));
     }
 
+    /// Our voice channel (None in the lobby or when not in a voice channel).
+    fn my_voice_channel(&self) -> Option<u64> {
+        let ch = self.users.get(&self.my_id)?.channel_id;
+        (self.channel_kind(ch) == Some(ChannelKind::Voice)).then_some(ch)
+    }
+
+    fn window_focused(&self) -> bool {
+        self.ctx.input(|i| i.viewport().focused).unwrap_or(true)
+    }
+
+    /// Plays a notification sound if it is enabled in the settings.
+    pub(super) fn notify(&self, sound: Sound) {
+        let on = match sound {
+            Sound::Join => self.config.sound_join,
+            Sound::Leave => self.config.sound_leave,
+            Sound::Message => self.config.sound_message,
+            Sound::Mute | Sound::Unmute => self.config.sound_mute,
+        };
+        if on && self.audio.is_some() {
+            sfx::play(&self.sfx, sound);
+        }
+    }
+
     /// Current playback volume of one user (1.0 = 100 %).
     fn user_volume(&self, id: u64) -> f32 {
         self.user_volumes.lock().unwrap().get(&id).copied().unwrap_or(1.0)
@@ -528,7 +628,36 @@ impl RustTalkApp {
         }
     }
 
+    /// Applies a picked message action (reply / edit / delete).
+    fn apply_chat_action(&mut self, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>) {
+        let Some(action) = self.chat_action.take() else { return };
+        match action {
+            ChatAction::Reply(id) => {
+                self.editing = None;
+                self.reply_to = Some(id);
+            }
+            ChatAction::Edit(id) => {
+                let text = self.chat.values().flatten().find(|l| l.id == id).map(|l| l.text.clone());
+                if let Some(text) = text {
+                    self.reply_to = None;
+                    self.editing = Some(id);
+                    self.chat_input = text;
+                }
+            }
+            ChatAction::Delete(id) => {
+                let _ = cmd_tx.send(Command::DeleteChat(id));
+            }
+        }
+    }
+
     fn select_channel(&mut self, id: u64) {
+        if self.selected_channel != Some(id) {
+            self.reply_to = None;
+            if self.editing.take().is_some() {
+                self.chat_input.clear();
+            }
+            self.chat_search = None;
+        }
         self.selected_channel = Some(id);
         self.unread.remove(&id);
     }
@@ -561,12 +690,7 @@ impl RustTalkApp {
                 if let Some(spawn_id) = self.spawn_channel_id() {
                     let lines = spawn_log
                         .into_iter()
-                        .map(|e| ChatLine {
-                            kind: ChatKind::System,
-                            text: e.text,
-                            timestamp: e.timestamp,
-                            image: None,
-                        })
+                        .map(|e| ChatLine::system(e.text, e.timestamp))
                         .collect();
                     self.chat.insert(spawn_id, lines);
                     self.selected_channel = Some(spawn_id);
@@ -576,10 +700,13 @@ impl RustTalkApp {
                 for rec in chat_history {
                     let own = rec.from_name == self.config.username;
                     self.chat.entry(rec.channel_id).or_default().push(ChatLine {
+                        id: rec.id,
                         kind: ChatKind::Message { from: rec.from_name, own },
                         text: rec.text,
                         timestamp: rec.timestamp,
                         image: rec.image,
+                        reply_to: rec.reply_to,
+                        edited: rec.edited,
                     });
                 }
                 self.set_status(format!("Connected to {}", self.server_settings.name));
@@ -594,6 +721,7 @@ impl RustTalkApp {
                         self.talking.clone(),
                         self.local_muted.clone(),
                         self.user_volumes.clone(),
+                        self.sfx.clone(),
                         self.config.input_device.as_deref(),
                         self.config.output_device.as_deref(),
                     ) {
@@ -622,6 +750,9 @@ impl RustTalkApp {
                 // Join-Zeile kommt serverseitig via SpawnLogEntry.
             }
             ServerMessage::UserLeft { client_id } => {
+                if self.users.get(&client_id).is_some_and(|u| Some(u.channel_id) == self.my_voice_channel()) {
+                    self.notify(Sound::Leave);
+                }
                 self.users.remove(&client_id);
                 self.user_volumes.lock().unwrap().remove(&client_id);
                 for ch in self.channels.values_mut() {
@@ -646,6 +777,15 @@ impl RustTalkApp {
                     self.clear_video_of(client_id, None);
                 }
                 let name = self.users.get(&client_id).map(|u| u.name.clone());
+                if client_id != self.my_id {
+                    let mine = self.my_voice_channel();
+                    let old = self.users.get(&client_id).map(|u| u.channel_id);
+                    if mine.is_some() && Some(channel_id) == mine {
+                        self.notify(Sound::Join);
+                    } else if mine.is_some() && old == mine {
+                        self.notify(Sound::Leave);
+                    }
+                }
                 if let Some(u) = self.users.get_mut(&client_id) {
                     u.channel_id = channel_id;
                 }
@@ -707,19 +847,53 @@ impl RustTalkApp {
                     self.system_line(spawn_id, entry.text, entry.timestamp);
                 }
             }
-            ServerMessage::Chat { channel_id, from_id, from_name, text, timestamp, image } => {
+            ServerMessage::Chat { id, channel_id, from_id, from_name, text, timestamp, image, reply_to } => {
                 let own = from_id == self.my_id;
+                // from_id 0 = server announcement (no sound).
+                if !own && from_id != 0 {
+                    let focused = self.window_focused();
+                    let mentioned = mentions(&text, &self.config.username);
+                    if mentioned || !focused || self.selected_channel != Some(channel_id) {
+                        self.notify(Sound::Message);
+                    }
+                    if !focused && self.config.flash_taskbar {
+                        self.ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                            egui::UserAttentionType::Informational,
+                        ));
+                    }
+                }
                 self.chat
                     .entry(channel_id)
                     .or_default()
                     .push(ChatLine {
+                        id,
                         kind: ChatKind::Message { from: from_name, own },
                         text,
                         timestamp,
                         image,
+                        reply_to,
+                        edited: false,
                     });
                 if self.selected_channel != Some(channel_id) {
                     self.unread.insert(channel_id);
+                }
+            }
+            ServerMessage::ChatEdited { channel_id, message_id, text } => {
+                if let Some(line) = self.chat.get_mut(&channel_id).and_then(|v| v.iter_mut().find(|l| l.id == message_id)) {
+                    line.text = text;
+                    line.edited = true;
+                }
+            }
+            ServerMessage::ChatDeleted { channel_id, message_id } => {
+                if let Some(lines) = self.chat.get_mut(&channel_id) {
+                    lines.retain(|l| l.id != message_id);
+                }
+                if self.editing == Some(message_id) {
+                    self.editing = None;
+                    self.chat_input.clear();
+                }
+                if self.reply_to == Some(message_id) {
+                    self.reply_to = None;
                 }
             }
             ServerMessage::MuteStateChanged { client_id, muted, deafened } => {
@@ -789,12 +963,18 @@ impl eframe::App for RustTalkApp {
         }
 
         if self.is_connected() {
-            // Poll the push-to-talk key (while the window has focus).
-            let pressed = !self.recording_key
-                && key_from_name(&self.config.ptt_key).is_some_and(|k| ctx.input(|i| i.key_down(k)));
-            self.control.ptt_pressed.store(pressed, Ordering::Relaxed);
+            // Push-to-talk: either the global poller (also in the background)
+            // or the focused window. Never while a new key is being recorded.
+            let binding = if self.recording_key { None } else { hotkey::parse_binding(&self.config.ptt_key) };
+            let global = self.config.global_ptt && binding.is_some();
+            *self.global_ptt.lock().unwrap() = if global { binding } else { None };
+            if !global {
+                let pressed = binding.is_some_and(|b| ctx.input(|i| b.is_down_in(i)));
+                self.control.ptt_pressed.store(pressed, Ordering::Relaxed);
+            }
             self.ui_connected(ctx);
         } else {
+            *self.global_ptt.lock().unwrap() = None;
             self.ui_connect(ctx);
         }
         if self.show_settings {
@@ -828,6 +1008,7 @@ impl RustTalkApp {
     /// Main view while connected: sidebar + content (or fullscreen stream).
     fn ui_connected(&mut self, ctx: &egui::Context) {
         let cmd_tx = self.cmd_tx.clone().expect("connected");
+        self.apply_chat_action(&cmd_tx);
 
         // Screen thread ended with an error (e.g. window closed).
         if self.screen_failed.swap(false, Ordering::Relaxed) && self.screen.is_some() {
@@ -940,78 +1121,23 @@ fn format_time(ts: u64) -> String {
     format!("{:02}:{:02}", secs / 3600, (secs / 60) % 60)
 }
 
-/// Maps a config string to an egui key.
-fn key_from_name(name: &str) -> Option<egui::Key> {
-    let n = name.trim();
-    if n.chars().count() == 1 {
-        let c = n.chars().next().unwrap().to_ascii_uppercase();
-        return Some(match c {
-            'A' => egui::Key::A,
-            'B' => egui::Key::B,
-            'C' => egui::Key::C,
-            'D' => egui::Key::D,
-            'E' => egui::Key::E,
-            'F' => egui::Key::F,
-            'G' => egui::Key::G,
-            'H' => egui::Key::H,
-            'I' => egui::Key::I,
-            'J' => egui::Key::J,
-            'K' => egui::Key::K,
-            'L' => egui::Key::L,
-            'M' => egui::Key::M,
-            'N' => egui::Key::N,
-            'O' => egui::Key::O,
-            'P' => egui::Key::P,
-            'Q' => egui::Key::Q,
-            'R' => egui::Key::R,
-            'S' => egui::Key::S,
-            'T' => egui::Key::T,
-            'U' => egui::Key::U,
-            'V' => egui::Key::V,
-            'W' => egui::Key::W,
-            'X' => egui::Key::X,
-            'Y' => egui::Key::Y,
-            'Z' => egui::Key::Z,
-            '0' => egui::Key::Num0,
-            '1' => egui::Key::Num1,
-            '2' => egui::Key::Num2,
-            '3' => egui::Key::Num3,
-            '4' => egui::Key::Num4,
-            '5' => egui::Key::Num5,
-            '6' => egui::Key::Num6,
-            '7' => egui::Key::Num7,
-            '8' => egui::Key::Num8,
-            '9' => egui::Key::Num9,
-            _ => return egui::Key::from_name(n),
-        });
-    }
-    match n.to_ascii_uppercase().as_str() {
-        "SPACE" => Some(egui::Key::Space),
-        "TAB" => Some(egui::Key::Tab),
-        "ENTER" => Some(egui::Key::Enter),
-        "ESCAPE" => Some(egui::Key::Escape),
-        "F1" => Some(egui::Key::F1),
-        "F2" => Some(egui::Key::F2),
-        "F3" => Some(egui::Key::F3),
-        "F4" => Some(egui::Key::F4),
-        "F5" => Some(egui::Key::F5),
-        // Everything else by egui name (e.g. "F8", "Backtick", "PageUp").
-        _ => egui::Key::from_name(n),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn key_mapping_letters() {
-        assert_eq!(key_from_name("v"), Some(egui::Key::V));
-        assert_eq!(key_from_name("A"), Some(egui::Key::A));
-        assert_eq!(key_from_name("5"), Some(egui::Key::Num5));
-        assert_eq!(key_from_name("SPACE"), Some(egui::Key::Space));
-        assert_eq!(key_from_name("space"), Some(egui::Key::Space));
-        assert_eq!(key_from_name("??"), None);
+    fn mention_detection() {
+        assert!(mentions("hey @anna!", "Anna"));
+        assert!(mentions("@ANNA", "anna"));
+        assert!(mentions("@Max Power look", "Max Power"), "names with spaces");
+        assert!(!mentions("@annabelle hi", "anna"), "longer name");
+        assert!(mentions("@annabelle and @anna", "anna"), "second occurrence");
+        assert!(!mentions("anna without at", "anna"));
+        assert!(!mentions("@", ""));
+        assert_eq!(mention_prefix("hi @an"), Some("an"));
+        assert_eq!(mention_prefix("@"), Some(""));
+        assert_eq!(mention_prefix("hi @anna "), None, "finished with a space");
+        assert_eq!(mention_prefix("mail@x"), None);
     }
 
     #[test]
@@ -1030,11 +1156,4 @@ mod tests {
         assert_eq!(format_time(90_061), "01:01"); // next day (UTC)
     }
 
-    #[test]
-    fn keybind_roundtrip_via_egui_names() {
-        // What the settings store (key.name()) must map back to the key.
-        for k in [egui::Key::V, egui::Key::Space, egui::Key::F8, egui::Key::Backtick, egui::Key::Num3] {
-            assert_eq!(key_from_name(k.name()), Some(k), "{}", k.name());
-        }
-    }
 }

@@ -9,6 +9,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rusttalk_shared::audio_packet::{FRAME_SAMPLES, SAMPLE_RATE};
 
 use super::jitter::USER_TIMEOUT;
+use super::sfx::{self, SfxQueue};
 use super::{AudioControl, LocalMuteSet, SharedMixer, UserVolumeMap};
 use std::collections::VecDeque;
 
@@ -99,6 +100,7 @@ pub fn build_output_stream(
     control: Arc<AudioControl>,
     local_muted: LocalMuteSet,
     user_volumes: UserVolumeMap,
+    sfx: SfxQueue,
 ) -> Result<cpal::Stream> {
     let device = pick_output_device(device_name)?;
     let supported = pick_output_config(&device)?;
@@ -112,12 +114,12 @@ pub fn build_output_stream(
     );
     let err_fn = |e| tracing::warn!("Output-Stream-Fehler: {e}");
     let stream = match supported.sample_format() {
-        cpal::SampleFormat::F32 => build_out::<f32>(&device, &config, |s| s, mixer, control, local_muted, user_volumes, err_fn)?,
+        cpal::SampleFormat::F32 => build_out::<f32>(&device, &config, |s| s, mixer, control, local_muted, user_volumes, sfx, err_fn)?,
         cpal::SampleFormat::I16 => {
-            build_out::<i16>(&device, &config, |s| (s * 32767.0) as i16, mixer, control, local_muted, user_volumes, err_fn)?
+            build_out::<i16>(&device, &config, |s| (s * 32767.0) as i16, mixer, control, local_muted, user_volumes, sfx, err_fn)?
         }
         cpal::SampleFormat::U16 => {
-            build_out::<u16>(&device, &config, |s| (s * 32767.0 + 32768.0) as u16, mixer, control, local_muted, user_volumes, err_fn)?
+            build_out::<u16>(&device, &config, |s| (s * 32767.0 + 32768.0) as u16, mixer, control, local_muted, user_volumes, sfx, err_fn)?
         }
         other => return Err(anyhow!("Unsupported sample format: {other:?}")),
     };
@@ -132,6 +134,7 @@ fn build_out<T: cpal::SizedSample + Send + 'static>(
     control: Arc<AudioControl>,
     local_muted: LocalMuteSet,
     user_volumes: UserVolumeMap,
+    sfx: SfxQueue,
     err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
 ) -> Result<cpal::Stream> {
     let channels = config.channels as usize;
@@ -170,6 +173,8 @@ fn build_out<T: cpal::SizedSample + Send + 'static>(
                         }
                     }
                 }
+                // Notification sounds (also while deafened, like Discord).
+                sfx::mix_into(&sfx, &mut chunk);
                 // Weicher Limiter statt Hard-Clip: mehrere laute Sprecher
                 // gleichzeitig verzerren nicht mehr.
                 let vol = control.output_volume();

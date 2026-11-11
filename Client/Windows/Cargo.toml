@@ -23,6 +23,8 @@ nokhwa = { version = "0.10", features = ["input-msmf"] }
 xcap = "0.9"
 ureq = { version = "2", features = ["json"] }
 serde_json = "1"
+# Global push-to-talk: polls key/mouse state (no hook, keys still reach other apps)
+device_query = "4"
 audiopus = "0.2"
 ringbuf = "0.4"
 tokio = { version = "1", features = ["net", "time", "io-util", "sync", "rt", "macros"] }

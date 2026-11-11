@@ -25,7 +25,9 @@ pub enum Command {
     RenameChannel(u64, String),
     MoveChannel { channel_id: u64, parent: Option<u64>, index: u32 },
     UpdateServerSettings(ServerSettings),
-    SendChat { channel_id: u64, text: String, image: Option<Vec<u8>> },
+    SendChat { channel_id: u64, text: String, image: Option<Vec<u8>>, reply_to: Option<u64> },
+    EditChat { message_id: u64, text: String },
+    DeleteChat(u64),
     SetMute { muted: bool, deafened: bool },
     SetSharing(bool),
     VideoFrame(VideoKind, Vec<u8>),
@@ -198,9 +200,11 @@ async fn run(
                             Command::RenameChannel(channel_id, name) => {
                                 ClientMessage::RenameChannel { channel_id, name }
                             }
-                            Command::SendChat { channel_id, text, image } => {
-                                ClientMessage::Chat { channel_id, text, image }
+                            Command::SendChat { channel_id, text, image, reply_to } => {
+                                ClientMessage::Chat { channel_id, text, image, reply_to }
                             }
+                            Command::EditChat { message_id, text } => ClientMessage::EditChat { message_id, text },
+                            Command::DeleteChat(message_id) => ClientMessage::DeleteChat { message_id },
                             Command::SetMute { muted, deafened } => {
                                 ClientMessage::SetMuteState { muted, deafened }
                             }

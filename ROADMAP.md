@@ -1,6 +1,6 @@
 # RustTalk – Roadmap
 
-Checklist of planned features, by priority. Status as of 2026-11-11 (protocol v8). Category A done.
+Checklist of planned features, by priority. Status as of 2026-11-11 (protocol v9). Categories A and B done.
 
 ## A – Quick wins (WIP spots already visible in the UI)
 
@@ -11,10 +11,11 @@ Checklist of planned features, by priority. Status as of 2026-11-11 (protocol v8
 
 ## B – Core feature gaps
 
-- [ ] **B1 Global push-to-talk** – PTT also works while the window is not focused
-- [ ] **B2 Fix GIPHY** – GIF search in the composer
-- [ ] **B3 Notifications** – sounds for join/leave, notice for new messages in the background
-- [ ] **B4 Chat features** – edit/delete messages, replies, @mentions, search
+- [x] **B1 Global push-to-talk** – PTT also works while the window is not focused (opt-in, keys + Mouse4/5)
+- [x] **B2 Fix GIPHY** – GIF search in the composer, animated GIFs in chat
+- [x] **B3 Notifications** – sounds for join/leave/message/mute, taskbar flash
+  - [ ] Desktop pop-up notifications (Windows toasts) – still open
+- [x] **B4 Chat features** – edit/delete messages, replies, @mentions, search
 
 ## C – Moderation & permissions
 

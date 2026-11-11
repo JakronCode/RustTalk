@@ -69,12 +69,20 @@ impl RustTalkApp {
                         {
                             self.open_channel_settings(ch_id);
                         }
-                        let _ = theme::icon_button(
-                            ui,
-                            icons::regular::MAGNIFYING_GLASS,
-                            theme::IconState::Disabled,
-                            "Search (WIP)",
-                        );
+                        let searching = self.chat_search.is_some();
+                        let state = if searching { theme::IconState::Active } else { theme::IconState::Normal };
+                        if theme::icon_button(ui, icons::regular::MAGNIFYING_GLASS, state, "Search this channel").clicked() {
+                            self.chat_search = if searching { None } else { Some(String::new()) };
+                        }
+                        if let Some(q) = self.chat_search.as_mut() {
+                            let resp = ui.add(egui::TextEdit::singleline(q).hint_text("Search messages").desired_width(180.0));
+                            if !resp.has_focus() && q.is_empty() && !resp.lost_focus() {
+                                resp.request_focus();
+                            }
+                            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                self.chat_search = None;
+                            }
+                        }
                         if kind == ChannelKind::Voice {
                             let here = self.my_channel() == Some(ch_id);
                             if !here && theme::primary_button(ui, &format!("{}  Join Voice", icons::regular::SIGN_IN)).clicked() {
@@ -223,38 +231,61 @@ impl RustTalkApp {
     }
 
     /// Scrollable message list with grouping of consecutive messages.
+    /// With an open search only matching lines are shown.
     fn message_list(&mut self, ui: &mut egui::Ui, ch_id: u64, empty: impl FnOnce(&mut egui::Ui)) {
         let show_ts = self.config.show_timestamps;
+        let animate = self.config.animate_gifs;
+        let me = self.config.username.clone();
+        let query = self.chat_search.as_ref().map(|q| q.trim().to_lowercase()).filter(|q| !q.is_empty());
+        let highlight = self.reply_to.or(self.editing);
+        let mut action = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .stick_to_bottom(true)
+            .stick_to_bottom(query.is_none())
             .show(ui, |ui| {
                 egui::Frame::default().inner_margin(egui::Margin::symmetric(16, 8)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    match self.chat.get(&ch_id) {
-                        Some(lines) if !lines.is_empty() => {
-                            let mut prev: Option<(&str, u64)> = None;
-                            for line in lines {
-                                let grouped = match (&line.kind, prev) {
-                                    (ChatKind::Message { from, .. }, Some((pf, pt))) => {
-                                        pf == from && line.timestamp.saturating_sub(pt) < 300
-                                    }
-                                    _ => false,
-                                };
-                                chat_line(ui, line, &mut self.textures, grouped, show_ts);
-                                prev = match &line.kind {
-                                    ChatKind::Message { from, .. } => Some((from.as_str(), line.timestamp)),
-                                    ChatKind::System => None,
-                                };
-                            }
+                    let lines = self.chat.get(&ch_id).map(Vec::as_slice).unwrap_or(&[]);
+                    if lines.is_empty() {
+                        empty(ui);
+                        return;
+                    }
+                    let matches = |l: &ChatLine| match &query {
+                        None => true,
+                        Some(q) => {
+                            l.text.to_lowercase().contains(q)
+                                || matches!(&l.kind, ChatKind::Message { from, .. } if from.to_lowercase().contains(q))
                         }
-                        _ => empty(ui),
+                    };
+                    if query.is_some() {
+                        let n = lines.iter().filter(|l| matches(l)).count();
+                        ui.label(egui::RichText::new(format!("{} {n} result(s)", icons::regular::MAGNIFYING_GLASS)).color(theme::MUTED));
+                    }
+                    let mut prev: Option<(&str, u64)> = None;
+                    for line in lines.iter().filter(|l| matches(l)) {
+                        let grouped = query.is_none()
+                            && line.reply_to.is_none()
+                            && match (&line.kind, prev) {
+                                (ChatKind::Message { from, .. }, Some((pf, pt))) => pf == from && line.timestamp.saturating_sub(pt) < 300,
+                                _ => false,
+                            };
+                        let ctx = LineCtx { lines, me: &me, grouped, show_ts, animate, highlighted: highlight == Some(line.id) && line.id != 0 };
+                        if let Some(a) = chat_line(ui, line, &mut self.textures, &ctx) {
+                            action = Some(a);
+                        }
+                        prev = match &line.kind {
+                            ChatKind::Message { from, .. } => Some((from.as_str(), line.timestamp)),
+                            ChatKind::System => None,
+                        };
                     }
                 });
             });
+        if action.is_some() {
+            self.chat_action = action;
+        }
     }
 
-    /// Message composer: attach button, input field, GIF (WIP), send.
+    /// Message composer: attach button, input field, GIF search, send.
     fn composer(
         &mut self,
         ui: &mut egui::Ui,
@@ -284,6 +315,8 @@ impl RustTalkApp {
                 self.pending_image = None;
             }
         }
+        self.composer_context_bar(ui, ch_id);
+        self.mention_suggestions(ui, ch_id);
         let name = self.channel_name(ch_id);
         egui::Frame::default()
             .fill(theme::INPUT)
@@ -307,6 +340,21 @@ impl RustTalkApp {
                             .desired_width(ui.available_width() - right_w),
                     );
                     let enter = resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+                    // Esc cancels reply/edit; Up in an empty input edits the last own message.
+                    if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        self.reply_to = None;
+                        if self.editing.take().is_some() {
+                            self.chat_input.clear();
+                        }
+                    }
+                    if resp.has_focus() && self.chat_input.is_empty() && self.editing.is_none() && ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                        let last_own = self.chat.get(&ch_id).and_then(|v| {
+                            v.iter().rev().find(|l| l.id != 0 && matches!(l.kind, ChatKind::Message { own: true, .. })).map(|l| l.id)
+                        });
+                        if let Some(id) = last_own {
+                            self.chat_action = Some(ChatAction::Edit(id));
+                        }
+                    }
                     if enter {
                         // Strip the newline egui already inserted.
                         while self.chat_input.ends_with('\n') {
@@ -319,9 +367,13 @@ impl RustTalkApp {
                             .add(egui::Button::new(egui::RichText::new(icons::regular::PAPER_PLANE_RIGHT).size(18.0).color(theme::ACCENT)).frame(false))
                             .on_hover_text("Send (Enter)  -  Shift+Enter for a new line")
                             .clicked();
-                        let _ = ui
-                            .add_enabled(false, egui::Button::new(egui::RichText::new(icons::regular::GIF).size(18.0)).frame(false))
-                            .on_disabled_hover_text("GIF search (WIP)");
+                        if ui
+                            .add(egui::Button::new(egui::RichText::new(icons::regular::GIF).size(18.0).color(theme::MUTED)).frame(false))
+                            .on_hover_text("Search GIFs (GIPHY)")
+                            .clicked()
+                        {
+                            self.giphy.open = !self.giphy.open;
+                        }
                         if send || enter {
                             self.send_chat(ch_id, cmd_tx);
                         }
@@ -330,15 +382,108 @@ impl RustTalkApp {
             });
     }
 
-    /// Sends text + attached image.
+    /// Sends text + attached image (or the edit of an own message).
     pub(super) fn send_chat(&mut self, ch_id: u64, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>) {
         let text = self.chat_input.trim().to_string();
+        if let Some(message_id) = self.editing.take() {
+            if !text.is_empty() {
+                let _ = cmd_tx.send(Command::EditChat { message_id, text });
+            }
+            self.chat_input.clear();
+            return;
+        }
         let image = self.pending_image.take().map(|(_, b)| b);
         if text.is_empty() && image.is_none() {
             return;
         }
-        let _ = cmd_tx.send(Command::SendChat { channel_id: ch_id, text, image });
+        let reply_to = self.reply_to.take();
+        let _ = cmd_tx.send(Command::SendChat { channel_id: ch_id, text, image, reply_to });
         self.chat_input.clear();
+    }
+
+    /// "Replying to ..." / "Editing message" bar above the input.
+    fn composer_context_bar(&mut self, ui: &mut egui::Ui, ch_id: u64) {
+        let (icon, title, target) = match (self.editing, self.reply_to) {
+            (Some(id), _) => (icons::regular::PENCIL_SIMPLE, "Editing message".to_string(), id),
+            (None, Some(id)) => {
+                let who = self
+                    .chat
+                    .get(&ch_id)
+                    .and_then(|v| v.iter().find(|l| l.id == id))
+                    .map(|l| match &l.kind {
+                        ChatKind::Message { from, .. } => from.clone(),
+                        ChatKind::System => String::new(),
+                    })
+                    .unwrap_or_default();
+                (icons::regular::ARROW_BEND_UP_LEFT, format!("Replying to {who}"), id)
+            }
+            (None, None) => return,
+        };
+        let snippet = self
+            .chat
+            .get(&ch_id)
+            .and_then(|v| v.iter().find(|l| l.id == target))
+            .map(|l| snippet(&l.text, l.image.is_some()))
+            .unwrap_or_default();
+        let mut cancel = false;
+        egui::Frame::default()
+            .fill(theme::INPUT)
+            .corner_radius(egui::CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 })
+            .inner_margin(egui::Margin::symmetric(12, 6))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(icon).color(theme::ACCENT));
+                    ui.label(egui::RichText::new(title).strong().color(theme::HEADER));
+                    ui.label(egui::RichText::new(snippet).color(theme::MUTED));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button(icons::regular::X).on_hover_text("Cancel (Esc)").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            });
+        if cancel {
+            self.reply_to = None;
+            if self.editing.take().is_some() {
+                self.chat_input.clear();
+            }
+        }
+    }
+
+    /// While typing "@na": buttons for matching users (click completes the name).
+    fn mention_suggestions(&mut self, ui: &mut egui::Ui, _ch_id: u64) {
+        let Some(raw) = mention_prefix(&self.chat_input) else { return };
+        let typed_len = raw.len(); // bytes of the original text (not of the lowercase copy)
+        let prefix = raw.to_lowercase();
+        let mut names: Vec<String> = self
+            .users
+            .values()
+            .filter(|u| u.id != self.my_id && u.name.to_lowercase().starts_with(&prefix))
+            .map(|u| u.name.clone())
+            .collect();
+        names.sort_by_key(|n| n.to_lowercase());
+        names.dedup();
+        names.truncate(6);
+        if names.is_empty() {
+            return;
+        }
+        let mut pick = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(icons::regular::AT).color(theme::MUTED));
+            for n in &names {
+                if ui.small_button(n).clicked() {
+                    pick = Some(n.clone());
+                }
+            }
+        });
+        if let Some(name) = pick {
+            let cut = self.chat_input.len() - typed_len - 1; // remove '@' + the typed prefix
+            if self.chat_input.is_char_boundary(cut) {
+                self.chat_input.truncate(cut);
+                self.chat_input.push_str(&format!("@{name} "));
+            }
+        }
     }
 
     /// Pick and attach an image file.
@@ -431,67 +576,189 @@ fn video_tile(
     resp.on_hover_text("Click for fullscreen").on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// One chat line: message (avatar, name, time, text, image) or system note.
+/// Context for drawing one chat line.
+pub(super) struct LineCtx<'a> {
+    /// All lines of the channel (to show what a reply refers to).
+    lines: &'a [ChatLine],
+    /// Own username (mention highlight).
+    me: &'a str,
+    grouped: bool,
+    show_ts: bool,
+    animate: bool,
+    /// Target of the current reply / edit.
+    highlighted: bool,
+}
+
+/// Short one-line preview of a message.
+pub(super) fn snippet(text: &str, has_image: bool) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut s: String = flat.chars().take(70).collect();
+    if flat.chars().count() > 70 {
+        s.push_str("...");
+    }
+    if s.is_empty() && has_image {
+        s = "[image]".to_string();
+    }
+    s
+}
+
+/// One chat line: message (avatar, name, time, reply, text, image) or system
+/// note. Returns the action picked via hover buttons or right click.
 pub(super) fn chat_line(
     ui: &mut egui::Ui,
     line: &ChatLine,
     textures: &mut TextureCache,
-    grouped: bool,
-    show_ts: bool,
-) {
-    match &line.kind {
+    c: &LineCtx,
+) -> Option<ChatAction> {
+    let (from, own) = match &line.kind {
         ChatKind::System => {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new(icons::regular::ARROW_RIGHT).color(theme::GREEN));
                 ui.label(egui::RichText::new(&line.text).color(theme::MUTED));
-                if show_ts {
+                if c.show_ts {
                     ui.label(egui::RichText::new(format_time(line.timestamp)).size(11.0).color(theme::DISABLED));
                 }
             });
             ui.add_space(2.0);
+            return None;
         }
-        ChatKind::Message { from, own } => {
-            if !grouped {
-                ui.add_space(10.0);
-            }
-            ui.horizontal(|ui| {
-                ui.set_width(ui.available_width());
-                if grouped {
-                    ui.add_space(44.0);
-                } else {
-                    ui.vertical(|ui| {
-                        theme::draw_avatar(ui, from, 36.0, false);
-                    });
-                    ui.add_space(4.0);
-                }
+        ChatKind::Message { from, own } => (from, *own),
+    };
+    if !c.grouped {
+        ui.add_space(10.0);
+    }
+    let mentioned = !own && mentions(&line.text, c.me);
+    // Background (mention / reply target) is painted below the content afterwards.
+    let bg = ui.painter().add(egui::Shape::Noop);
+    let row = ui
+        .horizontal(|ui| {
+            ui.set_width(ui.available_width());
+            if c.grouped {
+                ui.add_space(44.0);
+            } else {
                 ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    if !grouped {
-                        ui.horizontal(|ui| {
-                            let color = if *own { theme::ACCENT.gamma_multiply(1.35) } else { theme::avatar_color(from).gamma_multiply(1.4) };
-                            ui.label(egui::RichText::new(from).strong().color(color));
-                            if show_ts {
-                                ui.label(egui::RichText::new(format_time(line.timestamp)).size(11.0).color(theme::MUTED));
-                            }
-                        });
-                    }
-                    if !line.text.is_empty() {
+                    theme::draw_avatar(ui, from, 36.0, false);
+                });
+                ui.add_space(4.0);
+            }
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                if let Some(target) = line.reply_to {
+                    let quoted = c.lines.iter().find(|l| l.id == target);
+                    let text = match quoted {
+                        Some(q) => {
+                            let who = match &q.kind {
+                                ChatKind::Message { from, .. } => from.as_str(),
+                                ChatKind::System => "",
+                            };
+                            format!("{}  {who}: {}", icons::regular::ARROW_BEND_UP_RIGHT, snippet(&q.text, q.image.is_some()))
+                        }
+                        None => format!("{}  Original message was deleted", icons::regular::ARROW_BEND_UP_RIGHT),
+                    };
+                    ui.label(egui::RichText::new(text).size(12.0).color(theme::MUTED));
+                }
+                if !c.grouped {
+                    ui.horizontal(|ui| {
+                        let color = if own { theme::ACCENT.gamma_multiply(1.35) } else { theme::avatar_color(from).gamma_multiply(1.4) };
+                        ui.label(egui::RichText::new(from).strong().color(color));
+                        if c.show_ts {
+                            ui.label(egui::RichText::new(format_time(line.timestamp)).size(11.0).color(theme::MUTED));
+                        }
+                    });
+                }
+                if !line.text.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
                         ui.add(egui::Label::new(egui::RichText::new(&line.text).color(theme::TEXT)).wrap());
-                    }
-                    if let Some(img) = &line.image {
-                        match textures.texture_for(ui.ctx(), img, "chat-img") {
-                            Some(tex) => {
-                                ui.add(egui::Image::new(&tex).max_width(360.0).max_height(260.0).corner_radius(8.0));
-                            }
-                            None => {
-                                ui.label(egui::RichText::new("[image could not be decoded]").color(theme::MUTED));
-                            }
+                        if line.edited {
+                            ui.label(egui::RichText::new("(edited)").size(11.0).color(theme::DISABLED));
+                        }
+                    });
+                }
+                if let Some(img) = &line.image {
+                    match textures.image_for(ui.ctx(), img, "chat-img", c.animate) {
+                        Some(tex) => {
+                            ui.add(egui::Image::new(&tex).max_width(360.0).max_height(260.0).corner_radius(8.0));
+                        }
+                        None => {
+                            ui.label(egui::RichText::new("[image could not be decoded]").color(theme::MUTED));
                         }
                     }
-                });
+                }
             });
-        }
+        })
+        .response
+        .rect;
+
+    let tint = if mentioned {
+        Some((theme::YELLOW.gamma_multiply(0.12), theme::YELLOW))
+    } else if c.highlighted {
+        Some((theme::ACCENT.gamma_multiply(0.12), theme::ACCENT))
+    } else {
+        None
+    };
+    if let Some((fill, bar)) = tint {
+        let r = row.expand2(egui::vec2(8.0, 2.0));
+        ui.painter().set(bg, egui::Shape::rect_filled(r, 4.0, fill));
+        ui.painter().rect_filled(egui::Rect::from_min_max(r.left_top(), egui::pos2(r.left() + 3.0, r.bottom())), 0.0, bar);
     }
+
+    if line.id == 0 {
+        return None; // no id (old server / local line): no actions
+    }
+    let mut action = None;
+    // Right click: same actions as the hover buttons.
+    let resp = ui.interact(row, ui.id().with(("chat-line", line.id)), egui::Sense::click());
+    resp.context_menu(|ui| {
+        if ui.button(format!("{}  Reply", icons::regular::ARROW_BEND_UP_LEFT)).clicked() {
+            action = Some(ChatAction::Reply(line.id));
+            ui.close_menu();
+        }
+        if own {
+            if ui.button(format!("{}  Edit", icons::regular::PENCIL_SIMPLE)).clicked() {
+                action = Some(ChatAction::Edit(line.id));
+                ui.close_menu();
+            }
+            if ui.button(egui::RichText::new(format!("{}  Delete", icons::regular::TRASH)).color(theme::RED)).clicked() {
+                action = Some(ChatAction::Delete(line.id));
+                ui.close_menu();
+            }
+        }
+    });
+    // Hover toolbar (top right of the message, only while fully visible).
+    if ui.rect_contains_pointer(row) && ui.clip_rect().contains(row.right_top()) {
+        let mut buttons: Vec<(&str, &str, ChatAction)> = vec![(icons::regular::ARROW_BEND_UP_LEFT, "Reply", ChatAction::Reply(line.id))];
+        if own {
+            buttons.push((icons::regular::PENCIL_SIMPLE, "Edit", ChatAction::Edit(line.id)));
+            buttons.push((icons::regular::TRASH, "Delete", ChatAction::Delete(line.id)));
+        }
+        let width = buttons.len() as f32 * 28.0 + 8.0;
+        egui::Area::new(ui.id().with(("chat-tools", line.id)))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(row.right() - width, row.top() - 6.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::default()
+                    .fill(theme::DARK)
+                    .corner_radius(6.0)
+                    .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
+                    .inner_margin(egui::Margin::same(2))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for (icon, tip, a) in buttons {
+                                let color = if matches!(a, ChatAction::Delete(_)) { theme::RED } else { theme::MUTED };
+                                if ui
+                                    .add(egui::Button::new(egui::RichText::new(icon).size(15.0).color(color)).frame(false).min_size(egui::vec2(24.0, 22.0)))
+                                    .on_hover_text(tip)
+                                    .clicked()
+                                {
+                                    action = Some(a);
+                                }
+                            }
+                        });
+                    });
+            });
+    }
+    action
 }

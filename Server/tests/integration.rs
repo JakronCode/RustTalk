@@ -242,7 +242,7 @@ async fn channel_typen_regeln() {
     assert!(matches!(recv(&mut a, 2000).await, Some(ServerMessage::Error { .. })));
 
     // Chat-Regeln: in Text UND Voice erlaubt (Voice = Media-Feed), Spawn nicht.
-    send(&mut a, &ClientMessage::Chat { channel_id: text_id, text: "hallo info".into(), image: None }).await;
+    send(&mut a, &ClientMessage::Chat { channel_id: text_id, text: "hallo info".into(), image: None, reply_to: None }).await;
     for conn in [&mut a, &mut b] {
         match recv(conn, 2000).await {
             Some(ServerMessage::Chat { channel_id, text, .. }) => {
@@ -257,6 +257,7 @@ async fn channel_typen_regeln() {
         channel_id: voice_id,
         text: String::new(),
         image: Some(vec![0x89, 0x50, 0x4E, 0x47]),
+        reply_to: None,
     })
     .await;
     for conn in [&mut a, &mut b] {
@@ -269,7 +270,7 @@ async fn channel_typen_regeln() {
         }
     }
     // Spawn bleibt verboten:
-    send(&mut a, &ClientMessage::Chat { channel_id: 1, text: "x".into(), image: None }).await;
+    send(&mut a, &ClientMessage::Chat { channel_id: 1, text: "x".into(), image: None, reply_to: None }).await;
     assert!(matches!(recv(&mut a, 2000).await, Some(ServerMessage::Error { .. })));
 
     // Kategorie loeschen: Kinder werden Top-Level, Spawn unloeschbar.
@@ -422,6 +423,76 @@ async fn join_leave_announcements_and_motd() {
 }
 
 #[tokio::test]
+async fn chat_reply_edit_delete() {
+    let port = free_port();
+    let _server = spawn_server(port, "");
+    wait_for_port(port);
+    let (mut a, wa) = connect(port, "alice", None).await;
+    let (mut b, _) = connect(port, "bob", None).await;
+    drain(&mut a, 300).await;
+    drain(&mut b, 300).await;
+    let text_id = wa.channels.iter().find(|c| c.kind == ChannelKind::Text).map(|c| c.id);
+    let text_id = match text_id {
+        Some(id) => id,
+        None => {
+            send(&mut a, &ClientMessage::CreateChannel { name: "chat".into(), kind: ChannelKind::Text, parent: None }).await;
+            let id = match recv(&mut a, 2000).await {
+                Some(ServerMessage::ChannelCreated { channel }) => channel.id,
+                other => panic!("ChannelCreated erwartet, bekam: {other:?}"),
+            };
+            drain(&mut b, 300).await;
+            id
+        }
+    };
+
+    send(&mut a, &ClientMessage::Chat { channel_id: text_id, text: "frage?".into(), image: None, reply_to: None }).await;
+    let first = match recv(&mut b, 2000).await {
+        Some(ServerMessage::Chat { id, reply_to: None, .. }) => id,
+        other => panic!("Chat erwartet, bekam: {other:?}"),
+    };
+    drain(&mut a, 300).await;
+
+    // bob answers; an invalid reply id is dropped by the server.
+    send(&mut b, &ClientMessage::Chat { channel_id: text_id, text: "antwort".into(), image: None, reply_to: Some(first) }).await;
+    let answer = match recv(&mut a, 2000).await {
+        Some(ServerMessage::Chat { id, reply_to, .. }) => {
+            assert_eq!(reply_to, Some(first));
+            id
+        }
+        other => panic!("Antwort erwartet, bekam: {other:?}"),
+    };
+    drain(&mut b, 300).await;
+    send(&mut b, &ClientMessage::Chat { channel_id: text_id, text: "x".into(), image: None, reply_to: Some(999_999) }).await;
+    assert!(matches!(recv(&mut a, 2000).await, Some(ServerMessage::Chat { reply_to: None, .. })));
+    drain(&mut b, 300).await;
+
+    // alice may not edit bob's message, but her own.
+    send(&mut a, &ClientMessage::EditChat { message_id: answer, text: "gehackt".into() }).await;
+    assert!(matches!(recv(&mut a, 2000).await, Some(ServerMessage::Error { .. })));
+    assert!(recv(&mut b, 400).await.is_none(), "kein Edit verteilt");
+    send(&mut a, &ClientMessage::EditChat { message_id: first, text: "frage (korrigiert)?".into() }).await;
+    for conn in [&mut a, &mut b] {
+        match recv(conn, 2000).await {
+            Some(ServerMessage::ChatEdited { channel_id, message_id, text }) => {
+                assert_eq!((channel_id, message_id, text.as_str()), (text_id, first, "frage (korrigiert)?"));
+            }
+            other => panic!("ChatEdited erwartet, bekam: {other:?}"),
+        }
+    }
+
+    // bob deletes his answer; deleting it again fails.
+    send(&mut b, &ClientMessage::DeleteChat { message_id: answer }).await;
+    for conn in [&mut a, &mut b] {
+        assert!(matches!(
+            recv(conn, 2000).await,
+            Some(ServerMessage::ChatDeleted { message_id, .. }) if message_id == answer
+        ));
+    }
+    send(&mut b, &ClientMessage::DeleteChat { message_id: answer }).await;
+    assert!(matches!(recv(&mut b, 2000).await, Some(ServerMessage::Error { .. })));
+}
+
+#[tokio::test]
 async fn passwort_schutz() {
     let port = free_port();
     let _server = spawn_server(port, "password = \"geheim\"\n");
@@ -559,7 +630,7 @@ async fn server_restart_keeps_state() {
             Some(ServerMessage::ChannelCreated { channel }) => channel.id,
             other => panic!("ChannelCreated erwartet, bekam: {other:?}"),
         };
-        send(&mut a, &ClientMessage::Chat { channel_id, text: "ueberlebt das?".into(), image: None }).await;
+        send(&mut a, &ClientMessage::Chat { channel_id, text: "ueberlebt das?".into(), image: None, reply_to: None }).await;
         assert!(matches!(recv(&mut a, 2000).await, Some(ServerMessage::Chat { .. })));
         send(&mut a, &ClientMessage::Disconnect).await;
     } // ServerGuard drop -> Prozess beendet
