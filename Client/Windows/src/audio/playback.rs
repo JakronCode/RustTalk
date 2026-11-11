@@ -10,6 +10,8 @@ use rusttalk_shared::audio_packet::{FRAME_SAMPLES, SAMPLE_RATE};
 
 use super::jitter::USER_TIMEOUT;
 use super::sfx::{self, SfxQueue};
+use ringbuf::traits::Producer;
+use ringbuf::HeapProd;
 use super::{AudioControl, LocalMuteSet, SharedMixer, UserVolumeMap};
 use std::collections::VecDeque;
 
@@ -21,7 +23,7 @@ pub fn output_device_names() -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn pick_output_device(name: Option<&str>) -> Result<cpal::Device> {
+pub(crate) fn pick_output_device(name: Option<&str>) -> Result<cpal::Device> {
     let host = cpal::default_host();
     if let Some(want) = name {
         if let Ok(mut devices) = host.output_devices() {
@@ -101,6 +103,8 @@ pub fn build_output_stream(
     local_muted: LocalMuteSet,
     user_volumes: UserVolumeMap,
     sfx: SfxQueue,
+    render_ref: HeapProd<f32>,
+    render_tap: super::screen_audio::RenderTap,
 ) -> Result<cpal::Stream> {
     let device = pick_output_device(device_name)?;
     let supported = pick_output_config(&device)?;
@@ -114,12 +118,12 @@ pub fn build_output_stream(
     );
     let err_fn = |e| tracing::warn!("Output-Stream-Fehler: {e}");
     let stream = match supported.sample_format() {
-        cpal::SampleFormat::F32 => build_out::<f32>(&device, &config, |s| s, mixer, control, local_muted, user_volumes, sfx, err_fn)?,
+        cpal::SampleFormat::F32 => build_out::<f32>(&device, &config, |s| s, mixer, control, local_muted, user_volumes, sfx, render_ref, render_tap.clone(), err_fn)?,
         cpal::SampleFormat::I16 => {
-            build_out::<i16>(&device, &config, |s| (s * 32767.0) as i16, mixer, control, local_muted, user_volumes, sfx, err_fn)?
+            build_out::<i16>(&device, &config, |s| (s * 32767.0) as i16, mixer, control, local_muted, user_volumes, sfx, render_ref, render_tap.clone(), err_fn)?
         }
         cpal::SampleFormat::U16 => {
-            build_out::<u16>(&device, &config, |s| (s * 32767.0 + 32768.0) as u16, mixer, control, local_muted, user_volumes, sfx, err_fn)?
+            build_out::<u16>(&device, &config, |s| (s * 32767.0 + 32768.0) as u16, mixer, control, local_muted, user_volumes, sfx, render_ref, render_tap.clone(), err_fn)?
         }
         other => return Err(anyhow!("Unsupported sample format: {other:?}")),
     };
@@ -135,6 +139,8 @@ fn build_out<T: cpal::SizedSample + Send + 'static>(
     local_muted: LocalMuteSet,
     user_volumes: UserVolumeMap,
     sfx: SfxQueue,
+    mut render_ref: HeapProd<f32>,
+    render_tap: super::screen_audio::RenderTap,
     err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
 ) -> Result<cpal::Stream> {
     let channels = config.channels as usize;
@@ -161,13 +167,14 @@ fn build_out<T: cpal::SizedSample + Send + 'static>(
                     let local = local_muted.lock().unwrap();
                     let volumes = user_volumes.lock().unwrap();
                     for (id, user) in map.iter_mut() {
-                        if local.contains(id) {
+                        let speaker = super::mixer_speaker(*id);
+                        if local.contains(&speaker) {
                             continue; // lokal stummgeschaltet
                         }
                         tmp.fill(0.0);
                         let n = user.fill(&mut tmp);
                         // Per-user volume (local only, 1.0 = unchanged).
-                        let gain = volumes.get(id).copied().unwrap_or(1.0);
+                        let gain = volumes.get(&speaker).copied().unwrap_or(1.0);
                         for (m, t) in chunk[..n].iter_mut().zip(tmp[..n].iter()) {
                             *m += *t * gain;
                         }
@@ -180,6 +187,15 @@ fn build_out<T: cpal::SizedSample + Send + 'static>(
                 let vol = control.output_volume();
                 for s in &mut chunk {
                     *s = super::dsp::soft_limit(*s * vol);
+                }
+                // What we play is the echo reference for the microphone (AEC).
+                // Full ring (encoder not running) -> drop, never block.
+                let _ = render_ref.push_slice(&chunk);
+                // Second copy while sharing computer audio (try_lock: never wait here).
+                if let Ok(mut tap) = render_tap.try_lock() {
+                    if let Some(p) = tap.as_mut() {
+                        let _ = p.push_slice(&chunk);
+                    }
                 }
                 fifo.extend(chunk);
             }

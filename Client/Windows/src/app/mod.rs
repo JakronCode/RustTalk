@@ -311,6 +311,10 @@ pub struct RustTalkApp {
     /// Kamera (Vorschau oder live, siehe `VideoCapture::is_sending`).
     cam: Option<VideoCapture>,
     screen: Option<VideoCapture>,
+    /// Computer audio of the screen share (with "Share audio").
+    screen_audio: Option<crate::audio::screen_audio::ScreenAudio>,
+    /// Starting it failed: don't retry until the share stops.
+    screen_audio_failed: bool,
     cam_dialog: Option<CamDialog>,
     screen_picker: Option<ScreenPicker>,
     /// Letzter eigener Frame (auch im reinen Vorschau-Modus).
@@ -430,6 +434,8 @@ impl RustTalkApp {
             ctx: cc.egui_ctx.clone(),
             cam: None,
             screen: None,
+            screen_audio: None,
+            screen_audio_failed: false,
             cam_dialog: None,
             screen_picker: None,
             local_preview: Arc::new(Mutex::new(None)),
@@ -492,6 +498,7 @@ impl RustTalkApp {
         self.control.self_deafened.store(false, Ordering::Relaxed);
         self.control.noise_suppression.store(self.config.noise_suppression, Ordering::Relaxed);
         self.control.auto_gain.store(self.config.auto_gain, Ordering::Relaxed);
+        self.control.echo_cancellation.store(self.config.echo_cancellation, Ordering::Relaxed);
         // Neuer Zaehler pro Verbindung (alte Queue ist mit der Verbindung weg).
         self.upload_backlog = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         self.cmd_tx = Some(net::connect(
@@ -538,6 +545,7 @@ impl RustTalkApp {
         // Video stoppen + Frames rauswerfen.
         self.cam = None;
         self.screen = None;
+        self.screen_audio = None;
         self.cam_dialog = None;
         self.screen_picker = None;
         *self.local_preview.lock().unwrap() = None;
@@ -1189,6 +1197,25 @@ impl RustTalkApp {
             if self.screen.is_some() {
                 self.screen = None;
                 self.after_source_stopped(VideoKind::Screen, &cmd_tx);
+            }
+        }
+
+        // Share audio follows the screen share (and the setting).
+        let want_audio = self.screen.is_some() && self.config.share_screen_audio && self.audio.is_some();
+        if !want_audio {
+            self.screen_audio = None;
+            if self.screen.is_none() {
+                self.screen_audio_failed = false;
+            }
+        } else if self.screen_audio.is_none() && !self.screen_audio_failed {
+            if let Some(engine) = &self.audio {
+                match engine.start_screen_audio(self.config.output_device.as_deref()) {
+                    Ok(sa) => self.screen_audio = Some(sa),
+                    Err(e) => {
+                        self.screen_audio_failed = true;
+                        self.set_error(format!("Computer audio not shared: {e:#}"));
+                    }
+                }
             }
         }
 

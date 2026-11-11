@@ -6,12 +6,14 @@
 //! - UDP-Empfangsthread   -> Jitter-Buffer (SharedMixer)
 //! - cpal-Output-Callback -> Mixer -> Lautsprecher
 
+pub mod aec;
 pub mod capture;
 pub mod dsp;
 pub mod encoder;
 pub mod jitter;
 pub mod playback;
 pub mod resample;
+pub mod screen_audio;
 pub mod sfx;
 
 use std::collections::{HashMap, HashSet};
@@ -43,6 +45,8 @@ pub struct AudioControl {
     pub noise_suppression: AtomicBool,
     /// Automatische Lautstaerke (AGC + Limiter) auf der Sendeseite.
     pub auto_gain: AtomicBool,
+    /// Echo cancellation (AEC3) on the microphone.
+    pub echo_cancellation: AtomicBool,
     /// Playback volume (f32 bits, 1.0 = 100 %).
     output_volume_bits: AtomicU32,
     /// Manual microphone gain (f32 bits, 1.0 = 100 %), applied in the capture callback.
@@ -63,6 +67,7 @@ impl AudioControl {
             self_deafened: AtomicBool::new(false),
             noise_suppression: AtomicBool::new(true),
             auto_gain: AtomicBool::new(true),
+            echo_cancellation: AtomicBool::new(true),
             output_volume_bits: AtomicU32::new(1.0f32.to_bits()),
             input_volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             mic_level: Arc::new(AtomicU32::new(0)),
@@ -107,6 +112,16 @@ impl AudioControl {
 /// speaker_id -> Zeitpunkt des letzten Audiopakets (fuer den Talking-Indikator).
 pub type TalkingMap = Arc<Mutex<HashMap<u64, Instant>>>;
 
+/// Mixer key: one decoder per speaker and stream (voice / screen audio).
+pub fn mixer_key(speaker: u64, screen: bool) -> u64 {
+    (speaker << 1) | u64::from(screen)
+}
+
+/// Speaker of a mixer key.
+pub fn mixer_speaker(key: u64) -> u64 {
+    key >> 1
+}
+
 /// Mixer-State, geteilt zwischen UDP-Empfangsthread und Wiedergabe-Callback.
 pub type SharedMixer = Arc<Mutex<HashMap<u64, UserAudio>>>;
 
@@ -125,6 +140,10 @@ pub struct AudioEngine {
     _input: cpal::Stream,
     _output: cpal::Stream,
     stop: Arc<AtomicBool>,
+    /// For "share audio": own UDP socket clone + token, playback tap.
+    udp: UdpSocket,
+    token: u64,
+    render_tap: screen_audio::RenderTap,
 }
 
 impl AudioEngine {
@@ -144,6 +163,8 @@ impl AudioEngine {
         output_device: Option<&str>,
     ) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
+        let share_udp = udp.try_clone().context("UDP-Socket klonen")?;
+        let render_tap: screen_audio::RenderTap = Arc::new(Mutex::new(None));
         let mixer: SharedMixer = Arc::new(Mutex::new(HashMap::new()));
 
         // UDP-Empfangsthread.
@@ -162,6 +183,8 @@ impl AudioEngine {
         // Capture: Mikro -> Ring-Puffer (mit Pegel-Sink fuer die UI).
         let rb = HeapRb::<f32>::new((SAMPLE_RATE * 2) as usize); // 2 s Puffer
         let (prod, cons) = rb.split();
+        // Render reference for the echo canceller: playback -> encoder thread (1 s).
+        let (render_prod, render_cons) = HeapRb::<f32>::new(SAMPLE_RATE as usize).split();
         let input = capture::build_input_stream(input_device, prod, Some(control.mic_level_sink()), Some(control.input_volume_handle()))
             .context("Could not start audio input")?;
 
@@ -171,15 +194,21 @@ impl AudioEngine {
             .spawn({
                 let stop = stop.clone();
                 let control = control.clone();
-                move || encoder::run(cons, udp, token, control, stop)
+                move || encoder::run(cons, udp, token, control, stop, render_cons)
             })
             .context("Encoder-Thread starten")?;
 
         // Wiedergabe: Mixer -> Lautsprecher.
-        let output = playback::build_output_stream(output_device, mixer, control, local_muted, user_volumes, sfx)
+        let output = playback::build_output_stream(output_device, mixer, control, local_muted, user_volumes, sfx, render_prod, render_tap.clone())
             .context("Audio-Ausgabe konnte nicht gestartet werden")?;
 
-        Ok(Self { _input: input, _output: output, stop })
+        Ok(Self { _input: input, _output: output, stop, udp: share_udp, token, render_tap })
+    }
+
+    /// Starts sending the computer audio (screen share with sound).
+    pub fn start_screen_audio(&self, output_device: Option<&str>) -> Result<screen_audio::ScreenAudio> {
+        let udp = self.udp.try_clone().context("UDP-Socket klonen")?;
+        screen_audio::ScreenAudio::start(udp, self.token, output_device, self.render_tap.clone())
     }
 
     pub fn stop(&self) {
@@ -204,12 +233,14 @@ fn recv_loop(udp: UdpSocket, mixer: SharedMixer, talking: TalkingMap, stop: Arc<
                     continue; // Registrierungs-Ping o. ae.
                 }
                 let speaker = header.token; // Relay: Token-Feld = client_id des Sprechers
+                let screen = header.flags & rusttalk_shared::audio_packet::FLAG_SCREEN_AUDIO != 0;
+                let key = mixer_key(speaker, screen);
                 {
                     let mut map = mixer.lock().unwrap();
-                    if !map.contains_key(&speaker) {
+                    if !map.contains_key(&key) {
                         match UserAudio::new() {
                             Some(u) => {
-                                map.insert(speaker, u);
+                                map.insert(key, u);
                             }
                             None => {
                                 tracing::error!("Opus-Decoder fuer Sprecher {speaker} nicht erstellbar");
@@ -217,12 +248,14 @@ fn recv_loop(udp: UdpSocket, mixer: SharedMixer, talking: TalkingMap, stop: Arc<
                             }
                         }
                     }
-                    if let Some(user) = map.get_mut(&speaker) {
+                    if let Some(user) = map.get_mut(&key) {
                         user.jitter.push(header.sequence, payload);
                         user.last_seen = Instant::now();
                     }
                 }
-                talking.lock().unwrap().insert(speaker, Instant::now());
+                if !screen {
+                    talking.lock().unwrap().insert(speaker, Instant::now());
+                }
             }
             Err(e)
                 if e.kind() == std::io::ErrorKind::WouldBlock

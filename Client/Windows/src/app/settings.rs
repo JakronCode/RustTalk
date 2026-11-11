@@ -343,8 +343,10 @@ impl RustTalkApp {
                 }
             });
             ui.separator();
-            setting_row(ui, "Echo cancellation", Some("Lets you use speakers instead of headphones"), true, |ui| {
-                toggle(ui, &mut false.clone());
+            setting_row(ui, "Echo cancellation", Some("Lets you use speakers instead of headphones (others don't hear themselves)"), false, |ui| {
+                if toggle(ui, &mut self.config.echo_cancellation).changed() {
+                    self.control.echo_cancellation.store(self.config.echo_cancellation, Ordering::Relaxed);
+                }
             });
         });
 
@@ -405,8 +407,8 @@ impl RustTalkApp {
             });
             ui.label(egui::RichText::new("Applies the next time you start your camera or screen share.").size(12.0).color(theme::MUTED));
             ui.separator();
-            setting_row(ui, "Share audio with screen", Some("Send system sound while sharing"), true, |ui| {
-                toggle(ui, &mut false.clone());
+            setting_row(ui, "Share audio with screen", Some("Send the computer sound while sharing (your RustTalk voices are filtered out)"), false, |ui| {
+                toggle(ui, &mut self.config.share_screen_audio);
             });
             ui.separator();
             setting_row(ui, "Hardware encoding", Some("H.264 via GPU instead of MJPEG"), true, |ui| {

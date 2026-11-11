@@ -36,6 +36,9 @@ pub const MAX_PACKET_LEN: usize = 1500;
 /// Opus-Samplerate in Hz (fest verdrahtet im ganzen System).
 pub const SAMPLE_RATE: u32 = 48_000;
 
+/// Header flag: this packet is computer audio of a screen share (not a voice).
+pub const FLAG_SCREEN_AUDIO: u8 = 0x01;
+
 /// Samples pro Opus-Frame (20 ms @ 48 kHz).
 pub const FRAME_SAMPLES: usize = 960;
 

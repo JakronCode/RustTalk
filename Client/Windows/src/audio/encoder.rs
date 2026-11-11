@@ -7,7 +7,7 @@ use std::time::Duration;
 use audiopus::coder::Encoder;
 use audiopus::{Application, Bitrate, Channels, SampleRate, Signal};
 use nnnoiseless::DenoiseState;
-use ringbuf::traits::Consumer;
+use ringbuf::traits::{Consumer, Observer};
 use ringbuf::HeapCons;
 use rusttalk_shared::audio_packet::{encode_to_vec, AudioHeader, FRAME_SAMPLES, SAMPLE_RATE};
 
@@ -76,6 +76,7 @@ pub fn run(
     token: u64,
     control: Arc<AudioControl>,
     stop: Arc<AtomicBool>,
+    mut render_ref: HeapCons<f32>,
 ) {
     let encoder = match Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip) {
         Ok(mut e) => {
@@ -107,6 +108,8 @@ pub fn run(
     let mut ns_frame = [0f32; FRAME_SAMPLES];
     let mut out = [0f32; FRAME_SAMPLES];
     let mut dc = DcBlocker::default();
+    // Echo canceller (lazy: created when switched on).
+    let mut aec: Option<super::aec::EchoCanceller> = None;
     let mut agc = Agc::default();
 
     while !stop.load(Ordering::Relaxed) {
@@ -127,6 +130,22 @@ pub fn run(
 
         // 0) Gleichanteil entfernen (billige Mikros haben oft DC-Offset).
         dc.process(&mut frame);
+
+        // 0b) Echo cancellation: remove what the speakers played (2 x 10 ms).
+        if control.echo_cancellation.load(Ordering::Relaxed) {
+            if aec.is_none() {
+                aec = super::aec::EchoCanceller::new();
+            }
+            if let Some(a) = aec.as_mut() {
+                for half in frame.chunks_mut(super::aec::AEC_FRAME) {
+                    a.process_with_ring(half, &mut render_ref);
+                }
+            }
+        } else {
+            aec = None;
+            let n = render_ref.occupied_len();
+            render_ref.skip(n); // keep the reference fresh for when it is switched on
+        }
 
         // 1) KI-Rauschunterdrueckung (RNNoise). Laeuft immer, wenn aktiviert,
         //    damit das Modell einen lueckenlosen Stream sieht.

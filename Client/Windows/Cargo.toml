@@ -32,6 +32,8 @@ mslnk = "0.1"
 sha2 = "0.10"
 # Identity secret
 getrandom = "0.3"
+# Echo cancellation (pure Rust port of WebRTC AEC3)
+aec3 = "0.4"
 audiopus = "0.2"
 ringbuf = "0.4"
 tokio = { version = "1", features = ["net", "time", "io-util", "sync", "rt", "macros"] }

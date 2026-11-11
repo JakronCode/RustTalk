@@ -31,6 +31,12 @@ pub struct ClientConfig {
     /// KI-Rauschunterdrueckung (RNNoise) vor dem Opus-Encoder.
     #[serde(default = "default_true")]
     pub noise_suppression: bool,
+    /// Send the computer audio while sharing the screen.
+    #[serde(default = "default_true")]
+    pub share_screen_audio: bool,
+    /// Echo cancellation: lets you use speakers instead of headphones.
+    #[serde(default = "default_true")]
+    pub echo_cancellation: bool,
     /// Automatische Lautstaerke fuer das eigene Mikro (AGC + Limiter).
     #[serde(default = "default_true")]
     pub auto_gain: bool,
@@ -127,6 +133,8 @@ impl Default for ClientConfig {
             vad_threshold: default_vad_threshold(),
             noise_suppression: true,
             auto_gain: true,
+            echo_cancellation: true,
+            share_screen_audio: true,
             bookmarks: Vec::new(),
             input_device: None,
             output_device: None,
@@ -221,6 +229,8 @@ mod tests {
             vad_threshold: 0.05,
             noise_suppression: false,
             auto_gain: false,
+            echo_cancellation: false,
+            share_screen_audio: false,
             bookmarks: vec![
                 ServerBookmark { name: "Home".into(), address: "10.69.40.101:7331".into(), password: None },
                 ServerBookmark { name: "LAN".into(), address: "192.168.1.5".into(), password: Some("pw".into()) },
@@ -255,6 +265,7 @@ mod tests {
         assert_eq!(back.bookmarks[1].password.as_deref(), Some("pw"));
         assert!(!back.noise_suppression);
         assert!(!back.auto_gain);
+        assert!(!back.echo_cancellation);
         assert_eq!(back.input_volume, 0.5);
         assert!(back.global_ptt);
         assert!(!back.animate_gifs);
