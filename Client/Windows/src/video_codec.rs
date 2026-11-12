@@ -259,6 +259,7 @@ mod tests {
     /// scrolled 6 px per frame like reading a page. Prints PSNR (higher =
     /// closer to the original), data rate, encode time and dropped frames.
     /// cargo test -p rusttalk-client quality_report -- --ignored --nocapture
+    #[cfg(windows)]
     #[test]
     #[ignore]
     fn quality_report() {
@@ -280,6 +281,7 @@ mod tests {
     }
 
     /// Encodes + decodes `frames`, returns one line of numbers.
+    #[cfg(windows)]
     fn report_line(name: &str, frames: &[image::RgbImage], bitrate: u32, screen: bool, t: Tuning) -> String {
         let psnr = |a: &image::RgbImage, b: &egui::ColorImage| {
             let mut se = 0f64;
