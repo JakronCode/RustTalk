@@ -139,7 +139,8 @@ impl RustTalkApp {
         // Composer FIRST as bottom panel (otherwise the scroll area pushes
         // it below the window edge).
         egui::TopBottomPanel::bottom(format!("composer_{ch_id}"))
-            .frame(egui::Frame::default().fill(theme::BG).inner_margin(egui::Margin { left: 16, right: 16, top: 4, bottom: 16 }))
+            .frame(egui::Frame::default().fill(theme::BG).inner_margin(egui::Margin { left: 16, right: 16, top: 8, bottom: 8 }))
+            .show_separator_line(false)
             .show_inside(ui, |ui| self.composer(ui, ch_id, cmd_tx));
         let name = self.channel_name(ch_id);
         self.message_list(ui, ch_id, |ui| {
@@ -262,7 +263,8 @@ impl RustTalkApp {
 
         // Text feed below the stage.
         egui::TopBottomPanel::bottom(format!("voice_composer_{ch_id}"))
-            .frame(egui::Frame::default().fill(theme::BG).inner_margin(egui::Margin { left: 16, right: 16, top: 4, bottom: 16 }))
+            .frame(egui::Frame::default().fill(theme::BG).inner_margin(egui::Margin { left: 16, right: 16, top: 8, bottom: 8 }))
+            .show_separator_line(false)
             .show_inside(ui, |ui| self.composer(ui, ch_id, cmd_tx));
         self.message_list(ui, ch_id, |ui| {
             ui.add_space(12.0);
