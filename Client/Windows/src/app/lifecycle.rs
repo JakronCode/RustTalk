@@ -211,7 +211,7 @@ impl RustTalkApp {
         }
         self.last_toast = Some(Instant::now());
         let channel = self.channel_name(channel_id);
-        let (mut title, body) = crate::notify::message_text(from, &channel, text, has_image, self.config.notification_preview);
+        let (mut title, body) = crate::notify::message_text(from, &channel, &super::markdown::plain(text), has_image, self.config.notification_preview);
         if mentioned {
             title = format!("@ {title}");
         }

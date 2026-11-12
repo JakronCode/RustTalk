@@ -365,7 +365,7 @@ impl RustTalkApp {
                             replying: replying == Some(line.id) && line.id != 0,
                         };
                         let edit = is_edit.then_some(EditBox { text: &mut self.edit_text, focus: &mut self.focus_edit });
-                        if let Some(a) = chat_line(ui, line, &mut self.textures, &ctx, edit) {
+                        if let Some(a) = chat_line(ui, line, &mut self.textures, &ctx, edit, &mut self.markdown) {
                             action = Some(a);
                         }
                         prev = match &line.kind {
@@ -426,8 +426,12 @@ impl RustTalkApp {
                         self.pick_image();
                     }
                     let right_w = 76.0;
+                    let mut layouter = super::markdown::composer;
                     let resp = ui.add(
                         egui::TextEdit::multiline(&mut self.chat_input)
+                            .layouter(&mut layouter)
+                            .char_limit(rusttalk_shared::protocol::MAX_CHAT_LEN)
+                            .return_key(egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, egui::Key::Enter))
                             .id(composer_id(ch_id))
                             .hint_text(format!("Message {name}"))
                             .desired_rows(1)
@@ -457,10 +461,6 @@ impl RustTalkApp {
                         }
                     }
                     if enter {
-                        // Strip the newline egui already inserted.
-                        while self.chat_input.ends_with('\n') {
-                            self.chat_input.pop();
-                        }
                         resp.request_focus();
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -882,7 +882,8 @@ pub(super) struct EditBox<'a> {
 
 /// Short one-line preview of a message.
 pub(super) fn snippet(text: &str, has_image: bool) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let plain = super::markdown::plain(text);
+    let flat = plain.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut s: String = flat.chars().take(70).collect();
     if flat.chars().count() > 70 {
         s.push_str("...");
@@ -901,6 +902,7 @@ pub(super) fn chat_line(
     textures: &mut TextureCache,
     c: &LineCtx,
     edit: Option<EditBox>,
+    markdown: &mut super::markdown::Cache,
 ) -> Option<ChatAction> {
     let (from, own) = match &line.kind {
         ChatKind::System => {
@@ -974,7 +976,7 @@ pub(super) fn chat_line(
                         }
                         ui.label(egui::RichText::new(from).strong().color(name_color));
                         if !line.text.is_empty() {
-                            ui.add(egui::Label::new(egui::RichText::new(&line.text).color(theme::TEXT)).wrap());
+                            markdown.show(ui, line.id, &line.text);
                         }
                         if line.edited {
                             ui.label(egui::RichText::new("(edited)").size(11.0).color(theme::DISABLED));
@@ -983,7 +985,7 @@ pub(super) fn chat_line(
                 } else if !line.text.is_empty() {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
-                        ui.add(egui::Label::new(egui::RichText::new(&line.text).color(theme::TEXT)).wrap());
+                        markdown.show(ui, line.id, &line.text);
                         if line.edited {
                             ui.label(egui::RichText::new("(edited)").size(11.0).color(theme::DISABLED));
                         }
@@ -1210,7 +1212,7 @@ mod tests {
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let c = LineCtx { lines, me: "me", grouped: false, show_ts: true, animate: false, replying: false };
-                action = chat_line(ui, &lines[0], textures, &c, None);
+                action = chat_line(ui, &lines[0], textures, &c, None, &mut super::super::markdown::Cache::default());
             });
         });
         action

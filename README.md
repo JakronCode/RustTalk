@@ -18,6 +18,7 @@ Lightweight voice chat in Rust — a Discord-style client with a TeamSpeak-style
 - **AI noise suppression** (RNNoise via `nnnoiseless`) — can be turned off
 - **Channel types:** Lobby (exactly one, join log, no talking/video), Category (grouping), Voice (voice + media chat), Text (chat); order via **drag & drop** (stored on the server)
 - **Discord-style UI:** server menu, voice panel, user panel, settings window with categories, channel settings (partly WIP)
+- **Chat markdown:** headers, emphasis, inline code, quotes, lists, and fenced code blocks with offline syntax highlighting and copy buttons. Shift+Enter inserts a newline; Enter sends. HTML, markdown images, and links stay inert text.
 - **Text chat** with history, images (PNG/JPEG/GIF, **animated**), unread markers, **replies**, **edit/delete** own messages, **@mentions** (highlight, sound, autocomplete), **search** per channel
 - **GIF picker (GIPHY), Discord style:** trending on open, search while typing, two-column grid, click = send. One GIPHY key per **server** (Server Settings > Integrations) – members enter nothing; the server searches and caches, the key never leaves it
 - **Name announcements:** "Alex joined" after the join/leave sound - Windows voices or 10 natural offline voices (Supertonic 3 via ONNX Runtime, English/German). The installed app downloads the natural voices once in the background (~410 MB from Hugging Face, SHA-256 checked) and switches to one in the Windows language; can be turned off
