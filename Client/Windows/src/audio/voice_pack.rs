@@ -1,6 +1,9 @@
 //! The downloadable "natural voices" pack: the Supertonic 3 speech model
 //! (about 400 MB, from Hugging Face, pinned to one revision and checked by
-//! SHA-256). It is only downloaded when the user asks for it in the settings.
+//! SHA-256). The installed app downloads it on its own (can be turned off).
+//!
+//! The model is by Supertone Inc. under the BigScience OpenRAIL-M license; its
+//! LICENSE (with the use restrictions) is downloaded into the pack folder too.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -44,6 +47,8 @@ pub fn label(voice: &str) -> String {
 /// Model revision on Hugging Face (part of the clip cache key too).
 pub const REVISION: &str = "3cadd1ee6394adea1bd021217a0e650ede09a323";
 const BASE_URL: &str = "https://huggingface.co/Supertone/supertonic-3/resolve";
+/// The model's license (OpenRAIL-M, use restrictions in Attachment A).
+pub const LICENSE_URL: &str = "https://huggingface.co/Supertone/supertonic-3/blob/main/LICENSE";
 
 struct PackFile {
     /// Path in the model repository.
@@ -63,7 +68,7 @@ const fn file(remote: &'static str, size: u64, sha256: &'static str) -> PackFile
     PackFile { remote, size, sha256 }
 }
 
-const FILES: [PackFile; 16] = [
+const FILES: [PackFile; 17] = [
     file("onnx/tts.json", 8_253, "42078d3aef1cd43ab43021f3c54f47d2d75ceb4e75f627f118890128b06a0d09"),
     file("onnx/unicode_indexer.json", 277_676, "9bf7346e43883a81f8645c81224f786d43c5b57f3641f6e7671a7d6c493cb24f"),
     file("onnx/duration_predictor.onnx", 3_700_147, "c3eb91414d5ff8a7a239b7fe9e34e7e2bf8a8140d8375ffb14718b1c639325db"),
@@ -80,6 +85,7 @@ const FILES: [PackFile; 16] = [
     file("voice_styles/M3.json", 290_198, "ea1ac35ccb91b0d7ecad533a2fbd0eec10c91513d8951e3b25fbba99954e159b"),
     file("voice_styles/M4.json", 291_522, "ca8eefad4fcd989c9379032ff3e50738adc547eeb5e221b82593a6d7b3bac303"),
     file("voice_styles/M5.json", 291_469, "dd22b92740314321f8ae11c5e87f8dd60d060f15dd3a632b5adf77f471f77af2"),
+    file("LICENSE", 15_007, "0d944a9110fed9a9602d60e0423a272903e7bd21ab060490774efc77c2275e9f"),
 ];
 
 /// Download size of the whole pack in bytes.
@@ -293,6 +299,7 @@ mod tests {
             assert!(FILES.iter().any(|f| f.name() == format!("{id}.json")), "voice {id} is in the pack");
         }
         assert!((400_000_000..420_000_000).contains(&total_size()), "about 400 MB");
+        assert!(FILES.iter().any(|f| f.name() == "LICENSE"), "the model license comes with the pack");
     }
 
     #[test]

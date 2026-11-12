@@ -569,6 +569,11 @@ impl RustTalkApp {
                 }
                 PackState::Installed => remove = ui.button("Remove").clicked(),
             });
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("Supertonic 3 model by Supertone Inc., used under the").small().weak());
+                ui.hyperlink_to(egui::RichText::new("OpenRAIL-M license").small(), voice_pack::LICENSE_URL);
+                ui.label(egui::RichText::new("- no impersonating people, no harassment, nothing unlawful.").small().weak());
+            });
             ui.separator();
             setting_row(ui, "Download natural voices automatically", Some("After installing, RustTalk fetches them once in the background and switches to a natural voice"), false, |ui| {
                 if toggle(ui, &mut self.config.auto_download_voices).changed() {

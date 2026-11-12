@@ -158,8 +158,14 @@ bash Server/Test_Scripts/e2e_local.sh
     └── testdata/      #   speech sample for the FEC test
 ```
 
+## Third-party licenses
+
+- **Natural voices:** the Supertonic 3 model is by Supertone Inc. and licensed under the [BigScience OpenRAIL-M license](https://huggingface.co/Supertone/supertonic-3/blob/main/LICENSE). RustTalk does not ship it: the app downloads it straight from Hugging Face (pinned revision) and puts the `LICENSE` next to it in `%APPDATA%\RustTalk\voices\supertonic-3`. Whoever uses the voices agrees to the license's use restrictions (Attachment A) - among others no unlawful use, no impersonating people without consent, no harassment or defamation, no harming minors. RustTalk only uses them to read out user names.
+- **ONNX Runtime** (MIT, Microsoft) is linked statically via the `ort` crate (MIT/Apache-2.0).
+
 ## Known limitations
 
 - The server certificate is self-signed: compare the fingerprint in the server log (`TLS-Fingerprint: ...`) with Settings > Advanced on first connect if you want to rule out a man in the middle
 - GIFs need one free GIPHY API key per server (developers.giphy.com), entered under Server Settings > Integrations
 - Video runs over the TCP control connection (H.264): fine in a LAN, on weak Wi-Fi pick "Balanced"
+- Natural voices use `ort` 2.0 release candidate `=2.0.0-rc.15` (no stable 2.0 exists yet; pinned exactly so builds don't change on their own). Switch to 2.0.0 once it is out

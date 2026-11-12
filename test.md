@@ -2,6 +2,15 @@
 
 > Pflichtdokumentation aller Testläufe. Neueste oben.
 
+## 2026-11-12 (25) – Release-Vorbereitung v0.6.0: Lizenzen
+
+**Modell-Lizenz:** Supertonic 3 (Supertone Inc.) steht unter BigScience OpenRAIL-M: Nutzung frei, auch kommerziell, aber mit Nutzungsauflagen (Attachment A), die an Nutzer weitergegeben werden müssen. RustTalk liefert das Modell nicht mit (Download direkt von Hugging Face), lädt aber jetzt die `LICENSE` mit ins Stimmenpaket (SHA-256), zeigt in den Einstellungen den Hinweis mit Link und nennt die Auflagen im README (Abschnitt „Third-party licenses“). Unsere Nutzung (Namen vorlesen) ist unproblematisch.
+**ort:** `=2.0.0-rc.15` ist die neueste Version auf crates.io (keine stabile 2.0). Bleibt exakt gepinnt, im README als bekannte Einschränkung notiert. ONNX Runtime (MIT) ist statisch gelinkt, keine DLL.
+
+**Tests:** Workspace ✅ (Client 92, Server 50, Integration 16, shared 16), `download_real_pack` gegen das vorhandene Paket: nur LICENSE nachgeladen (15 007 B) ✅.
+
+---
+
 ## 2026-11-12 (24) – Natürliche Stimmen automatisch laden
 
 **Wunsch:** Die natürlichen Stimmen sollen beim Nutzer ohne Klick ankommen (Entscheidung: Auto-Download statt im Installer, Installer/Updates bleiben ~13 MB).
