@@ -14,3 +14,17 @@ codegen-units = 1
 # deterministisch (4551), die debug-kompilierten Varianten laufen dagegen.
 [profile.release.build-override]
 opt-level = 0
+
+# OpenH264 like in release: with -g (debug info) NASM 3.x produces objects
+# whose SSE functions are missing at link time; optimized it also keeps
+# video usable in debug builds.
+[profile.dev.package.openh264-sys2]
+debug = false
+opt-level = 3
+
+# Pixel-heavy video helpers stay fast in debug builds too.
+[profile.dev.package.fast_image_resize]
+opt-level = 3
+
+[profile.dev.package.xcap]
+opt-level = 3

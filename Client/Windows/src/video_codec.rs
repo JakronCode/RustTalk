@@ -4,19 +4,21 @@
 //! `[frame number u32 LE][H.264 Annex-B access unit]`. The frame number lets
 //! a viewer notice frames the server dropped (slow connection): it then asks
 //! the sender for a keyframe instead of showing broken pictures until the next
-//! periodic one (every `KEYFRAME_FRAMES`).
+//! periodic one (about every 4 s).
+//!
+//! Speed: OpenH264 is built with its SIMD assembly (needs `nasm` at build
+//! time, see README) and RGB is turned into YUV with the SIMD path - together
+//! ~15 ms instead of ~80 ms per 1080p frame.
 
 use anyhow::{anyhow, Context, Result};
 use eframe::egui;
 use openh264::decoder::Decoder;
-use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, UsageType};
-use openh264::formats::{RgbSliceU8, YUVBuffer, YUVSource};
+use openh264::encoder::{BitRate, Complexity, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, QpRange, RateControlMode, UsageType};
+use openh264::formats::{RgbSliceU8, RgbaSliceU8, YUVBuffer, YUVSource};
 use openh264::OpenH264API;
 
 /// Frames per second we send.
-pub const FPS: f32 = 25.0;
-/// A full picture at least every 4 s (late viewers, lost frames).
-pub const KEYFRAME_FRAMES: u32 = 100;
+pub const FPS: f32 = 30.0;
 /// Bytes in front of the H.264 data.
 pub const FRAME_HEADER: usize = 4;
 
@@ -32,11 +34,87 @@ pub fn fit_even(img: image::DynamicImage, max_w: u32, max_h: u32) -> image::RgbI
     }
 }
 
+/// Encoder settings beyond bitrate and content type.
+#[derive(Debug, Clone, Copy)]
+pub struct Tuning {
+    pub fps: f32,
+    pub rate_control: RateControlMode,
+    /// Drop frames when over budget (stutters) - or keep every frame.
+    pub skip_frames: bool,
+    pub complexity: Complexity,
+    /// Upper bound of the quantizer: lower = never blurrier than this.
+    pub max_qp: u8,
+    /// Encoder threads (0 = OpenH264 decides).
+    pub threads: u16,
+}
+
+impl Tuning {
+    /// OpenH264 defaults (what v0.9.0 and earlier sent, at 25 fps).
+    pub const DEFAULT: Tuning = Tuning { fps: 25.0, rate_control: RateControlMode::Quality, skip_frames: true, complexity: Complexity::Medium, max_qp: 51, threads: 0 };
+
+    /// What we send: every frame (no skipping = no stutter), steady bit
+    /// rate, and never blurrier than QP 36 (screen text) / 40 (camera).
+    pub const fn stream(screen: bool) -> Tuning {
+        Tuning {
+            fps: FPS,
+            rate_control: RateControlMode::Bitrate,
+            skip_frames: false,
+            complexity: Complexity::Medium,
+            max_qp: if screen { 36 } else { 40 },
+            threads: 0,
+        }
+    }
+}
+
+/// Like [`fit_even`], but fast (SIMD, Catmull-Rom) and without changing the
+/// pixel format: RGB stays RGB, RGBA stays RGBA (no extra conversion pass).
+pub fn fit_even_fast(img: image::DynamicImage, max_w: u32, max_h: u32) -> image::DynamicImage {
+    use fast_image_resize as fr;
+    use image::DynamicImage::{ImageRgb8, ImageRgba8};
+    let img = match img {
+        ImageRgb8(_) | ImageRgba8(_) => img,
+        other => ImageRgba8(other.to_rgba8()),
+    };
+    let (w, h) = (img.width(), img.height());
+    let scale = (max_w as f64 / w as f64).min(max_h as f64 / h as f64).min(1.0);
+    let tw = (((w as f64 * scale).round() as u32) & !1).max(2);
+    let th = (((h as f64 * scale).round() as u32) & !1).max(2);
+    if (tw, th) == (w, h) {
+        return img;
+    }
+    if scale >= 1.0 {
+        // Only an odd edge: crop one pixel instead of scaling.
+        return match img {
+            ImageRgb8(i) => ImageRgb8(image::imageops::crop_imm(&i, 0, 0, tw, th).to_image()),
+            ImageRgba8(i) => ImageRgba8(image::imageops::crop_imm(&i, 0, 0, tw, th).to_image()),
+            _ => unreachable!(),
+        };
+    }
+    let (pixel, raw) = match &img {
+        ImageRgb8(i) => (fr::PixelType::U8x3, i.as_raw().as_slice()),
+        ImageRgba8(i) => (fr::PixelType::U8x4, i.as_raw().as_slice()),
+        _ => unreachable!(),
+    };
+    let resized = fr::images::ImageRef::new(w, h, raw, pixel).ok().and_then(|src| {
+        let mut dst = fr::images::Image::new(tw, th, pixel);
+        let options = fr::ResizeOptions::new().resize_alg(fr::ResizeAlg::Convolution(fr::FilterType::CatmullRom)).use_alpha(false);
+        fr::Resizer::new().resize(&src, &mut dst, &options).ok()?;
+        Some(dst.into_vec())
+    });
+    match (resized, pixel) {
+        (Some(buf), fr::PixelType::U8x3) => image::RgbImage::from_raw(tw, th, buf).map(ImageRgb8),
+        (Some(buf), _) => image::RgbaImage::from_raw(tw, th, buf).map(ImageRgba8),
+        (None, _) => None,
+    }
+    .unwrap_or_else(|| image::DynamicImage::ImageRgb8(fit_even(img, max_w, max_h)))
+}
+
 /// One outgoing stream. The OpenH264 encoder is (re)created per resolution
 /// (a resized window changes it).
 pub struct H264Encoder {
     bitrate: u32,
     screen: bool,
+    tuning: Tuning,
     enc: Option<(Encoder, (usize, usize))>,
     force_keyframe: bool,
     frame_no: u32,
@@ -44,7 +122,11 @@ pub struct H264Encoder {
 
 impl H264Encoder {
     pub fn new(bitrate_bps: u32, screen: bool) -> Self {
-        Self { bitrate: bitrate_bps, screen, enc: None, force_keyframe: true, frame_no: 0 }
+        Self::with_tuning(bitrate_bps, screen, Tuning::DEFAULT)
+    }
+
+    pub fn with_tuning(bitrate_bps: u32, screen: bool, tuning: Tuning) -> Self {
+        Self { bitrate: bitrate_bps, screen, tuning, enc: None, force_keyframe: true, frame_no: 0 }
     }
 
     /// The next frame becomes a full picture (a viewer asked or just joined).
@@ -54,11 +136,18 @@ impl H264Encoder {
 
     fn encoder(&mut self, dims: (usize, usize)) -> Result<&mut Encoder> {
         if self.enc.as_ref().map(|(_, d)| *d) != Some(dims) {
+            let t = self.tuning;
             let config = EncoderConfig::new()
                 .bitrate(BitRate::from_bps(self.bitrate))
-                .max_frame_rate(FrameRate::from_hz(FPS))
+                .max_frame_rate(FrameRate::from_hz(t.fps))
                 .usage_type(if self.screen { UsageType::ScreenContentRealTime } else { UsageType::CameraVideoRealTime })
-                .intra_frame_period(IntraFramePeriod::from_num_frames(KEYFRAME_FRAMES));
+                .rate_control_mode(t.rate_control)
+                .skip_frames(t.skip_frames)
+                .complexity(t.complexity)
+                .qp(QpRange::new(0, t.max_qp))
+                .num_threads(t.threads)
+                // A full picture about every 4 s, whatever the frame rate.
+                .intra_frame_period(IntraFramePeriod::from_num_frames((t.fps * 4.0) as u32));
             let enc = Encoder::with_api_config(OpenH264API::from_source(), config).context("H.264 encoder")?;
             self.enc = Some((enc, dims));
             self.force_keyframe = true; // a new encoder starts with one anyway
@@ -69,6 +158,22 @@ impl H264Encoder {
     /// Encodes one RGB picture (even size) into a wire frame.
     pub fn encode(&mut self, rgb: &image::RgbImage) -> Result<Vec<u8>> {
         let dims = (rgb.width() as usize, rgb.height() as usize);
+        self.encode_yuv(dims, YUVBuffer::from_rgb8_source(RgbSliceU8::new(rgb.as_raw(), dims)))
+    }
+
+    /// Encodes an RGB or RGBA picture (even size) - RGBA goes to YUV directly.
+    pub fn encode_image(&mut self, img: &image::DynamicImage) -> Result<Vec<u8>> {
+        match img {
+            image::DynamicImage::ImageRgb8(rgb) => self.encode(rgb),
+            image::DynamicImage::ImageRgba8(rgba) => {
+                let dims = (rgba.width() as usize, rgba.height() as usize);
+                self.encode_yuv(dims, YUVBuffer::from_rgba8_source(RgbaSliceU8::new(rgba.as_raw(), dims)))
+            }
+            other => self.encode(&other.to_rgb8()),
+        }
+    }
+
+    fn encode_yuv(&mut self, dims: (usize, usize), yuv: YUVBuffer) -> Result<Vec<u8>> {
         let keyframe = std::mem::take(&mut self.force_keyframe);
         self.frame_no = self.frame_no.wrapping_add(1);
         let frame_no = self.frame_no;
@@ -76,7 +181,6 @@ impl H264Encoder {
         if keyframe {
             enc.force_intra_frame();
         }
-        let yuv = YUVBuffer::from_rgb_source(RgbSliceU8::new(rgb.as_raw(), dims));
         let bits = enc.encode(&yuv).map_err(|e| anyhow!("H.264 encode: {e}"))?;
         let mut out = Vec::with_capacity(FRAME_HEADER + 64 * 1024);
         out.extend_from_slice(&frame_no.to_le_bytes());
@@ -149,6 +253,101 @@ mod tests {
                 image::Rgb([(x * 255 / w) as u8, (y * 255 / h) as u8, 90])
             }
         })
+    }
+
+    /// Quality report (needs a screen): one screenshot, kept in memory only,
+    /// scrolled 6 px per frame like reading a page. Prints PSNR (higher =
+    /// closer to the original), data rate, encode time and dropped frames.
+    /// cargo test -p rusttalk-client quality_report -- --ignored --nocapture
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn quality_report() {
+        let mon = xcap::Monitor::all().unwrap().into_iter().next().expect("a screen");
+        let shot = image::DynamicImage::ImageRgba8(mon.capture_image().unwrap());
+        let base = fit_even(shot, 1920, 1080);
+        let (w, h) = (base.width(), base.height());
+        let frames: Vec<image::RgbImage> = (0..75u32)
+            .map(|t| image::RgbImage::from_fn(w, h, |x, y| *base.get_pixel(x, (y + t * 6) % h)))
+            .collect();
+        println!("screen {w}x{h}, {} frames", frames.len());
+        let t0 = std::time::Instant::now();
+        for f in frames.iter().take(20) {
+            let _ = YUVBuffer::from_rgb8_source(RgbSliceU8::new(f.as_raw(), (w as usize, h as usize)));
+        }
+        println!("RGB->YUV alone: {:.1} ms/frame", t0.elapsed().as_secs_f64() * 1000.0 / 20.0);
+        println!("{}", report_line("v0.9.0 settings, 4 Mbit", &frames, 4_000_000, true, Tuning::DEFAULT));
+        println!("{}", report_line("now (stream tuning), 6 Mbit", &frames, 6_000_000, true, Tuning::stream(true)));
+    }
+
+    /// Encodes + decodes `frames`, returns one line of numbers.
+    #[cfg(windows)]
+    fn report_line(name: &str, frames: &[image::RgbImage], bitrate: u32, screen: bool, t: Tuning) -> String {
+        let psnr = |a: &image::RgbImage, b: &egui::ColorImage| {
+            let mut se = 0f64;
+            for (pa, pb) in a.pixels().zip(b.pixels.iter()) {
+                for (ca, cb) in [(pa[0], pb.r()), (pa[1], pb.g()), (pa[2], pb.b())] {
+                    let d = ca as f64 - cb as f64;
+                    se += d * d;
+                }
+            }
+            let mse = se / (a.width() * a.height() * 3) as f64;
+            10.0 * (255.0f64 * 255.0 / mse.max(1e-9)).log10()
+        };
+        let mut enc = H264Encoder::with_tuning(bitrate, screen, t);
+        let mut dec = H264Decoder::new().unwrap();
+        let (mut bytes, mut pics, mut sum, mut worst, mut skipped) = (0usize, 0, 0f64, f64::MAX, 0);
+        let mut enc_time = std::time::Duration::ZERO;
+        for (i, f) in frames.iter().enumerate() {
+            let t0 = std::time::Instant::now();
+            let wire = enc.encode(f).unwrap();
+            enc_time += t0.elapsed();
+            bytes += wire.len();
+            match dec.decode(&wire) {
+                Ok(Decoded::Picture(img)) => {
+                    let p = psnr(f, &img);
+                    pics += 1;
+                    sum += p;
+                    worst = worst.min(p);
+                }
+                _ if i > 0 => skipped += 1,
+                _ => {}
+            }
+        }
+        let secs = frames.len() as f64 / t.fps as f64;
+        format!(
+            "{name:<36} PSNR avg {:5.1} dB, worst {:5.1} | {:5.2} Mbit/s | encode {:5.1} ms/frame | skipped {skipped}",
+            sum / pics.max(1) as f64,
+            worst,
+            bytes as f64 * 8.0 / secs / 1e6,
+            enc_time.as_secs_f64() * 1000.0 / frames.len() as f64
+        )
+    }
+
+    #[test]
+    fn fast_fit_keeps_format_aspect_and_even_sizes() {
+        let rgba = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(2560, 1440, image::Rgba([10, 20, 30, 255])));
+        let out = fit_even_fast(rgba, 1920, 1080);
+        assert!(matches!(out, image::DynamicImage::ImageRgba8(_)), "RGBA stays RGBA");
+        assert_eq!((out.width(), out.height()), (1920, 1080));
+        assert_eq!(out.as_rgba8().unwrap().get_pixel(500, 500).0, [10, 20, 30, 255], "colors survive");
+        let rgb = image::DynamicImage::ImageRgb8(image::RgbImage::new(1281, 721));
+        let out = fit_even_fast(rgb, 1280, 720);
+        assert!(matches!(out, image::DynamicImage::ImageRgb8(_)));
+        assert!(out.width() % 2 == 0 && out.height() % 2 == 0 && out.width() <= 1280 && out.height() <= 720);
+        let small = fit_even_fast(image::DynamicImage::ImageRgba8(image::RgbaImage::new(641, 361)), 1920, 1080);
+        assert_eq!((small.width(), small.height()), (640, 360), "odd edge cropped, not scaled");
+        // RGBA encodes and decodes like RGB.
+        let mut enc = H264Encoder::new(1_000_000, true);
+        let mut dec = H264Decoder::new().unwrap();
+        let pic = fit_even_fast(image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(640, 360, image::Rgba([200, 40, 40, 255]))), 640, 360);
+        match dec.decode(&enc.encode_image(&pic).unwrap()).unwrap() {
+            Decoded::Picture(img) => {
+                let p = img.pixels[360 * 100 + 100];
+                assert!((p.r() as i32 - 200).abs() < 12 && (p.g() as i32 - 40).abs() < 12, "{p:?}");
+            }
+            Decoded::Nothing => panic!("keyframe expected"),
+        }
     }
 
     #[test]

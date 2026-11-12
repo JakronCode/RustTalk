@@ -26,8 +26,8 @@
 /// Magic-Bytes "RT" (RustTalk), Little-Endian.
 pub const MAGIC: u16 = 0x5254;
 
-/// Protokollversion des Audio-Headers (2 = encrypted).
-pub const VERSION: u8 = 2;
+/// Protokollversion des Audio-Headers (2 = encrypted, 3 = ping/pong control packets).
+pub const VERSION: u8 = 3;
 
 /// Länge des Headers in Bytes.
 pub const HEADER_LEN: usize = 28;
@@ -40,6 +40,54 @@ pub const SAMPLE_RATE: u32 = 48_000;
 
 /// Header flag: this packet is computer audio of a screen share (not a voice).
 pub const FLAG_SCREEN_AUDIO: u8 = 0x01;
+
+/// Header flag: sealed control payload ([`Control`]) instead of Opus.
+/// Ping: client -> server, `sequence` = ping id. Pong: server -> client,
+/// token 0, `sequence` = the ping id it answers.
+pub const FLAG_CONTROL: u8 = 0x80;
+
+/// Plaintext length of every control payload (ping is padded, so a pong is
+/// never larger than the ping that caused it).
+pub const CONTROL_LEN: usize = 9;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Control {
+    Ping,
+    /// Server counters of this session (both wrap): audio packets it accepted
+    /// from the client, and audio packets it relayed to the client.
+    Pong { audio_received: u32, audio_relayed: u32 },
+}
+
+impl Control {
+    const PING: u8 = 1;
+    const PONG: u8 = 2;
+
+    pub fn encode(&self) -> [u8; CONTROL_LEN] {
+        let mut out = [0u8; CONTROL_LEN];
+        match *self {
+            Control::Ping => out[0] = Self::PING,
+            Control::Pong { audio_received, audio_relayed } => {
+                out[0] = Self::PONG;
+                out[1..5].copy_from_slice(&audio_received.to_le_bytes());
+                out[5..9].copy_from_slice(&audio_relayed.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    /// `None` for a wrong length, unknown kind or non-zero ping padding.
+    pub fn decode(payload: &[u8]) -> Option<Self> {
+        let p: &[u8; CONTROL_LEN] = payload.try_into().ok()?;
+        match p[0] {
+            Self::PING if p[1..].iter().all(|&b| b == 0) => Some(Control::Ping),
+            Self::PONG => Some(Control::Pong {
+                audio_received: u32::from_le_bytes(p[1..5].try_into().ok()?),
+                audio_relayed: u32::from_le_bytes(p[5..9].try_into().ok()?),
+            }),
+            _ => None,
+        }
+    }
+}
 
 /// Samples pro Opus-Frame (20 ms @ 48 kHz).
 pub const FRAME_SAMPLES: usize = 960;
@@ -191,6 +239,20 @@ mod tests {
         let ping = seal_packet(&AudioHeader::new(9, 0, 0), &tx, DIR_TO_SERVER, &[]);
         let (ph, _) = decode(&ping).unwrap();
         assert_eq!(open_packet(&ph, &ping, &rx, DIR_TO_SERVER).as_deref(), Some(&[][..]));
+    }
+
+    #[test]
+    fn control_payloads_roundtrip_and_reject_garbage() {
+        let pong = Control::Pong { audio_received: 7, audio_relayed: u32::MAX };
+        assert_eq!(Control::decode(&pong.encode()), Some(pong));
+        assert_eq!(Control::decode(&Control::Ping.encode()), Some(Control::Ping));
+        let mut bad = Control::Ping.encode();
+        bad[3] = 1;
+        assert!(Control::decode(&bad).is_none(), "ping padding must be zero");
+        assert!(Control::decode(&pong.encode()[..CONTROL_LEN - 1]).is_none(), "truncated");
+        assert!(Control::decode(&[2u8; CONTROL_LEN + 1]).is_none(), "oversized");
+        assert!(Control::decode(&[9u8; CONTROL_LEN]).is_none(), "unknown kind");
+        assert!(Control::decode(&[]).is_none());
     }
 
     #[test]

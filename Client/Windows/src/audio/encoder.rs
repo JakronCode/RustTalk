@@ -203,6 +203,7 @@ pub fn run(
                 Ok(len) => {
                     let pkt = seal_packet(&AudioHeader::new(token, seq, timestamp), &cipher, DIR_TO_SERVER, &opus_buf[..len]);
                     let _ = udp.send(&pkt);
+                    control.link.audio_sent.fetch_add(1, Ordering::Relaxed);
                     seq = seq.wrapping_add(1);
                 }
                 Err(e) => tracing::warn!("Opus-Encode fehlgeschlagen: {e}"),
