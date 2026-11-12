@@ -22,13 +22,36 @@ pub(super) enum UpdateMsg {
 pub(super) struct UpdateState {
     pub(super) checking: bool,
     pub(super) available: Option<Release>,
+    /// Last check failed (shown in Settings > About).
     pub(super) error: Option<String>,
+    /// Last download/install failed (shown in the update dialog).
+    pub(super) install_error: Option<String>,
     pub(super) installing: bool,
     pub(super) progress: Arc<std::sync::atomic::AtomicU32>,
     /// Last check finished without a newer version.
     pub(super) up_to_date: bool,
+    /// Open update confirmation, if any.
+    pub(super) dialog: Option<UpdateDialog>,
     pub(super) tx: std::sync::mpsc::Sender<UpdateMsg>,
     pub(super) rx: std::sync::mpsc::Receiver<UpdateMsg>,
+}
+
+/// The confirmation is bound to one version, so a newer check result never
+/// installs something the user did not confirm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct UpdateDialog {
+    pub(super) version: String,
+    /// Shown in the settings window instead of the main window.
+    pub(super) in_settings: bool,
+}
+
+/// What the top bar notice shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Banner {
+    Hidden,
+    Available(String),
+    Installing(u32),
+    Failed(String),
 }
 
 impl UpdateState {
@@ -38,11 +61,91 @@ impl UpdateState {
             checking: false,
             available: None,
             error: None,
+            install_error: None,
             installing: false,
             progress: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             up_to_date: false,
+            dialog: None,
             tx,
             rx,
+        }
+    }
+
+    pub(super) fn banner(&self) -> Banner {
+        match &self.available {
+            None => Banner::Hidden,
+            Some(_) if self.installing => Banner::Installing(
+                self.progress
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .min(100),
+            ),
+            Some(r) if self.install_error.is_some() => Banner::Failed(r.version.clone()),
+            Some(r) => Banner::Available(r.version.clone()),
+        }
+    }
+
+    /// Opens the confirmation for the available release. False if there is none.
+    pub(super) fn open_dialog(&mut self, in_settings: bool) -> bool {
+        let Some(r) = &self.available else {
+            return false;
+        };
+        self.dialog = Some(UpdateDialog {
+            version: r.version.clone(),
+            in_settings,
+        });
+        true
+    }
+
+    /// Release the open dialog is about; `None` when it went stale.
+    pub(super) fn dialog_release(&self) -> Option<&Release> {
+        let d = self.dialog.as_ref()?;
+        self.available.as_ref().filter(|r| r.version == d.version)
+    }
+
+    /// Marks the install as started after the user confirmed `version`.
+    /// `None` when busy, stale, unconfirmed or not installable.
+    pub(super) fn begin_install(&mut self, version: &str, installable: bool) -> Option<Release> {
+        if !installable || self.installing || self.checking {
+            return None;
+        }
+        if self.dialog.as_ref().map(|d| d.version.as_str()) != Some(version) {
+            return None;
+        }
+        let release = self.dialog_release()?.clone();
+        self.installing = true;
+        self.install_error = None;
+        self.progress.store(0, std::sync::atomic::Ordering::Relaxed);
+        Some(release)
+    }
+
+    /// Applies a finished check. Returns the new release, if any.
+    pub(super) fn apply_check(
+        &mut self,
+        result: Result<Option<Release>, String>,
+    ) -> Option<&Release> {
+        self.checking = false;
+        match result {
+            Ok(Some(r)) => {
+                if self.available.as_ref().map(|a| &a.version) != Some(&r.version) {
+                    self.install_error = None;
+                }
+                if self.dialog.as_ref().is_some_and(|d| d.version != r.version) {
+                    self.dialog = None;
+                }
+                self.available = Some(r);
+                self.available.as_ref()
+            }
+            Ok(None) => {
+                self.up_to_date = true;
+                self.available = None;
+                self.dialog = None;
+                self.install_error = None;
+                None
+            }
+            Err(e) => {
+                self.error = Some(e);
+                None
+            }
         }
     }
 }
@@ -133,41 +236,43 @@ impl RustTalkApp {
         });
     }
 
-    /// Downloads + installs the available update (installed app only).
-    pub(super) fn install_update(&mut self) {
-        let Some(release) = self.update.available.clone() else { return };
-        if install::mode() != Mode::Installed || self.update.installing {
+    /// Downloads + installs `version` after the user confirmed it.
+    pub(super) fn start_install(&mut self, version: &str) {
+        let Some(release) = self
+            .update
+            .begin_install(version, install::mode() == Mode::Installed)
+        else {
             return;
-        }
-        self.update.installing = true;
-        self.update.error = None;
-        self.update.progress.store(0, std::sync::atomic::Ordering::Relaxed);
+        };
         let tx = self.update.tx.clone();
         let progress = self.update.progress.clone();
         let ctx = self.ctx.clone();
-        let _ = std::thread::Builder::new().name("update-install".into()).spawn(move || {
-            let res = update::download_and_install(&release, &progress).map_err(|e| format!("{e:#}"));
-            let _ = tx.send(UpdateMsg::Installed(res));
-            ctx.request_repaint();
-        });
+        let spawned = std::thread::Builder::new()
+            .name("update-install".into())
+            .spawn(move || {
+                let res =
+                    update::download_and_install(&release, &progress).map_err(|e| format!("{e:#}"));
+                let _ = tx.send(UpdateMsg::Installed(res));
+                ctx.request_repaint();
+            });
+        if let Err(e) = spawned {
+            self.update.installing = false;
+            self.update.install_error = Some(format!("Could not start the update: {e}"));
+        }
     }
 
     /// Update results + toast clicks (every frame).
     pub(super) fn poll_background(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.update.rx.try_recv() {
             match msg {
-                UpdateMsg::Checked(Ok(Some(r))) => {
-                    self.update.checking = false;
-                    self.set_status(format!("Update {} available - Settings > About", r.version));
-                    self.update.available = Some(r);
-                }
-                UpdateMsg::Checked(Ok(None)) => {
-                    self.update.checking = false;
-                    self.update.up_to_date = true;
-                }
-                UpdateMsg::Checked(Err(e)) => {
-                    self.update.checking = false;
-                    self.update.error = Some(e);
+                UpdateMsg::Checked(result) => {
+                    if let Some(r) = self.update.apply_check(result) {
+                        let msg = format!(
+                            "RustTalk {} is available - click Update in the top right",
+                            r.version
+                        );
+                        self.set_status(msg);
+                    }
                 }
                 UpdateMsg::Installed(Ok(exe)) => {
                     // Restart into the new version.
@@ -176,14 +281,19 @@ impl RustTalkApp {
                     match update::restart(&exe) {
                         Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                         Err(e) => {
+                            // Installed already: offering it again would download it twice.
+                            let msg = format!("Update installed - please restart RustTalk ({e})");
                             self.update.installing = false;
-                            self.update.error = Some(format!("Installed - please restart RustTalk ({e})"));
+                            self.update.available = None;
+                            self.update.dialog = None;
+                            self.update.error = Some(msg.clone());
+                            self.set_error(msg);
                         }
                     }
                 }
                 UpdateMsg::Installed(Err(e)) => {
                     self.update.installing = false;
-                    self.update.error = Some(e);
+                    self.update.install_error = Some(e);
                 }
             }
         }
@@ -243,13 +353,13 @@ impl RustTalkApp {
                     ui.add(egui::ProgressBar::new(p as f32 / 100.0).desired_width(220.0).text(format!("Downloading... {p} %")));
                 } else if installed {
                     if theme::primary_button(ui, &format!("{}  Install update & restart", icons::regular::DOWNLOAD_SIMPLE)).clicked() {
-                        self.install_update();
+                        self.update.open_dialog(true);
                     }
                 } else {
                     ui.label(egui::RichText::new("Updates install automatically only in the installed version.").color(theme::MUTED));
                 }
-                if !r.page_url.is_empty() && ui.link("Release notes").clicked() {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(&r.page_url));
+                if ui.link("Release notes").clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(super::update_ui::release_page(&r)));
                 }
             });
         } else {
@@ -272,7 +382,7 @@ impl RustTalkApp {
                 });
             });
         }
-        if let Some(e) = &self.update.error {
+        for e in [&self.update.error, &self.update.install_error].into_iter().flatten() {
             ui.label(egui::RichText::new(e).color(theme::RED));
         }
         theme::setting_row(ui, "Check for updates on start", Some("Asks GitHub for the latest release (no personal data is sent)"), false, |ui| {

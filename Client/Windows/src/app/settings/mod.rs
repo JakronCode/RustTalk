@@ -29,6 +29,18 @@ pub(super) struct SettingsNav {
 
 const SEARCH_ID: &str = "settings_search";
 
+fn settings_escape(ctx: &egui::Context, search: &mut String, blocked: bool) -> bool {
+    if blocked || !ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        return false;
+    }
+    if search.is_empty() {
+        true
+    } else {
+        search.clear();
+        false
+    }
+}
+
 fn recorded_settings_binding(ctx: &egui::Context) -> Option<Option<String>> {
     if ctx.memory(|m| m.has_focus(egui::Id::new(SEARCH_ID))) {
         return Some(None);
@@ -73,6 +85,12 @@ impl RustTalkApp {
                     self.recording_key = None;
                     self.config.save();
                 }
+                let escape_blocked = self.recording_key.is_some()
+                    || self.update.dialog.as_ref().is_some_and(|d| d.in_settings);
+                if settings_escape(ctx, &mut self.settings_nav.search, escape_blocked) {
+                    self.show_settings = false;
+                    self.config.save();
+                }
                 egui::SidePanel::left("settings_nav")
                     .exact_width(240.0)
                     .resizable(false)
@@ -97,6 +115,7 @@ impl RustTalkApp {
                             self.settings_page_body(ui);
                         });
                     });
+                self.ui_update_dialog(ctx, true);
             },
         );
     }
@@ -114,7 +133,7 @@ impl RustTalkApp {
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text("Close (Esc)");
             ui.label(egui::RichText::new("ESC").size(11.5).strong().color(theme::MUTED));
-            if close.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape) && self.recording_key.is_none()) {
+            if close.clicked() {
                 self.show_settings = false;
                 self.config.save();
             }
@@ -182,9 +201,6 @@ impl RustTalkApp {
     /// Its id is [`SEARCH_ID`]; focusing it cancels shortcut recording.
     fn settings_search_field(&mut self, ui: &mut egui::Ui) -> egui::Response {
         let nav = &mut self.settings_nav;
-        if !nav.search.is_empty() && self.recording_key.is_none() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-            nav.search.clear();
-        }
         egui::Frame::default()
             .fill(theme::DARK)
             .corner_radius(6.0)
@@ -392,6 +408,32 @@ fn nav_section_list(ui: &mut egui::Ui, sections: &[&table::Section], active: Opt
 #[cfg(test)]
 mod capture_tests {
     use super::*;
+
+    #[test]
+    fn modal_keeps_escape_from_settings_with_or_without_search() {
+        for initial in ["", "audio"] {
+            let ctx = egui::Context::default();
+            let input = egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            };
+            let mut search = initial.to_owned();
+            let _ = ctx.run(input, |ctx| {
+                assert!(!settings_escape(ctx, &mut search, true));
+                assert_eq!(search, initial);
+                assert!(ctx.input(|i| i.key_pressed(egui::Key::Escape)));
+                assert_eq!(settings_escape(ctx, &mut search, false), initial.is_empty());
+                assert!(search.is_empty());
+                assert!(!ctx.input(|i| i.key_pressed(egui::Key::Escape)));
+            });
+        }
+    }
 
     #[test]
     fn focused_search_cancels_shortcut_capture_before_typing() {
