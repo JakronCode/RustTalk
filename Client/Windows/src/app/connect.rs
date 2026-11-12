@@ -48,6 +48,11 @@ impl RustTalkApp {
                         });
                 });
 
+                if self.cert_check.as_ref().is_some_and(|check| !check.matches_address(&self.config.server_address)) {
+                    self.cert_check = None;
+                    self.join_error = None;
+                    self.set_status("Server address changed. Connect again to verify its identity.");
+                }
                 if self.join_error.is_some() {
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
@@ -246,8 +251,7 @@ impl RustTalkApp {
             } else {
                 theme::primary_button(ui, "Trust and connect")
             };
-            if trust.clicked() {
-                check.trust(&mut self.config);
+            if trust.clicked() && check.trust(&mut self.config) {
                 self.config.save();
                 self.cert_check = None;
                 self.start_connect();

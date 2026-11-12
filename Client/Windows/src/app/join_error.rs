@@ -276,10 +276,18 @@ pub struct CertCheck {
 
 impl CertCheck {
     /// Pins exactly the shown fingerprint for exactly the address that presented it.
-    pub fn trust(&self, config: &mut crate::config::ClientConfig) {
+    pub fn matches_address(&self, address: &str) -> bool {
+        crate::net::normalize_addr(address) == self.addr
+    }
+
+    pub fn trust(&self, config: &mut crate::config::ClientConfig) -> bool {
+        if !self.matches_address(&config.server_address) {
+            return false;
+        }
         config
             .known_servers
             .insert(self.addr.clone(), self.fingerprint.clone());
+        true
     }
 }
 
@@ -453,7 +461,19 @@ mod tests {
         drop(check.clone());
         assert_eq!(cfg.known_servers, before);
 
-        check.trust(&mut cfg);
+        assert!(
+            !check.trust(&mut cfg),
+            "edited target must not accept an old prompt"
+        );
+        assert_eq!(cfg.known_servers, before);
+        cfg.server_address = "other.org:7331".into();
+        assert!(
+            !check.trust(&mut cfg),
+            "a trusted bookmark must not accept another target's prompt"
+        );
+        assert_eq!(cfg.known_servers, before);
+        cfg.server_address = "example.org".into();
+        assert!(check.trust(&mut cfg));
         assert_eq!(cfg.known_servers.get("example.org:7331"), Some(&fp));
         assert_eq!(
             cfg.known_servers.len(),

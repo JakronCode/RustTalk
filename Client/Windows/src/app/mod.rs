@@ -553,6 +553,11 @@ impl RustTalkApp {
     }
 
     fn start_connect(&mut self) {
+        if let Some(tx) = self.cmd_tx.take() {
+            let _ = tx.send(Command::Disconnect);
+        }
+        reset_event_channel(&mut self.event_tx, &mut self.event_rx);
+        self.cert_check = None;
         // An invite link in the address field: address + invite code.
         if let Some((addr, code)) = moderation_ui::parse_invite_link(&self.config.server_address) {
             self.config.server_address = addr;
@@ -581,6 +586,7 @@ impl RustTalkApp {
     }
 
     fn disconnect(&mut self) {
+        reset_event_channel(&mut self.event_tx, &mut self.event_rx);
         self.global_ptt.lock().unwrap().set([None; 3]);
         self.control.ptt_pressed.store(false, Ordering::Relaxed);
         if let Some(tx) = self.cmd_tx.take() {
@@ -1692,4 +1698,43 @@ mod tests {
         assert_eq!(format_time(90_061), "01:01"); // next day (UTC)
     }
 
+}
+
+// Dropping the old receiver also discards late network and media worker results.
+fn reset_event_channel(
+    tx: &mut std::sync::mpsc::Sender<NetEvent>,
+    rx: &mut std::sync::mpsc::Receiver<NetEvent>,
+) {
+    (*tx, *rx) = std::sync::mpsc::channel();
+}
+
+#[cfg(test)]
+mod connection_event_tests {
+    use super::*;
+
+    #[test]
+    fn replaced_attempt_cannot_deliver_late_or_queued_events() {
+        let (mut tx, mut rx) = std::sync::mpsc::channel();
+        let old = tx.clone();
+        old.send(NetEvent::Disconnected {
+            reason: "old failure".into(),
+        })
+        .unwrap();
+        reset_event_channel(&mut tx, &mut rx);
+        assert!(old
+            .send(NetEvent::CertCheck {
+                addr: "old:7331".into(),
+                fingerprint: "old".into(),
+                changed: false,
+            })
+            .is_err());
+        assert!(rx.try_recv().is_err());
+        tx.send(NetEvent::Disconnected {
+            reason: "current".into(),
+        })
+        .unwrap();
+        assert!(
+            matches!(rx.try_recv(), Ok(NetEvent::Disconnected { reason }) if reason == "current")
+        );
+    }
 }

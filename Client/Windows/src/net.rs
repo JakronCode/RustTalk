@@ -457,10 +457,21 @@ mod tests {
                 let listener = TcpListener::from_std(std_listener).unwrap();
                 let (c, k) = rcgen_free_cert();
                 let tls = tokio_rustls::TlsAcceptor::from(rusttalk_shared::secure::server_config(c, k).unwrap());
-                for _ in 0..2 {
+                for attempt in 0..2 {
                     let (tcp, _) = listener.accept().await.unwrap();
                     let stream = tls.accept(tcp).await.unwrap();
                     let (mut r, mut w) = tokio::io::split(stream);
+                    if attempt == 0 {
+                        use tokio::io::AsyncReadExt;
+                        let mut byte = [0u8; 1];
+                        match timeout(Duration::from_secs(5), r.read(&mut byte)).await {
+                            Ok(Ok(0)) => {},
+                            Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {},
+                            other => panic!("expected connection closure with zero application bytes before trust, got {other:?}"),
+                        }
+                        seen_tx.send(false).unwrap();
+                        continue;
+                    }
                     let first = timeout(Duration::from_secs(5), read_frame::<_, ClientMessage>(&mut r)).await;
                     let hello = matches!(first, Ok(Ok(Some(ClientMessage::Hello { .. }))));
                     seen_tx.send(hello).unwrap();
