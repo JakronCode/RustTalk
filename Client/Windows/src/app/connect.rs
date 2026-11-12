@@ -139,7 +139,9 @@ impl RustTalkApp {
                 }
                 resp.on_hover_text("Click = fill in  -  double click = connect  -  right click = remove")
                     .context_menu(|ui| {
-                        if ui.button(egui::RichText::new(format!("{}  Remove", icons::regular::TRASH)).color(theme::RED)).clicked() {
+                        ui.set_width(160.0);
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        if theme::menu_item(ui, icons::regular::TRASH, "Remove", true).clicked() {
                             remove_idx = Some(i);
                             ui.close_menu();
                         }

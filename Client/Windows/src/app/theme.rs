@@ -244,6 +244,42 @@ pub fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     )
 }
 
+/// Menu row: label left, icon right, accent fill on hover (red for `danger`).
+/// Call `ui.set_width(..)` on the menu first; the row takes the full width.
+pub fn menu_item(ui: &mut egui::Ui, icon: &str, label: &str, danger: bool) -> egui::Response {
+    let h = dense(32.0, 28.0);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::click());
+    let enabled = ui.is_enabled();
+    let hovered = enabled && resp.hovered();
+    let (fill, hover_fg) = if danger { (RED, egui::Color32::WHITE) } else { (accent(), on_accent()) };
+    let fg = if !enabled {
+        DISABLED
+    } else if hovered {
+        hover_fg
+    } else if danger {
+        RED
+    } else {
+        TEXT
+    };
+    let p = ui.painter();
+    if hovered {
+        p.rect_filled(rect, 4.0, fill);
+    }
+    p.text(rect.left_center() + egui::vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(14.0), fg);
+    p.text(rect.right_center() - egui::vec2(10.0, 0.0), egui::Align2::RIGHT_CENTER, icon, egui::FontId::proportional(16.0), fg);
+    resp
+}
+
+/// Thin divider between menu groups.
+pub fn menu_separator(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 9.0), egui::Sense::hover());
+    ui.painter().hline(
+        (rect.left() + 6.0)..=(rect.right() - 6.0),
+        rect.center().y,
+        egui::Stroke::new(1.0_f32, SELECTED),
+    );
+}
+
 /// Red button for destructive actions.
 pub fn danger_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(

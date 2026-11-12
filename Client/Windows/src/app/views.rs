@@ -1036,16 +1036,18 @@ pub(super) fn chat_line(
     // Right click: same actions as the hover buttons.
     let resp = ui.interact(row, ui.id().with(("chat-line", line.id)), egui::Sense::click());
     resp.context_menu(|ui| {
-        if ui.button(format!("{}  Reply", icons::regular::ARROW_BEND_UP_LEFT)).clicked() {
+        ui.set_width(180.0);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        if theme::menu_item(ui, icons::regular::ARROW_BEND_UP_LEFT, "Reply", false).clicked() {
             action = Some(ChatAction::Reply(line.id));
             ui.close_menu();
         }
         if own {
-            if ui.button(format!("{}  Edit", icons::regular::PENCIL_SIMPLE)).clicked() {
+            if theme::menu_item(ui, icons::regular::PENCIL_SIMPLE, "Edit", false).clicked() {
                 action = Some(ChatAction::Edit(line.id));
                 ui.close_menu();
             }
-            if ui.button(egui::RichText::new(format!("{}  Delete", icons::regular::TRASH)).color(theme::RED)).clicked() {
+            if theme::menu_item(ui, icons::regular::TRASH, "Delete", true).clicked() {
                 action = Some(delete(line.id));
                 ui.close_menu();
             }

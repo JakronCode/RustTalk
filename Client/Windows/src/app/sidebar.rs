@@ -150,24 +150,25 @@ impl RustTalkApp {
                 // Fixed width: items sized from available_width() made the
                 // popup grow every frame.
                 ui.set_width(MENU_W);
-                if menu_item(ui, icons::regular::SHIELD_CHECK, "Server Settings", theme::TEXT).clicked() {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                if theme::menu_item(ui, icons::regular::SHIELD_CHECK, "Server Settings", false).clicked() {
                     self.open_server_settings(server_settings::ServerTab::Overview);
                 }
-                ui.separator();
+                theme::menu_separator(ui);
                 let admin = self.can(rusttalk_shared::protocol::Role::Admin);
                 ui.add_enabled_ui(admin, |ui| {
-                    if menu_item(ui, icons::regular::PLUS_CIRCLE, "Create Channel", theme::TEXT).on_disabled_hover_text("Only admins").clicked() {
+                    if theme::menu_item(ui, icons::regular::PLUS_CIRCLE, "Create Channel", false).on_disabled_hover_text("Only admins").clicked() {
                         self.open_new_channel(None, ChannelKind::Text);
                     }
-                    if menu_item(ui, icons::regular::FOLDER_PLUS, "Create Category", theme::TEXT).on_disabled_hover_text("Only admins").clicked() {
+                    if theme::menu_item(ui, icons::regular::FOLDER_PLUS, "Create Category", false).on_disabled_hover_text("Only admins").clicked() {
                         self.open_new_channel(None, ChannelKind::Category);
                     }
                 });
-                ui.separator();
-                if menu_item(ui, icons::regular::GEAR_SIX, "App Settings", theme::TEXT).clicked() {
+                theme::menu_separator(ui);
+                if theme::menu_item(ui, icons::regular::GEAR_SIX, "App Settings", false).clicked() {
                     self.open_settings(SettingsPage::Voice);
                 }
-                if menu_item(ui, icons::regular::BUG, "Report a Bug", theme::TEXT).clicked() {
+                if theme::menu_item(ui, icons::regular::BUG, "Report a Bug", false).clicked() {
                     server_settings::open_bug_report(ui.ctx());
                 }
             },
@@ -416,17 +417,18 @@ impl RustTalkApp {
             egui::DragAndDrop::set_payload(ui.ctx(), ChannelDrag { id: cat.id, is_category: true });
         }
         resp.context_menu(|ui| {
-            if admin && ui.button(format!("{}  Create Channel Here", icons::regular::PLUS_CIRCLE)).clicked() {
+            ui.set_width(MENU_W);
+            ui.spacing_mut().item_spacing.y = 2.0;
+            if admin && theme::menu_item(ui, icons::regular::PLUS_CIRCLE, "Create Channel Here", false).clicked() {
                 self.open_new_channel(Some(cat.id), ChannelKind::Text);
                 ui.close_menu();
             }
-            if ui.button(format!("{}  Edit Category", icons::regular::GEAR_SIX)).clicked() {
+            if theme::menu_item(ui, icons::regular::GEAR_SIX, "Edit Category", false).clicked() {
                 self.open_channel_settings(cat.id);
                 ui.close_menu();
             }
-            ui.separator();
-            if ui
-                .button(egui::RichText::new(format!("{}  Delete Category", icons::regular::TRASH)).color(theme::RED))
+            theme::menu_separator(ui);
+            if theme::menu_item(ui, icons::regular::TRASH, "Delete Category", true)
                 .clicked()
             {
                 self.confirm_delete = Some(cat.id);
@@ -551,31 +553,31 @@ impl RustTalkApp {
         ch: &ChannelInfo,
         cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
     ) {
-        ui.set_min_width(190.0);
+        ui.set_width(MENU_W);
+        ui.spacing_mut().item_spacing.y = 2.0;
         if ch.kind.can_join() && self.my_channel() != Some(ch.id) {
             let label = if ch.kind == ChannelKind::Spawn { "Back to Lobby" } else { "Join" };
-            if ui.button(format!("{}  {label}", icons::regular::SIGN_IN)).clicked() {
+            if theme::menu_item(ui, icons::regular::SIGN_IN, label, false).clicked() {
                 let _ = cmd_tx.send(Command::JoinChannel(ch.id));
                 self.select_channel(ch.id);
                 ui.close_menu();
             }
         }
-        if ch.kind.has_chat() && ui.button(format!("{}  Open Chat", icons::regular::CHAT_CIRCLE_TEXT)).clicked() {
+        if ch.kind.has_chat() && theme::menu_item(ui, icons::regular::CHAT_CIRCLE_TEXT, "Open Chat", false).clicked() {
             self.select_channel(ch.id);
             ui.close_menu();
         }
-        if ui.button(format!("{}  Mark as Read", icons::regular::CHECKS)).clicked() {
+        if theme::menu_item(ui, icons::regular::CHECKS, "Mark as Read", false).clicked() {
             self.unread.remove(&ch.id);
             ui.close_menu();
         }
-        ui.separator();
-        if ui.button(format!("{}  Edit Channel", icons::regular::GEAR_SIX)).clicked() {
+        theme::menu_separator(ui);
+        if theme::menu_item(ui, icons::regular::GEAR_SIX, "Edit Channel", false).clicked() {
             self.open_channel_settings(ch.id);
             ui.close_menu();
         }
         if ch.kind != ChannelKind::Spawn {
-            if ui
-                .button(egui::RichText::new(format!("{}  Delete Channel", icons::regular::TRASH)).color(theme::RED))
+            if theme::menu_item(ui, icons::regular::TRASH, "Delete Channel", true)
                 .clicked()
             {
                 self.confirm_delete = Some(ch.id);
@@ -654,11 +656,11 @@ impl RustTalkApp {
     /// Context menu of another user (sidebar, voice stage tiles, "..." button):
     /// poke, local mute, per-user volume, moderation.
     pub(super) fn user_menu(&mut self, ui: &mut egui::Ui, user: &UserInfo) {
-        ui.set_min_width(210.0);
+        ui.set_width(MENU_W);
+        ui.spacing_mut().item_spacing.y = 2.0;
         ui.label(egui::RichText::new(&user.name).strong().color(theme::HEADER));
-        ui.separator();
-        if ui
-            .button(format!("{}  Poke...", icons::regular::HAND_WAVING))
+        theme::menu_separator(ui);
+        if theme::menu_item(ui, icons::regular::HAND_WAVING, "Poke...", false)
             .on_hover_text("Plays a wake-up sound for them and shows your message in a popup")
             .clicked()
         {
@@ -666,12 +668,12 @@ impl RustTalkApp {
             ui.close_menu();
         }
         let locally_muted = self.local_muted.lock().unwrap().contains(&user.id);
-        let label = if locally_muted {
-            format!("{}  Unmute for Me", icons::regular::SPEAKER_HIGH)
+        let (icon, label) = if locally_muted {
+            (icons::regular::SPEAKER_HIGH, "Unmute for Me")
         } else {
-            format!("{}  Mute for Me", icons::regular::SPEAKER_SLASH)
+            (icons::regular::SPEAKER_SLASH, "Mute for Me")
         };
-        if ui.button(label).clicked() {
+        if theme::menu_item(ui, icon, label, false).clicked() {
             let mut set = self.local_muted.lock().unwrap();
             if locally_muted {
                 set.remove(&user.id);
@@ -680,7 +682,7 @@ impl RustTalkApp {
             }
             ui.close_menu();
         }
-        ui.separator();
+        theme::menu_separator(ui);
         ui.label(format!("{}  User Volume", icons::regular::SPEAKER_HIGH));
         let mut pct = (self.user_volume(user.id) * 100.0).round();
         let slider = egui::Slider::new(&mut pct, 0.0..=crate::audio::MAX_VOLUME * 100.0)
@@ -834,13 +836,14 @@ impl RustTalkApp {
             egui::PopupCloseBehavior::CloseOnClickOutside,
             |ui| {
                 ui.set_width(240.0);
+                ui.spacing_mut().item_spacing.y = 2.0;
                 theme::caption(ui, "Input device");
                 let before = (self.config.input_device.clone(), self.config.output_device.clone());
                 device_list(ui, &mut self.config.input_device, &self.input_devices);
                 if before.0 != self.config.input_device {
                     self.apply_devices(before);
                 }
-                ui.separator();
+                theme::menu_separator(ui);
                 theme::caption(ui, "Input volume");
                 let mut pct = (self.config.input_volume * 100.0).round();
                 let r = ui.add(egui::Slider::new(&mut pct, 0.0..=200.0).step_by(5.0).fixed_decimals(0).suffix(" %"));
@@ -849,8 +852,8 @@ impl RustTalkApp {
                     self.control.set_input_volume(self.config.input_volume);
                 }
                 save = r.drag_stopped() || (r.changed() && !r.dragged());
-                ui.separator();
-                if ui.button(format!("{}  Voice settings", icons::regular::GEAR_SIX)).clicked() {
+                theme::menu_separator(ui);
+                if theme::menu_item(ui, icons::regular::GEAR_SIX, "Voice Settings", false).clicked() {
                     self.open_settings(SettingsPage::Voice);
                     ui.memory_mut(|m| m.close_popup());
                 }
@@ -876,13 +879,14 @@ impl RustTalkApp {
             egui::PopupCloseBehavior::CloseOnClickOutside,
             |ui| {
                 ui.set_width(240.0);
+                ui.spacing_mut().item_spacing.y = 2.0;
                 theme::caption(ui, "Output device");
                 let before = (self.config.input_device.clone(), self.config.output_device.clone());
                 device_list(ui, &mut self.config.output_device, &self.output_devices);
                 if before.1 != self.config.output_device {
                     self.apply_devices(before);
                 }
-                ui.separator();
+                theme::menu_separator(ui);
                 theme::caption(ui, "Output volume");
                 let mut pct = (self.config.output_volume * 100.0).round();
                 let r = ui.add(egui::Slider::new(&mut pct, 0.0..=200.0).step_by(5.0).fixed_decimals(0).suffix(" %"));
@@ -891,8 +895,8 @@ impl RustTalkApp {
                     self.control.set_output_volume(self.config.output_volume);
                 }
                 save = r.drag_stopped() || (r.changed() && !r.dragged());
-                ui.separator();
-                if ui.button(format!("{}  Voice settings", icons::regular::GEAR_SIX)).clicked() {
+                theme::menu_separator(ui);
+                if theme::menu_item(ui, icons::regular::GEAR_SIX, "Voice Settings", false).clicked() {
                     self.open_settings(SettingsPage::Voice);
                     ui.memory_mut(|m| m.close_popup());
                 }
@@ -938,14 +942,6 @@ pub(super) fn channel_icon(kind: ChannelKind) -> &'static str {
         ChannelKind::Voice => icons::regular::SPEAKER_HIGH,
         ChannelKind::Category => icons::regular::FOLDER,
     }
-}
-
-fn menu_item(ui: &mut egui::Ui, icon: &str, label: &str, color: egui::Color32) -> egui::Response {
-    ui.add(
-        egui::Button::new(egui::RichText::new(format!("{icon}   {label}")).color(color))
-            .frame(false)
-            .min_size(egui::vec2(MENU_W, 28.0)),
-    )
 }
 
 /// Small borderless icon button placed at a fixed rect (row hover actions).

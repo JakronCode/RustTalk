@@ -119,7 +119,7 @@ impl RustTalkApp {
         if !self.can(Role::Moderator) || !above {
             return;
         }
-        ui.separator();
+        theme::menu_separator(ui);
         ui.menu_button(format!("{}  Move to", icons::regular::ARROWS_LEFT_RIGHT), |ui| {
             let mut targets: Vec<(u64, String)> = Vec::new();
             if let Some(spawn) = self.spawn_channel_id() {
@@ -138,12 +138,12 @@ impl RustTalkApp {
                 }
             }
         });
-        if ui.button(format!("{}  Kick...", icons::regular::SIGN_OUT)).clicked() {
+        if theme::menu_item(ui, icons::regular::SIGN_OUT, "Kick...", false).clicked() {
             self.mod_dialog = Some(ModDialog { target: user.id, name: user.name.clone(), ban: false, reason: String::new(), minutes: None });
             ui.close_menu();
         }
         if self.can(Role::Admin) {
-            if ui.button(egui::RichText::new(format!("{}  Ban...", icons::regular::PROHIBIT)).color(theme::RED)).clicked() {
+            if theme::menu_item(ui, icons::regular::PROHIBIT, "Ban...", true).clicked() {
                 self.mod_dialog = Some(ModDialog { target: user.id, name: user.name.clone(), ban: true, reason: String::new(), minutes: Some(60 * 24) });
                 ui.close_menu();
             }
