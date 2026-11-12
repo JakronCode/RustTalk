@@ -12,7 +12,7 @@ Static project website (English/German, no build step, no cookies, no tracking).
 | `Caddyfile` | Web server config (HTTPS via Let's Encrypt, 80 → 443) |
 | `deploy.sh` | Uploads the site to the server |
 
-Download buttons point to `releases/latest/download/...` on GitHub, so a new release needs no website change. The home page reads the latest version number from the GitHub API in the visitor's browser (disclosed in `datenschutz.html`).
+Download buttons point to `releases/latest/download/...` on GitHub, so a new release needs no website change. The hero button picks the visitor's OS (Windows, Linux, macOS placeholder, otherwise "Go to downloads"). The home page reads the release list (version number, files per platform, older versions) from the GitHub API in the visitor's browser (disclosed in `datenschutz.html`).
 
 ## Preview
 

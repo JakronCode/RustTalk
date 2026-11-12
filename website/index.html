@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-os="windows">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -68,7 +68,7 @@ h2{font-size:clamp(28px,4vw,38px);margin:0 0 10px;letter-spacing:-.01em}
 .dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:18px}
 .dl .card{display:flex;flex-direction:column;gap:12px}
 .dl .card h3{display:flex;align-items:center;gap:10px;font-size:20px}
-.dl .card .btn{align-self:flex-start;margin-top:auto}
+.dl .card>.btn{align-self:flex-start}
 .alt-link{font-size:13.5px;color:var(--dim);text-decoration:underline;text-underline-offset:3px}
 .alt-link:hover{color:var(--text)}
 .small{font-size:13.5px;color:var(--dim)}
@@ -104,6 +104,22 @@ pre code{background:none;padding:0}
 footer{padding:36px 0 50px;color:var(--dim);font-size:14px}
 footer .wrap{display:flex;gap:16px;flex-wrap:wrap;justify-content:space-between}
 footer a{color:var(--muted)}
+/* os-aware buttons */
+.dl-win,.dl-linux,.dl-mac,.dl-other{display:none}
+html[data-os=windows] .dl-win,html[data-os=linux] .dl-linux,html[data-os=mac] .dl-mac,html[data-os=other] .dl-other{display:inline-flex}
+.btn[aria-disabled=true]{opacity:.7;cursor:default;pointer-events:none}
+.soon{display:inline-block;font-size:12px;font-weight:700;padding:2px 8px;border-radius:99px;background:rgba(88,101,242,.2);color:#aab0ff;margin-left:6px}
+details.files{margin-top:auto;border-top:1px solid var(--line);padding-top:10px}
+details.files summary{cursor:pointer;color:var(--muted);font-size:14px;font-weight:600;user-select:none}
+details.files summary:hover{color:var(--text)}
+.files .tools{display:flex;align-items:center;gap:8px;margin:12px 0 6px;font-size:13.5px;color:var(--dim)}
+.files select{background:var(--bg3);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:5px 8px;font:inherit;font-size:13.5px}
+.files h4{margin:12px 0 4px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim)}
+.files ul{list-style:none;margin:0;padding:0}
+.files li{display:flex;justify-content:space-between;gap:10px;padding:4px 0;font-size:13.5px;border-bottom:1px solid var(--line)}
+.files li a{color:var(--text);word-break:break-all}
+.files li span{color:var(--dim);white-space:nowrap}
+.files .err{color:var(--dim);font-size:13.5px}
 /* lightbox */
 #lb{position:fixed;inset:0;background:rgba(0,0,0,.88);display:none;align-items:center;justify-content:center;padding:20px;z-index:50;cursor:zoom-out}
 #lb.on{display:flex}
@@ -142,16 +158,16 @@ html[lang=en] [data-l=de],html[lang=de] [data-l=en]{display:none!important}
     <p class="lead" data-l="en">RustTalk is encrypted voice, video and text chat that you run yourself. No accounts, no ads, no tracking. What you say stays between you and the people you talk to.</p>
     <p class="lead" data-l="de">RustTalk ist verschlüsselter Voice-, Video- und Text-Chat, den du selbst betreibst. Keine Accounts, keine Werbung, kein Tracking. Was du sagst, bleibt zwischen dir und den Menschen, mit denen du sprichst.</p>
     <div class="cta">
-      <a class="btn primary" href="https://github.com/rusttalkcrew/RustTalk/releases/latest/download/rusttalk-windows.exe">
-        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 5.5 10.5 4.5v7H3zm8.5-1.2L21 3v8.5h-9.5zM3 12.5h7.5v7L3 18.5zm8.5 0H21V21l-9.5-1.3z"/></svg>
-        <span data-l="en">Download for Windows</span><span data-l="de">Für Windows herunterladen</span>
-      </a>
+      <a class="btn primary dl-win" href="https://github.com/rusttalkcrew/RustTalk/releases/latest/download/rusttalk-windows.exe"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 5.5 10.5 4.5v7H3zm8.5-1.2L21 3v8.5h-9.5zM3 12.5h7.5v7L3 18.5zm8.5 0H21V21l-9.5-1.3z"/></svg><span data-l="en">Download for Windows</span><span data-l="de">Für Windows herunterladen</span></a>
+      <a class="btn primary dl-linux" href="https://github.com/rusttalkcrew/RustTalk/releases/latest/download/rusttalk-linux-x86_64.AppImage"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg><span data-l="en">Download for Linux</span><span data-l="de">Für Linux herunterladen</span></a>
+      <a class="btn ghost dl-mac" href="#download" aria-disabled="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg><span data-l="en">macOS: coming soon</span><span data-l="de">macOS: bald verfügbar</span></a>
+      <a class="btn primary dl-other" href="#download"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg><span data-l="en">Go to downloads</span><span data-l="de">Zu den Downloads</span></a>
       <a class="btn ghost" href="#server">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>
         <span data-l="en">Host a server</span><span data-l="de">Server hosten</span>
       </a>
     </div>
-    <div class="ver"><span class="js-ver"></span><span data-l="en">Open source · Windows · Linux · Self-hosted</span><span data-l="de">Open Source · Windows · Linux · Selbst gehostet</span></div>
+    <div class="ver"><span class="js-ver"></span><span data-l="en">Open source · Windows · Linux · macOS soon · Self-hosted</span><span data-l="de">Open Source · Windows · Linux · macOS bald · Selbst gehostet</span></div>
     <div class="shot-hero"><img src="img/voice.png" width="1100" height="731" alt="RustTalk voice channel with four people"></div>
   </div>
 </header>
@@ -233,7 +249,7 @@ html[lang=en] [data-l=de],html[lang=de] [data-l=en]{display:none!important}
         <h3 style="margin:0;font-size:22px" data-l="de">In einer Minute startklar</h3>
         <p style="margin:0;color:var(--muted)" data-l="en">Download the app, enter the server address and your name, and you are in. No sign-up, no email.</p>
         <p style="margin:0;color:var(--muted)" data-l="de">App herunterladen, Serveradresse und Namen eingeben, fertig. Keine Registrierung, keine E-Mail.</p>
-        <a class="btn primary" style="align-self:flex-start" href="https://github.com/rusttalkcrew/RustTalk/releases/latest/download/rusttalk-windows.exe"><span data-l="en">Download for Windows</span><span data-l="de">Für Windows herunterladen</span></a>
+        <div style="display:flex"><a class="btn primary dl-win" style="align-self:flex-start" href="https://github.com/rusttalkcrew/RustTalk/releases/latest/download/rusttalk-windows.exe"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 5.5 10.5 4.5v7H3zm8.5-1.2L21 3v8.5h-9.5zM3 12.5h7.5v7L3 18.5zm8.5 0H21V21l-9.5-1.3z"/></svg><span data-l="en">Download for Windows</span><span data-l="de">Für Windows herunterladen</span></a><a class="btn primary dl-linux" style="align-self:flex-start" href="https://github.com/rusttalkcrew/RustTalk/releases/latest/download/rusttalk-linux-x86_64.AppImage"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg><span data-l="en">Download for Linux</span><span data-l="de">Für Linux herunterladen</span></a><a class="btn ghost dl-mac" style="align-self:flex-start" href="#download" aria-disabled="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg><span data-l="en">macOS: coming soon</span><span data-l="de">macOS: bald verfügbar</span></a><a class="btn primary dl-other" style="align-self:flex-start" href="#download"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg><span data-l="en">Go to downloads</span><span data-l="de">Zu den Downloads</span></a></div>
       </figure>
     </div>
   </div>
@@ -251,6 +267,9 @@ html[lang=en] [data-l=de],html[lang=de] [data-l=en]{display:none!important}
         <p class="small" data-l="de">Windows 10/11. Installiert sich für deinen Benutzer, ohne Adminrechte. Updates direkt in der App.</p>
         <a class="btn primary" href="https://github.com/rusttalkcrew/RustTalk/releases/latest/download/rusttalk-windows.exe"><span data-l="en">Download (x64)</span><span data-l="de">Herunterladen (x64)</span></a>
         <a class="alt-link" href="https://github.com/rusttalkcrew/RustTalk/releases/latest/download/rusttalk-windows-arm64.exe"><span data-l="en">ARM64 version</span><span data-l="de">ARM64-Version</span></a>
+        <details class="files" data-kind="windows"><summary><span data-l="en">All files &amp; older versions</span><span data-l="de">Alle Dateien &amp; ältere Versionen</span></summary>
+        <div class="tools"><label><span data-l="en">Version</span><span data-l="de">Version</span> <select class="ver-sel" aria-label="Version"></select></label></div>
+        <div class="list"><p class="err"><a href="https://github.com/rusttalkcrew/RustTalk/releases" rel="noopener"><span data-l="en">Open releases on GitHub</span><span data-l="de">Releases auf GitHub öffnen</span></a></p></div></details>
       </div>
       <div class="card">
         <h3>🐧 <span data-l="en">Linux app</span><span data-l="de">Linux-App</span></h3>
@@ -258,6 +277,15 @@ html[lang=en] [data-l=de],html[lang=de] [data-l=en]{display:none!important}
         <p class="small" data-l="de">AppImage: herunterladen, ausführbar machen, starten. Wayland, Bildschirm teilen über PipeWire, globale Tastenkürzel.</p>
         <a class="btn ghost" href="https://github.com/rusttalkcrew/RustTalk/releases/latest/download/rusttalk-linux-x86_64.AppImage"><span data-l="en">Download (x86_64)</span><span data-l="de">Herunterladen (x86_64)</span></a>
         <a class="alt-link" href="https://github.com/rusttalkcrew/RustTalk/releases/latest/download/rusttalk-linux-aarch64.AppImage"><span data-l="en">ARM64 version</span><span data-l="de">ARM64-Version</span></a>
+        <details class="files" data-kind="linux"><summary><span data-l="en">All files &amp; older versions</span><span data-l="de">Alle Dateien &amp; ältere Versionen</span></summary>
+        <div class="tools"><label><span data-l="en">Version</span><span data-l="de">Version</span> <select class="ver-sel" aria-label="Version"></select></label></div>
+        <div class="list"><p class="err"><a href="https://github.com/rusttalkcrew/RustTalk/releases" rel="noopener"><span data-l="en">Open releases on GitHub</span><span data-l="de">Releases auf GitHub öffnen</span></a></p></div></details>
+      </div>
+      <div class="card">
+        <h3>🍎 macOS <span class="soon"><span data-l="en">Coming soon</span><span data-l="de">Bald verfügbar</span></span></h3>
+        <p class="small" data-l="en">There is no macOS build yet. It is planned.</p>
+        <p class="small" data-l="de">Einen macOS-Build gibt es noch nicht. Er ist geplant.</p>
+        <a class="btn ghost" href="#download" aria-disabled="true"><span data-l="en">Coming soon</span><span data-l="de">Bald verfügbar</span></a>
       </div>
       <div class="card">
         <h3>🗄️ <span data-l="en">Server</span><span data-l="de">Server</span></h3>
@@ -265,6 +293,9 @@ html[lang=en] [data-l=de],html[lang=de] [data-l=en]{display:none!important}
         <p class="small" data-l="de">Linux-Datei mit systemd, Docker-Image oder Windows. Ein Port: 7331 TCP + UDP.</p>
         <a class="btn ghost" href="#server"><span data-l="en">Setup guide</span><span data-l="de">Anleitung</span></a>
         <a class="alt-link" href="https://github.com/rusttalkcrew/RustTalk/releases" rel="noopener"><span data-l="en">All releases &amp; checksums</span><span data-l="de">Alle Releases &amp; Prüfsummen</span></a>
+        <details class="files" data-kind="server"><summary><span data-l="en">All files &amp; older versions</span><span data-l="de">Alle Dateien &amp; ältere Versionen</span></summary>
+        <div class="tools"><label><span data-l="en">Version</span><span data-l="de">Version</span> <select class="ver-sel" aria-label="Version"></select></label></div>
+        <div class="list"><p class="err"><a href="https://github.com/rusttalkcrew/RustTalk/releases" rel="noopener"><span data-l="en">Open releases on GitHub</span><span data-l="de">Releases auf GitHub öffnen</span></a></p></div></details>
       </div>
     </div>
   </div>
@@ -404,14 +435,64 @@ docker compose logs rusttalk</code></pre>
   lb.addEventListener('click',function(){lb.classList.remove('on')});
   document.addEventListener('keydown',function(e){if(e.key==='Escape')lb.classList.remove('on')});
 
-  fetch('https://api.github.com/repos/rusttalkcrew/RustTalk/releases/latest')
+  var ua=navigator.userAgent||'',plat=(navigator.userAgentData&&navigator.userAgentData.platform)||navigator.platform||'';
+  var os='other';
+  if(/android|iphone|ipad|ipod/i.test(ua))os='other';
+  else if(/win/i.test(plat)||/windows/i.test(ua))os='windows';
+  else if(/mac/i.test(plat)||/macintosh|mac os/i.test(ua))os='mac';
+  else if(/linux|x11|cros/i.test(plat+ua))os='linux';
+  root.dataset.os=os;
+  if(os==='linux'&&/aarch64|arm/i.test(plat+ua)){
+    document.querySelectorAll('a.dl-linux').forEach(function(a){a.href=a.href.replace('x86_64','aarch64')});
+  }
+
+  function fmt(n){return n>1048576?(n/1048576).toFixed(1)+' MB':Math.max(1,Math.round(n/1024))+' KB'}
+  function el(t,c,x){var e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e}
+  var releases=[];
+  function render(box,kind,rel){
+    box.textContent='';
+    var groups={app:[],sum:[]};
+    rel.assets.forEach(function(a){
+      var n=a.name.toLowerCase(),isServer=n.indexOf('server')>=0;
+      if(kind==='server'?!isServer:(isServer||n.indexOf(kind)<0))return;
+      groups[/\.sha256$/.test(n)?'sum':'app'].push(a);
+    });
+    var any=false;
+    [['app','Files'],['sum','SHA-256']].forEach(function(g){
+      var l=groups[g[0]];if(!l.length)return;any=true;
+      box.appendChild(el('h4',null,g[1]));
+      var ul=el('ul');
+      l.forEach(function(a){
+        var li=el('li'),an=el('a',null,a.name);
+        an.href=a.browser_download_url;an.rel='noopener';
+        li.appendChild(an);li.appendChild(el('span',null,fmt(a.size)));ul.appendChild(li);
+      });
+      box.appendChild(ul);
+    });
+    if(!any)box.appendChild(el('p','err','No files in '+rel.tag_name+'.'));
+  }
+  function show(d,tag){
+    var rel=releases.filter(function(r){return r.tag_name===tag})[0];
+    if(rel)render(d.querySelector('.list'),d.dataset.kind,rel);
+  }
+  fetch('https://api.github.com/repos/rusttalkcrew/RustTalk/releases?per_page=30')
     .then(function(r){return r.ok?r.json():null})
     .then(function(j){
-      if(!j||!j.tag_name)return;
-      var d=new Date(j.published_at);
-      document.querySelectorAll('.js-ver').forEach(function(e){e.textContent=j.tag_name+' · '});
+      if(!j||!j.length)return;
+      releases=j.filter(function(r){return !r.draft&&!r.prerelease});
+      if(!releases.length)return;
+      var cur=releases[0],d=new Date(cur.published_at);
+      document.querySelectorAll('.js-ver').forEach(function(e){e.textContent=cur.tag_name+' · '});
       document.querySelectorAll('.js-ver2').forEach(function(e){
-        e.textContent='→ '+j.tag_name+' ('+d.toISOString().slice(0,10)+')';
+        e.textContent='→ '+cur.tag_name+' ('+d.toISOString().slice(0,10)+')';
+      });
+      document.querySelectorAll('details.files').forEach(function(det){
+        var sel=det.querySelector('.ver-sel');
+        releases.forEach(function(r,i){
+          var o=el('option',null,r.tag_name+(i===0?' (latest)':''));o.value=r.tag_name;sel.appendChild(o);
+        });
+        sel.addEventListener('change',function(){show(det,sel.value)});
+        show(det,cur.tag_name);
       });
     }).catch(function(){});
 })();
