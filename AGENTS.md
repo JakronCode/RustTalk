@@ -84,11 +84,28 @@ Changing `shared/src/protocol.rs` or the wire format means bumping `PROTOCOL_VER
 ## Working in this repo
 
 - **Read the task runner first.** There is no Makefile. The scripts that carry the project's flags are `Server/Test_Scripts/run_tests.sh`, `Server/Test_Scripts/e2e_local.sh`, `Client/Windows/Test_Scripts/*.ps1` and `scripts/package-linux.sh`. CI is `.github/workflows/test.yml` for pull requests and `.github/workflows/build.yml` for main and releases. Use `--locked`.
+- **Use the Makefile first.** `make` lists the targets (`setup`, `setup-server`, `server`, `client`, `test`, `test-server`, `lint`, ...); they carry the project's flags. Underneath are `Server/Test_Scripts/run_tests.sh`, `Server/Test_Scripts/e2e_local.sh`, `Client/Windows/Test_Scripts/*.ps1` and `scripts/package-linux.sh`. Local dev data lives in `.dev/` (gitignored). CI is `.github/workflows/build.yml`. Use `--locked`.
 - **Run tests serially where required.** Integration tests share TLS files and run with a single thread in CI.
 - **Quality gate before saying "done":** `cargo test --locked` for the touched crates (`bash Server/Test_Scripts/run_tests.sh` for the server), `cargo clippy` clean for new code, `cargo fmt`. Report failures honestly, with the output.
 - **Releases:** bump the version in `Client/Windows/Cargo.toml`, `Server/Cargo.toml` and `shared/Cargo.toml` together, then tag `vX.Y.Z`. The release workflow checks the versions match.
 - **Platform split:** Windows-only code stays behind `cfg(windows)`, Linux-only code in `Client/Windows/src/linux/`. Don't break either target. UI and networking code is shared.
-- **Conventions:** Rust 2021. User-visible text and docs in English; some existing comments and `Konzept.md` are German, so match the file you are editing. Keep the README feature list, protocol version and known limitations accurate when behaviour changes.
+- **Conventions:** Rust 2021. User-visible text and docs in English, including server logs, error messages and script output; some existing comments and `Konzept.md` are German, so match the file you are editing. Keep the README feature list, protocol version and known limitations accurate when behaviour changes.
 - **Comments:** keep them sparse. One line is usually enough, and only where the code can't say it (the why, not the what). No multi-paragraph comment blocks, no commented-out code, no restating the code.
 - **Small, focused changes.** One concern per branch and PR, with the issue number in it.
 - **Don't act outward without asking:** no pushing, tagging, releasing, publishing, or posting to the issue tracker unless the user asked for it (see the issue rules above for creating issues).
+
+## Choosing models and effort (AI agents)
+
+Match the model and reasoning effort to the job; spend tokens where mistakes are expensive.
+
+| Work | Model | Effort |
+|---|---|---|
+| Finding code, scouting, reading logs, bulk summaries | Haiku | low |
+| Well-scoped fixes, UI tweaks, copy changes, docs, CI/Makefile edits | Sonnet | medium |
+| New features, refactors across modules, tricky bugs | Opus | high |
+| Protocol, crypto, auth, updates, persistence, concurrency | Opus | xhigh |
+
+- Raise the effort one step when a first attempt failed or the change is hard to reverse; lower it for mechanical edits.
+- Scouting results are leads, not facts: verify the lines you rely on before editing.
+- **Scrutiny run per feature:** before a feature PR is marked ready, run one review pass with a different model than the one that wrote it (high effort; xhigh for anything in the protocol/crypto/auth row). Give the reviewer the issue, the diff range and the risky areas, not the whole conversation. The reviewer is read-only. Verify each finding against the code before acting, answer rejected findings in the next round, and stop after a round with no blocking findings. Skip the run for trivial changes (typos, copy, config values).
+- Parallel agents get their own worktree and branch, and never edit the same checkout.

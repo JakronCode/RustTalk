@@ -139,7 +139,8 @@ impl RustTalkApp {
         // Composer FIRST as bottom panel (otherwise the scroll area pushes
         // it below the window edge).
         egui::TopBottomPanel::bottom(format!("composer_{ch_id}"))
-            .frame(egui::Frame::default().fill(theme::BG).inner_margin(egui::Margin { left: 16, right: 16, top: 4, bottom: 16 }))
+            .frame(egui::Frame::default().fill(theme::BG).inner_margin(egui::Margin { left: 16, right: 16, top: 8, bottom: 8 }))
+            .show_separator_line(false)
             .show_inside(ui, |ui| self.composer(ui, ch_id, cmd_tx));
         let name = self.channel_name(ch_id);
         self.message_list(ui, ch_id, |ui| {
@@ -262,7 +263,8 @@ impl RustTalkApp {
 
         // Text feed below the stage.
         egui::TopBottomPanel::bottom(format!("voice_composer_{ch_id}"))
-            .frame(egui::Frame::default().fill(theme::BG).inner_margin(egui::Margin { left: 16, right: 16, top: 4, bottom: 16 }))
+            .frame(egui::Frame::default().fill(theme::BG).inner_margin(egui::Margin { left: 16, right: 16, top: 8, bottom: 8 }))
+            .show_separator_line(false)
             .show_inside(ui, |ui| self.composer(ui, ch_id, cmd_tx));
         self.message_list(ui, ch_id, |ui| {
             ui.add_space(12.0);
@@ -394,7 +396,7 @@ impl RustTalkApp {
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(icons::regular::IMAGE).color(theme::ACCENT));
+                        ui.label(egui::RichText::new(icons::regular::IMAGE).color(theme::accent()));
                         ui.label(egui::RichText::new(name).color(theme::HEADER));
                         ui.label(egui::RichText::new(format!("{kb} KB")).color(theme::MUTED));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -417,8 +419,7 @@ impl RustTalkApp {
             .inner_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if ui
-                        .add(egui::Button::new(egui::RichText::new(icons::regular::PLUS_CIRCLE).size(20.0).color(theme::MUTED)).frame(false))
+                    if theme::ghost_button(ui, egui::RichText::new(icons::regular::PLUS_CIRCLE).size(20.0).color(theme::MUTED))
                         .on_hover_text("Attach image")
                         .clicked()
                     {
@@ -463,13 +464,11 @@ impl RustTalkApp {
                         resp.request_focus();
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let send = ui
-                            .add(egui::Button::new(egui::RichText::new(icons::regular::PAPER_PLANE_RIGHT).size(18.0).color(theme::ACCENT)).frame(false))
+                        let send = theme::ghost_button(ui, egui::RichText::new(icons::regular::PAPER_PLANE_RIGHT).size(18.0).color(theme::accent()))
                             .on_hover_text("Send (Enter)  -  Shift+Enter for a new line")
                             .clicked();
-                        let gif_color = if self.giphy.open { theme::ACCENT } else { theme::MUTED };
-                        let gif = ui
-                            .add(egui::Button::new(egui::RichText::new(icons::regular::GIF).size(18.0).color(gif_color)).frame(false))
+                        let gif_color = if self.giphy.open { theme::accent() } else { theme::MUTED };
+                        let gif = theme::ghost_button(ui, egui::RichText::new(icons::regular::GIF).size(18.0).color(gif_color))
                             .on_hover_text("GIFs");
                         self.gif_button_rect = Some(gif.rect);
                         if gif.clicked() {
@@ -530,7 +529,7 @@ impl RustTalkApp {
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(icon).color(theme::ACCENT));
+                    ui.label(egui::RichText::new(icon).color(theme::accent()));
                     ui.label(egui::RichText::new(title).strong().color(theme::HEADER));
                     ui.label(egui::RichText::new(snippet).color(theme::MUTED));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -599,7 +598,7 @@ impl RustTalkApp {
                     if theme::danger_button(ui, &format!("{}  Delete", icons::regular::TRASH)).clicked() {
                         confirm = true;
                     }
-                    if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                    if theme::ghost_button(ui, "Cancel").clicked() {
                         cancel = true;
                     }
                 });
@@ -784,7 +783,7 @@ fn watch_tile(ui: &mut egui::Ui, rect: egui::Rect, user: &UserInfo, kind: VideoK
     if speaking {
         p.rect_stroke(rect, 10.0, egui::Stroke::new(3.0_f32, theme::GREEN), egui::StrokeKind::Inside);
     } else if resp.hovered() {
-        p.rect_stroke(rect, 10.0, egui::Stroke::new(2.0_f32, theme::ACCENT), egui::StrokeKind::Inside);
+        p.rect_stroke(rect, 10.0, egui::Stroke::new(2.0_f32, theme::accent()), egui::StrokeKind::Inside);
     }
     let d = (rect.height() * 0.30).clamp(32.0, 96.0);
     let av = egui::Rect::from_center_size(rect.center() - egui::vec2(0.0, rect.height() * 0.16), egui::vec2(d, d));
@@ -801,10 +800,10 @@ fn watch_tile(ui: &mut egui::Ui, rect: egui::Rect, user: &UserInfo, kind: VideoK
     let text_y = av.bottom() + 16.0;
     p.text(egui::pos2(rect.center().x, text_y), egui::Align2::CENTER_TOP, what, egui::FontId::proportional((rect.height() * 0.065).clamp(12.0, 15.0)), theme::HEADER);
     // Button look (the click is the whole tile).
-    let label = p.layout_no_wrap(format!("{}  Watch {}", icons::regular::EYE, if kind == VideoKind::Screen { "Stream" } else { "Camera" }), egui::FontId::proportional(14.0), egui::Color32::WHITE);
+    let label = p.layout_no_wrap(format!("{}  Watch {}", icons::regular::EYE, if kind == VideoKind::Screen { "Stream" } else { "Camera" }), egui::FontId::proportional(14.0), theme::on_accent());
     let btn = egui::Rect::from_center_size(egui::pos2(rect.center().x, text_y + 44.0), label.size() + egui::vec2(28.0, 14.0));
-    p.rect_filled(btn, 8.0, if resp.hovered() { theme::ACCENT.gamma_multiply(1.15) } else { theme::ACCENT });
-    p.galley(btn.center() - label.size() / 2.0, label, egui::Color32::WHITE);
+    p.rect_filled(btn, 8.0, if resp.hovered() { theme::accent().gamma_multiply(1.15) } else { theme::accent() });
+    p.galley(btn.center() - label.size() / 2.0, label, theme::on_accent());
     status_badges(p, rect, user);
     resp.on_hover_text("Click to watch - nothing is downloaded until you do").on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -845,7 +844,7 @@ fn video_tile(
     if speaking {
         p.rect_stroke(rect, 10.0, egui::Stroke::new(3.0_f32, theme::GREEN), egui::StrokeKind::Inside);
     } else if resp.hovered() {
-        p.rect_stroke(rect, 10.0, egui::Stroke::new(2.0_f32, theme::ACCENT), egui::StrokeKind::Inside);
+        p.rect_stroke(rect, 10.0, egui::Stroke::new(2.0_f32, theme::accent()), egui::StrokeKind::Inside);
     }
     if resp.hovered() {
         // Bottom right belongs to the "..." menu button; fullscreen hint next to it.
@@ -919,9 +918,11 @@ pub(super) fn chat_line(
         }
         ChatKind::Message { from, own } => (from, *own),
     };
+    let compact = theme::compact();
     if !c.grouped {
-        ui.add_space(10.0);
+        ui.add_space(theme::dense(10.0, 4.0));
     }
+    let name_color = if own { theme::accent().gamma_multiply(1.35) } else { theme::avatar_color(from).gamma_multiply(1.4) };
     let mentioned = !own && mentions(&line.text, c.me);
     let editing = edit.is_some();
     let mut action = None;
@@ -930,7 +931,8 @@ pub(super) fn chat_line(
     let row = ui
         .horizontal(|ui| {
             ui.set_width(ui.available_width());
-            if c.grouped {
+            if compact {
+            } else if c.grouped {
                 ui.add_space(44.0);
             } else {
                 ui.vertical(|ui| {
@@ -954,10 +956,9 @@ pub(super) fn chat_line(
                     };
                     ui.label(egui::RichText::new(text).size(12.0).color(theme::MUTED));
                 }
-                if !c.grouped {
+                if !c.grouped && !compact {
                     ui.horizontal(|ui| {
-                        let color = if own { theme::ACCENT.gamma_multiply(1.35) } else { theme::avatar_color(from).gamma_multiply(1.4) };
-                        ui.label(egui::RichText::new(from).strong().color(color));
+                        ui.label(egui::RichText::new(from).strong().color(name_color));
                         if c.show_ts {
                             ui.label(egui::RichText::new(format_time(line.timestamp)).size(11.0).color(theme::MUTED));
                         }
@@ -965,6 +966,20 @@ pub(super) fn chat_line(
                 }
                 if let Some(edit) = edit {
                     action = inline_editor(ui, line.id, edit);
+                } else if compact {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        if c.show_ts {
+                            ui.label(egui::RichText::new(format_time(line.timestamp)).size(11.0).color(theme::MUTED));
+                        }
+                        ui.label(egui::RichText::new(from).strong().color(name_color));
+                        if !line.text.is_empty() {
+                            ui.add(egui::Label::new(egui::RichText::new(&line.text).color(theme::TEXT)).wrap());
+                        }
+                        if line.edited {
+                            ui.label(egui::RichText::new("(edited)").size(11.0).color(theme::DISABLED));
+                        }
+                    });
                 } else if !line.text.is_empty() {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
@@ -990,7 +1005,7 @@ pub(super) fn chat_line(
         .rect;
 
     let tint = if c.replying || editing {
-        Some((theme::ACCENT.gamma_multiply(0.22), theme::ACCENT))
+        Some((theme::accent().gamma_multiply(0.22), theme::accent()))
     } else if mentioned {
         Some((theme::YELLOW.gamma_multiply(0.12), theme::YELLOW))
     } else {
@@ -1007,7 +1022,7 @@ pub(super) fn chat_line(
                 egui::Align2::RIGHT_TOP,
                 format!("{}  Replying", icons::regular::ARROW_BEND_UP_LEFT),
                 egui::FontId::proportional(11.5),
-                theme::ACCENT,
+                theme::accent(),
             );
         }
     }
@@ -1020,16 +1035,18 @@ pub(super) fn chat_line(
     // Right click: same actions as the hover buttons.
     let resp = ui.interact(row, ui.id().with(("chat-line", line.id)), egui::Sense::click());
     resp.context_menu(|ui| {
-        if ui.button(format!("{}  Reply", icons::regular::ARROW_BEND_UP_LEFT)).clicked() {
+        ui.set_width(180.0);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        if theme::menu_item(ui, icons::regular::ARROW_BEND_UP_LEFT, "Reply", false).clicked() {
             action = Some(ChatAction::Reply(line.id));
             ui.close_menu();
         }
         if own {
-            if ui.button(format!("{}  Edit", icons::regular::PENCIL_SIMPLE)).clicked() {
+            if theme::menu_item(ui, icons::regular::PENCIL_SIMPLE, "Edit", false).clicked() {
                 action = Some(ChatAction::Edit(line.id));
                 ui.close_menu();
             }
-            if ui.button(egui::RichText::new(format!("{}  Delete", icons::regular::TRASH)).color(theme::RED)).clicked() {
+            if theme::menu_item(ui, icons::regular::TRASH, "Delete", true).clicked() {
                 action = Some(delete(line.id));
                 ui.close_menu();
             }
@@ -1069,8 +1086,7 @@ pub(super) fn chat_line(
                         ui.horizontal(|ui| {
                             for (icon, tip, a) in buttons {
                                 let color = if matches!(a, ChatAction::Delete(_)) { theme::RED } else { theme::MUTED };
-                                if ui
-                                    .add(egui::Button::new(egui::RichText::new(icon).size(15.0).color(color)).frame(false).min_size(egui::vec2(24.0, 22.0)))
+                                if theme::ghost_button_sized(ui, egui::RichText::new(icon).size(15.0).color(color), egui::vec2(24.0, 22.0))
                                     .on_hover_text(tip)
                                     .clicked()
                                 {
@@ -1094,7 +1110,7 @@ fn inline_editor(ui: &mut egui::Ui, id: u64, edit: EditBox) -> Option<ChatAction
     let resp = egui::Frame::default()
         .fill(theme::INPUT)
         .corner_radius(6.0)
-        .stroke(egui::Stroke::new(1.0_f32, theme::ACCENT))
+        .stroke(egui::Stroke::new(1.0_f32, theme::accent()))
         .inner_margin(egui::Margin::symmetric(8, 6))
         .show(ui, |ui| {
             ui.add(

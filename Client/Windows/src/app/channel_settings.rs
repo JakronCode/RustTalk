@@ -97,16 +97,12 @@ impl RustTalkApp {
                         if ch.kind != ChannelKind::Spawn {
                             ui.add_space(12.0);
                             ui.separator();
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        egui::RichText::new(format!("{}  Delete {}", icons::regular::TRASH, if is_category { "Category" } else { "Channel" }))
-                                            .color(theme::RED),
-                                    )
-                                    .frame(false)
-                                    .min_size(egui::vec2(170.0, 30.0)),
-                                )
-                                .clicked()
+                            if theme::ghost_button(
+                                ui,
+                                egui::RichText::new(format!("{}  Delete {}", icons::regular::TRASH, if is_category { "Category" } else { "Channel" }))
+                                    .color(theme::RED),
+                            )
+                            .clicked()
                             {
                                 self.confirm_delete = Some(ch.id);
                                 close = true;
@@ -136,7 +132,7 @@ impl RustTalkApp {
                                 self.save_channel_settings(&ch, &st);
                                 close = true;
                             }
-                            if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                            if theme::ghost_button(ui, "Cancel").clicked() {
                                 close = true;
                             }
                         });
@@ -313,7 +309,7 @@ impl RustTalkApp {
                             self.new_channel_name.clear();
                             self.show_new_channel = false;
                         }
-                        if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                        if theme::ghost_button(ui, "Cancel").clicked() {
                             self.show_new_channel = false;
                         }
                     });
@@ -364,7 +360,7 @@ impl RustTalkApp {
                         }
                         done = true;
                     }
-                    if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                    if theme::ghost_button(ui, "Cancel").clicked() {
                         done = true;
                     }
                 });
