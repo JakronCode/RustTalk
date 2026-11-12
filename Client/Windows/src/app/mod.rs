@@ -352,6 +352,7 @@ pub struct RustTalkApp {
     screen_audio: Option<crate::audio::screen_audio::ScreenAudio>,
     /// Starting it failed: don't retry until the share stops.
     screen_audio_failed: bool,
+    audio_only: bool,
     /// Debug hook `share_self`: share this once we are in a voice channel.
     dev_pending_share: Option<ShareSource>,
     /// Debug builds: scripted input (`RUSTTALK_DEV_INPUT`).
@@ -519,6 +520,7 @@ impl RustTalkApp {
             screen: None,
             screen_audio: None,
             screen_audio_failed: false,
+            audio_only: false,
             dev_pending_share: None,
             #[cfg(debug_assertions)]
             dev_input: Default::default(),
@@ -623,7 +625,7 @@ impl RustTalkApp {
         self.confirm_delete = None;
         self.show_new_channel = false;
         self.mic_monitor = None;
-        self.screen_audio = None;
+        self.stop_shared_audio();
         self.audio = None; // releases capture and joins the audio threads
         self.audio_session = None;
         self.users.clear();
@@ -651,7 +653,7 @@ impl RustTalkApp {
         // Video stoppen + Frames rauswerfen.
         self.cam = None;
         self.screen = None;
-        self.screen_audio = None;
+        self.stop_shared_audio();
         self.cam_dialog = None;
         self.screen_picker = None;
         *self.local_preview.lock().unwrap() = None;
@@ -822,6 +824,7 @@ impl RustTalkApp {
 
     /// Ends our camera (when it is live) and screen share.
     fn stop_own_sources(&mut self) {
+        self.stop_shared_audio();
         let Some(cmd_tx) = self.cmd_tx.clone() else { return };
         if self.cam.as_ref().is_some_and(|c| c.is_sending()) {
             self.cam = None;
@@ -1037,7 +1040,7 @@ impl RustTalkApp {
                 if let Some(rc) = self.reconnect.take() {
                     self.restore_after_reconnect(rc);
                 }
-                self.screen_audio = None;
+                self.stop_shared_audio();
                 self.audio = None;
                 self.audio_session = match (udp_socket, udp_cipher) {
                     (Some(udp), Some(cipher)) => Some(AudioSession { udp, token: udp_token, cipher }),
@@ -1476,30 +1479,7 @@ impl RustTalkApp {
             }
         }
 
-        // Share audio follows the screen share (and the setting).
-        let want_audio = cfg!(windows)
-            && self.screen.is_some()
-            && self.config.share_screen_audio
-            && self
-                .audio
-                .as_ref()
-                .is_some_and(|audio| audio.voice_channel.is_some());
-        if !want_audio {
-            self.screen_audio = None;
-            if self.screen.is_none() {
-                self.screen_audio_failed = false;
-            }
-        } else if self.screen_audio.is_none() && !self.screen_audio_failed {
-            if let Some(engine) = &self.audio {
-                match engine.start_screen_audio(self.config.output_device.as_deref()) {
-                    Ok(sa) => self.screen_audio = Some(sa),
-                    Err(e) => {
-                        self.screen_audio_failed = true;
-                        self.set_error(format!("Computer audio not shared: {e:#}"));
-                    }
-                }
-            }
-        }
+        self.sync_shared_audio();
 
         // Fullscreen: only the stream + member bar. Ends when the stream is gone
         // (a stream just picked to watch counts while its first frame is on the way).

@@ -253,6 +253,7 @@ impl RustTalkApp {
     /// A device was picked: use it right away (level meter and, when
     /// connected, the running audio). Falls back to `previous` if it fails.
     pub(in crate::app) fn apply_devices(&mut self, previous: (Option<String>, Option<String>)) {
+        self.stop_shared_audio();
         self.mic_monitor = None; // restarts with the new input next frame
         let voice_channel = self.my_voice_channel().filter(|_| self.connected);
         if let Some(engine) = self.audio.as_mut() {
@@ -279,9 +280,7 @@ impl RustTalkApp {
                     Err(e) => format!("Voice audio stopped: {e:#} - rejoin voice to try again"),
                 });
             }
-            // Computer audio of a screen share follows the output device.
-            self.screen_audio = None;
-            self.screen_audio_failed = false;
+
         } else {
             self.sync_voice_audio();
         }

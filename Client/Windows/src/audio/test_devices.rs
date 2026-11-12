@@ -7,12 +7,15 @@ use std::rc::Rc;
 pub enum Kind {
     Input,
     Output,
+    System,
 }
 
 #[derive(Default)]
 pub struct Counts {
     pub inputs: usize,
     pub outputs: usize,
+    pub systems: usize,
+    pub fail_system: bool,
     pub input_starts: usize,
     pub fail_input: bool,
     pub fail_output: bool,
@@ -38,6 +41,7 @@ impl Drop for Devices {
         DEVICES.with(|slot| *slot.borrow_mut() = None);
         assert_eq!(self.0.borrow().inputs, 0);
         assert_eq!(self.0.borrow().outputs, 0);
+        assert_eq!(self.0.borrow().systems, 0);
     }
 }
 
@@ -51,6 +55,7 @@ impl Drop for Stream {
         match self.kind {
             Kind::Input => counts.inputs -= 1,
             Kind::Output => counts.outputs -= 1,
+            Kind::System => counts.systems -= 1,
         }
     }
 }
@@ -65,6 +70,7 @@ pub fn open(kind: Kind, name: Option<&str>) -> Option<anyhow::Result<DeviceStrea
                 state.fail_input
             }
             Kind::Output => state.fail_output,
+            Kind::System => state.fail_system,
         };
         if fail || name == Some("broken") {
             return Some(Err(anyhow::anyhow!("device unavailable")));
@@ -75,6 +81,10 @@ pub fn open(kind: Kind, name: Option<&str>) -> Option<anyhow::Result<DeviceStrea
                 assert_eq!(state.inputs, 1, "capture owners must not overlap");
             }
             Kind::Output => state.outputs += 1,
+            Kind::System => {
+                state.systems += 1;
+                assert_eq!(state.systems, 1);
+            }
         }
         drop(state);
         Some(Ok(DeviceStream::Fake {

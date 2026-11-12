@@ -1337,6 +1337,44 @@ mod udp_stats {
     }
 
     #[tokio::test]
+    async fn audio_only_relay_needs_voice_membership_and_authentication() {
+        use rusttalk_shared::audio_packet::FLAG_SCREEN_AUDIO;
+        let port = free_port();
+        let _server = spawn_server(port, VOICE);
+        wait_for_port(port);
+        let ((mut a, wa), (mut b, wb)) = two_in_voice(port).await;
+        let ua = Udp::new(port, &wa).await;
+        let ub = Udp::new(port, &wb).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!wa.users.iter().any(|u| u.sharing));
+        let mut header = AudioHeader::new(ua.token, 1, 960);
+        header.flags = FLAG_SCREEN_AUDIO;
+        let packet = seal_packet(&header, &ua.cipher, DIR_TO_SERVER, b"audio only");
+        ua.send(&packet).await;
+        let (got, plain) = ub.recv(500).await.expect("audio without video sharing");
+        assert_eq!(got.flags, FLAG_SCREEN_AUDIO);
+        assert_eq!(got.token, wa.client_id);
+        assert_eq!(plain, b"audio only");
+        ua.send(&packet).await; // replay
+        let mut forged = seal_packet(&header, &ua.cipher, DIR_TO_SERVER, b"forged");
+        *forged.last_mut().unwrap() ^= 1;
+        ua.send(&forged).await;
+        let truncated = seal_packet(&header, &ua.cipher, DIR_TO_SERVER, b"truncated");
+        ua.send(&truncated[..truncated.len() - 1]).await;
+        assert!(ub.recv(200).await.is_none());
+        send(&mut b, &ClientMessage::SetMuteState { muted: false, deafened: true }).await;
+        drain(&mut b, 200).await;
+        ua.send(&seal_packet(&header, &ua.cipher, DIR_TO_SERVER, b"deafened")).await;
+        assert!(ub.recv(200).await.is_none());
+        send(&mut b, &ClientMessage::SetMuteState { muted: false, deafened: false }).await;
+        send(&mut a, &ClientMessage::JoinChannel { channel_id: 1 }).await;
+        drain(&mut a, 200).await;
+        drain(&mut b, 200).await;
+        ua.send(&seal_packet(&header, &ua.cipher, DIR_TO_SERVER, b"lobby")).await;
+        assert!(ub.recv(200).await.is_none(), "lobby cannot send system audio");
+    }
+
+    #[tokio::test]
     async fn ping_flood_is_rate_limited() {
         let port = free_port();
         let _server = spawn_server(port, VOICE);

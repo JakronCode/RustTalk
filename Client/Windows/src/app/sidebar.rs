@@ -770,6 +770,19 @@ impl RustTalkApp {
                 self.toggle_screen(cmd_tx);
             }
         });
+        let active = self.screen_audio.is_some();
+        let label = if active { "Stop sharing audio" } else { "Share audio only" };
+        let tip = if cfg!(windows) {
+            "Share computer audio with this voice channel; microphone stays independent"
+        } else {
+            "System audio capture is currently supported only on Windows (WASAPI loopback)"
+        };
+        ui.add_enabled_ui(cfg!(windows), |ui| {
+            if wide_toggle(ui, icons::regular::SPEAKER_HIGH, label,
+                if active { IconState::Active } else { IconState::Normal }, tip).clicked() {
+                if active { self.stop_shared_audio(); } else { self.toggle_audio_only(); }
+            }
+        }).response.on_disabled_hover_text(tip);
         ui.add_space(2.0);
         ui.separator();
     }
