@@ -18,26 +18,18 @@ for plugin in app coreelements playback typefindfunctions videoconvertscale vide
 done
 scanner=$(pkg-config --variable=libexecdir gstreamer-1.0)/gstreamer-1.0/gst-plugin-scanner
 cp "$scanner" "$appdir/usr/libexec/gstreamer-1.0/"
-libdir=$(pkg-config --variable=libdir libpipewire-0.3)
-cp -r "$libdir/spa-0.2" "$appdir/usr/lib/"
-alsa=$(pkg-config --variable=libdir alsa)/alsa-lib
-mkdir -p "$appdir/usr/lib/alsa-lib"
-# Only the PulseAudio bridge is needed; optional host plugins can have missing dependencies.
-cp "$alsa/libasound_module_pcm_pulse.so" "$alsa/libasound_module_ctl_pulse.so" "$alsa/libasound_module_conf_pulse.so" "$appdir/usr/lib/alsa-lib/"
-for plugin in pcm_pipewire ctl_pipewire; do
-    if test -f "$alsa/libasound_module_$plugin.so"; then
-        cp "$alsa/libasound_module_$plugin.so" "$appdir/usr/lib/alsa-lib/"
-    fi
-done
 args=()
 while IFS= read -r -d '' library; do args+=(--library "$library"); done < <(find "$appdir/usr/lib" -type f -name '*.so*' -print0)
-# linuxdeploy resolves ELF dependencies; host GPU drivers and glibc remain host-owned.
+# ALSA and PipeWire plugins must match their host libraries and configuration.
+# linuxdeploy resolves capture dependencies; keep the complete audio stack host-owned.
 NO_STRIP=1 APPIMAGE_EXTRACT_AND_RUN=1 "$work/linuxdeploy" --appdir "$appdir" \
+    --exclude-library 'libasound.so*' --exclude-library 'libpipewire-0.3.so*' \
     --executable "$appdir/usr/bin/rusttalk" --executable "$appdir/usr/libexec/gstreamer-1.0/gst-plugin-scanner" \
     --desktop-file packaging/linux/org.rusttalk.RustTalk.desktop --icon-file packaging/linux/org.rusttalk.RustTalk.svg "${args[@]}"
 rm -f "$appdir/AppRun" # linuxdeploy creates a symlink to the executable
 cp packaging/linux/AppRun "$appdir/AppRun"
 chmod +x "$appdir/AppRun"
+python3 scripts/test-appimage-audio.py "$appdir"
 APPIMAGE_EXTRACT_AND_RUN=1 ARCH="$arch" "$work/appimagetool" --runtime-file "$work/runtime" "$appdir" "$work/rusttalk-linux-$arch.AppImage"
 # Replace the artifact without truncating an image that may still be mounted.
 cp "$work/rusttalk-linux-$arch.AppImage" "$root/dist/.rusttalk-linux-$arch.AppImage.new"

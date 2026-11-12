@@ -107,6 +107,12 @@ appimage: ## Linux AppImage and server bundle into dist/
 test: ## All tests (serial, like CI)
 	@$(CARGO) test --locked --workspace -- --test-threads=1
 
+.PHONY: test-packaging
+test-packaging: ## AppImage audio packaging regression checks (no build or hardware)
+	@python3 scripts/test-appimage-audio.py
+	@bash -n scripts/package-linux.sh
+	@bash -n packaging/linux/AppRun
+
 .PHONY: test-server
 test-server: ## Server unit and integration tests
 	@bash Server/Test_Scripts/run_tests.sh
