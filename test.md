@@ -12,6 +12,7 @@
 **Tests:** Client 91 (neu: Kanaltyp nach Kategorie), Server 53 (neu: Sharing endet beim Kanalwechsel), Integration 17, shared 18 ✅.
 **Live (2 Debug-Clients, Testserver):** „+“ an „Voice Channels“ → Dialog mit Voice vorausgewählt → „Neuer Voice“ als Sprachkanal angelegt ✅. Sharer teilt (Viewer sieht das Bild), Doppelklick auf anderen Kanal → Teilen aus, Viewer-Kachel weg, keine hängende Kachel beim Sharer, zurück in den Kanal → bleibt aus ✅. Eingabegerät im verbundenen Zustand gewechselt → Pipeline neu mit anderem Gerät, Ausgabe unverändert, Config gespeichert ✅.
 **Nicht geprüft:** Gerätewechsel über das Dropdown mit der echten Maus (gleicher Code-Pfad wie der Dev-Hook), Kamera (nur Bildschirm getestet).
+**Release:** v0.7.1/v0.8.0 (Voice-Bühne, Anstupsen) kamen parallel aus einer anderen Session → `main` eingemergt (Protokoll v13), als **v0.8.1** veröffentlicht. Nach dem Merge: alle Tests ✅ (Client 93, Server 54, Integration 18, shared 18), live erneut „+“/Voice-Vorauswahl und Teilen-Stopp beim Kanalwechsel ✅.
 
 ---
 

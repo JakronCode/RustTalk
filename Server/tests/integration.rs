@@ -340,6 +340,38 @@ async fn mute_state_wird_verteilt() {
     }
 }
 
+/// Poke: kommt nur beim Ziel an (mit Absender + Nachricht), Spam wird abgelehnt.
+#[tokio::test]
+async fn poke_erreicht_nur_das_ziel() {
+    let port = free_port();
+    let _server = spawn_server(port, "");
+    wait_for_port(port);
+
+    let (mut a, wa) = connect(port, "alice", None).await;
+    let (mut b, wb) = connect(port, "bob", None).await;
+    let (mut c, _wc) = connect(port, "carol", None).await;
+    for conn in [&mut a, &mut b, &mut c] {
+        while recv(conn, 300).await.is_some() {}
+    }
+
+    send(&mut a, &ClientMessage::Poke { target: wb.client_id, message: "Gaming?".into() }).await;
+    match recv(&mut b, 2000).await {
+        Some(ServerMessage::Poked { from_id, from_name, message }) => {
+            assert_eq!(from_id, wa.client_id);
+            assert_eq!(from_name, "alice");
+            assert_eq!(message, "Gaming?");
+        }
+        other => panic!("Poked erwartet, bekam: {other:?}"),
+    }
+    assert!(recv(&mut c, 400).await.is_none(), "Unbeteiligte bekommen nichts");
+    assert!(recv(&mut a, 400).await.is_none(), "Absender bekommt kein Echo");
+
+    // Sofort nochmal: Cooldown -> Fehler nur an den Absender.
+    send(&mut a, &ClientMessage::Poke { target: wb.client_id, message: String::new() }).await;
+    assert!(matches!(recv(&mut a, 2000).await, Some(ServerMessage::Error { .. })));
+    assert!(recv(&mut b, 400).await.is_none());
+}
+
 /// Servereinstellungen: Aenderung wird an alle verteilt, ungueltige abgelehnt.
 #[tokio::test]
 async fn server_settings_werden_verteilt() {

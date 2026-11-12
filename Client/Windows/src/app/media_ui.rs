@@ -46,8 +46,12 @@ impl RustTalkApp {
                 egui::Frame::default().fill(theme::DARK).inner_margin(egui::Margin::symmetric(12, 8)),
             )
             .show(ctx, |ui| {
+                // Centered member row (scrolls only when it does not fit).
+                let row_w = members.len() as f32 * 84.0 + members.len().saturating_sub(1) as f32 * ui.spacing().item_spacing.x;
+                let pad = ((ui.available_width() - row_w) / 2.0 - ui.spacing().item_spacing.x).max(0.0);
                 egui::ScrollArea::horizontal().show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        ui.add_space(pad);
                         for user in &members {
                             let talking_now = talking
                                 .get(&user.id)
@@ -96,8 +100,8 @@ impl RustTalkApp {
                                                 .add(btn)
                                                 .on_hover_text(format!(
                                                     "Watch {}'s {}",
-                                                    kind_label(k),
-                                                    user.name
+                                                    user.name,
+                                                    kind_label(k)
                                                 ))
                                                 .clicked()
                                             {
@@ -280,6 +284,9 @@ impl RustTalkApp {
     ) {
         // Reihenfolge wichtig: StopVideo vor SetSharing(false), sonst hat der
         // Server keine Relay-Ziele mehr.
+        // New generation: frames the capture/encoder threads still deliver
+        // after the stop are dropped by the old sink (no frozen last frame).
+        self.video_epoch[epoch_slot(kind)].fetch_add(1, Ordering::Relaxed);
         let _ = cmd_tx.send(Command::StopVideo(kind));
         let still = self.screen.is_some() || self.cam.as_ref().is_some_and(|c| c.is_sending());
         let _ = cmd_tx.send(Command::SetSharing(still));
@@ -297,7 +304,9 @@ impl RustTalkApp {
                 continue;
             }
             // Dropping the view ends its decoder thread.
-            self.video_frames.remove(&(user_id, k));
+            if self.video_frames.remove(&(user_id, k)).is_some() {
+                self.video_stopped.insert((user_id, k), Instant::now());
+            }
         }
     }
 
@@ -315,7 +324,13 @@ impl RustTalkApp {
         let ctx = self.ctx.clone();
         let backlog = self.upload_backlog.clone();
         let my_id = self.my_id;
+        let epochs = self.video_epoch.clone();
+        let slot = epoch_slot(kind);
+        let generation = epochs[slot].load(Ordering::Relaxed);
         move |out: video::VideoOut| {
+            if epochs[slot].load(Ordering::Relaxed) != generation {
+                return; // source was stopped: late frame from the capture/encoder threads
+            }
             if let Some(img) = out.preview {
                 *preview.lock().unwrap() = Some(img);
             }
@@ -373,6 +388,17 @@ impl RustTalkApp {
 
     /// An incoming H.264 frame: to the decoder thread of its stream (started on first use).
     pub(super) fn feed_video(&mut self, key: (u64, VideoKind), data: Vec<u8>) {
+        // Just ended: late frames (still in flight) must not bring the tile
+        // back with a frozen last picture. A real restart gets through after
+        // the grace period (its decoder then asks for a keyframe).
+        if !self.video_frames.contains_key(&key) {
+            if let Some(t) = self.video_stopped.get(&key) {
+                if t.elapsed() < STOP_GRACE {
+                    return;
+                }
+                self.video_stopped.remove(&key);
+            }
+        }
         let view = self.video_frames.entry(key).or_insert_with(|| VideoView::spawn(key, self.video_tx.clone(), self.ctx.clone()));
         if let Err(std::sync::mpsc::TrySendError::Full(_)) = view.tx.try_send(data) {
             // Decoder can't keep up: this frame is lost -> the next ones need a keyframe.
@@ -1090,6 +1116,17 @@ fn share_card(
         );
     }
     resp.on_hover_text(&entry.title)
+}
+
+/// How long a just-ended stream ignores late frames.
+const STOP_GRACE: Duration = Duration::from_millis(2000);
+
+/// Index of a source in `video_epoch`.
+fn epoch_slot(kind: VideoKind) -> usize {
+    match kind {
+        VideoKind::Camera => 0,
+        VideoKind::Screen => 1,
+    }
 }
 
 pub(super) fn kind_icon(kind: VideoKind) -> &'static str {
