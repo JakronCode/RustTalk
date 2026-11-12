@@ -1,6 +1,6 @@
 # RustTalk – Roadmap
 
-Checklist of planned features, by priority. Status as of 2026-11-12 (v0.9.0, protocol v14). All categories A-D done.
+Checklist of planned features, by priority. Status as of 2026-11-12 (v0.10.0, protocol v14). All categories A-D done.
 
 ## A – Quick wins (WIP spots already visible in the UI)
 
@@ -41,7 +41,7 @@ Bugs:
 
 Improvements (priority order):
 
-- [ ] **E4 Better video quality** – webcam and screen share: higher bitrate/resolution presets, frame pacing, maybe hardware encoder
+- [x] **E4 Better video quality** – OpenH264 with its SIMD assembly (NASM) + SIMD color conversion (~80 -> ~15 ms per 1080p frame), DXGI Desktop Duplication instead of GDI (~70 -> ~1 ms), SIMD scaling in the capture thread; 30 fps, no frame skipping, quality floor (max QP), new "Best" level (1440p / camera 1080p). Hardware encoder: not needed for now
 - [x] **E5a Opt-in watching** – streams show as a "Watch" card; the server relays video only to viewers who clicked it, "Stop watching" per tile (protocol v14)
 - [ ] **E5b Focused video view** – a video/details view to focus one stream and hide people
 - [ ] **E6 GUI overhaul** – go through all screens for details (spacing, states, empty states, consistency)

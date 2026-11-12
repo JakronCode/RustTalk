@@ -1,13 +1,15 @@
 //! Shared video types, pacing, and bounded H.264 encoder pipeline.
-use crate::video_codec::{fit_even, H264Encoder};
+#[cfg(test)]
+use crate::video_codec::fit_even;
+use crate::video_codec::{fit_even_fast, H264Encoder};
 use anyhow::{Context, Result};
 use eframe::egui;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Frame-Intervall: 25 fps.
-pub const FRAME_INTERVAL: Duration = Duration::from_millis(40);
+/// Frame interval: 30 fps (`video_codec::FPS`).
+pub const FRAME_INTERVAL: Duration = Duration::from_micros((1_000_000.0 / crate::video_codec::FPS) as u64);
 
 /// Gleichmaessiger Takt: laesst im Schnitt einen Frame pro `FRAME_INTERVAL`
 /// durch, auch wenn die Quelle (z. B. Kamera mit 30 fps) etwas schneller ist.
@@ -23,7 +25,7 @@ impl Pacer {
     }
 
     pub(crate) fn ready_at(&mut self, now: Instant) -> bool {
-        // 5 ms Toleranz, damit 33-ms-Kameraframes nicht jedes 2. Mal knapp verfehlen.
+        // 5 ms tolerance so 30-fps camera frames (33 ms) are not missed by a hair.
         if now + Duration::from_millis(5) < self.next {
             return false;
         }
@@ -79,11 +81,13 @@ impl Drop for VideoCapture {
 /// Qualitaetsstufe fuer gesendete Streams (Einstellungen).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum VideoQuality {
-    /// 720p-Bildschirm / 540p-Kamera: wenig CPU und Bandbreite (WLAN).
+    /// 720p screen / 540p camera: little CPU and bandwidth (Wi-Fi).
     Balanced,
-    /// 1080p-Bildschirm / 720p-Kamera: scharf im Vollbild (LAN).
+    /// 1080p screen / 720p camera: sharp in fullscreen (LAN).
     #[default]
     High,
+    /// 1440p screen / 1080p camera: for big screens and fast connections.
+    Best,
 }
 
 /// Kodier-Parameter einer Quelle.
@@ -98,38 +102,34 @@ pub struct EncodeParams {
 impl VideoQuality {
     pub fn label(self) -> &'static str {
         match self {
-            VideoQuality::Balanced => "Balanced (720p, ~2 Mbit/s)",
-            VideoQuality::High => "High (1080p, ~4 Mbit/s)",
+            VideoQuality::Balanced => "Balanced (720p30, up to ~2.5 Mbit/s)",
+            VideoQuality::High => "High (1080p30, up to ~6 Mbit/s)",
+            VideoQuality::Best => "Best (1440p30, up to ~10 Mbit/s)",
         }
     }
 
     pub fn screen(self) -> EncodeParams {
         match self {
-            VideoQuality::Balanced => EncodeParams {
-                max_w: 1280,
-                max_h: 720,
-                bitrate: 2_000_000,
-            },
-            VideoQuality::High => EncodeParams {
-                max_w: 1920,
-                max_h: 1080,
-                bitrate: 4_000_000,
-            },
+            VideoQuality::Balanced => EncodeParams { max_w: 1280, max_h: 720, bitrate: 2_500_000 },
+            VideoQuality::High => EncodeParams { max_w: 1920, max_h: 1080, bitrate: 6_000_000 },
+            VideoQuality::Best => EncodeParams { max_w: 2560, max_h: 1440, bitrate: 10_000_000 },
         }
     }
 
     pub fn camera(self) -> EncodeParams {
         match self {
-            VideoQuality::Balanced => EncodeParams {
-                max_w: 960,
-                max_h: 540,
-                bitrate: 1_200_000,
-            },
-            VideoQuality::High => EncodeParams {
-                max_w: 1280,
-                max_h: 720,
-                bitrate: 2_500_000,
-            },
+            VideoQuality::Balanced => EncodeParams { max_w: 960, max_h: 540, bitrate: 1_200_000 },
+            VideoQuality::High => EncodeParams { max_w: 1280, max_h: 720, bitrate: 2_500_000 },
+            VideoQuality::Best => EncodeParams { max_w: 1920, max_h: 1080, bitrate: 5_000_000 },
+        }
+    }
+
+    /// Camera resolution to ask the device for (it may give less).
+    #[allow(dead_code)] // used by the Windows camera path
+    pub fn camera_request(self) -> (u32, u32) {
+        match self {
+            VideoQuality::Best => (1920, 1080),
+            _ => (1280, 720),
         }
     }
 }
@@ -165,10 +165,11 @@ where
     std::thread::Builder::new()
         .name(format!("{name}-enc"))
         .spawn(move || {
-            let mut enc = H264Encoder::new(params.bitrate, screen);
+            let mut enc = H264Encoder::with_tuning(params.bitrate, screen, crate::video_codec::Tuning::stream(screen));
             let mut was_sending = false;
             for job in job_rx {
-                let rgb = fit_even(job.img, params.max_w, params.max_h);
+                // Fast SIMD scaling; RGB stays RGB, RGBA stays RGBA (screen pictures).
+                let pic = fit_even_fast(job.img, params.max_w, params.max_h);
                 let now_sending = sending.load(Ordering::Relaxed);
                 // Asked for, or just went live: start with a full picture.
                 if keyframe.swap(false, Ordering::Relaxed) || (now_sending && !was_sending) {
@@ -176,7 +177,7 @@ where
                 }
                 was_sending = now_sending;
                 let frame = if now_sending {
-                    match enc.encode(&rgb) {
+                    match enc.encode_image(&pic) {
                         Ok(f) => Some(f),
                         Err(e) => {
                             tracing::warn!("{e:#}");
@@ -186,11 +187,10 @@ where
                 } else {
                     None
                 };
-                let preview = preview.then(|| {
-                    egui::ColorImage::from_rgb(
-                        [rgb.width() as usize, rgb.height() as usize],
-                        rgb.as_raw(),
-                    )
+                let size = [pic.width() as usize, pic.height() as usize];
+                let preview = preview.then(|| match &pic {
+                    image::DynamicImage::ImageRgba8(rgba) => egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
+                    other => egui::ColorImage::from_rgb(size, other.to_rgb8().as_raw()),
                 });
                 if frame.is_some() || preview.is_some() {
                     on_frame(VideoOut { frame, preview });
@@ -229,17 +229,16 @@ pub struct ShareEntry {
 mod tests {
     use super::*;
     #[test]
-    fn pacer_yields_about_25_fps_from_30_fps_camera() {
+    fn pacer_keeps_30_fps_cameras_and_thins_faster_sources() {
         let start = Instant::now();
+        // 3 s of a 30 fps camera (33.3 ms apart, a little jitter): every frame passes.
         let mut pacer = Pacer { next: start };
-        // 3 s Kamera mit 30 fps (33,3 ms Abstand).
-        let accepted = (0..90)
-            .filter(|i| pacer.ready_at(start + Duration::from_micros(33_333 * i)))
-            .count();
-        assert!(
-            (70..=78).contains(&accepted),
-            "~75 Frames erwartet, bekam {accepted}"
-        );
+        let accepted = (0..90).filter(|i| pacer.ready_at(start + Duration::from_micros(33_333 * i + (i % 3) * 900))).count();
+        assert!((86..=90).contains(&accepted), "~90 frames expected, got {accepted}");
+        // A 60 fps source is thinned to ~30 fps.
+        let mut pacer = Pacer { next: start };
+        let accepted = (0..180).filter(|i| pacer.ready_at(start + Duration::from_micros(16_667 * i))).count();
+        assert!((85..=95).contains(&accepted), "~90 of 180 expected, got {accepted}");
     }
 
     /// The encoder thread: preview only while not sending, keyframe when going
@@ -306,8 +305,11 @@ mod tests {
 
     #[test]
     fn quality_levels_scale_up() {
-        let (b, h) = (VideoQuality::Balanced.screen(), VideoQuality::High.screen());
+        let (b, h, best) = (VideoQuality::Balanced.screen(), VideoQuality::High.screen(), VideoQuality::Best.screen());
         assert!(h.max_w > b.max_w && h.bitrate > b.bitrate);
+        assert!(best.max_w > h.max_w && best.bitrate > h.bitrate);
+        assert!(VideoQuality::Best.camera().max_w > VideoQuality::High.camera().max_w);
+        assert_eq!(FRAME_INTERVAL, Duration::from_micros(33_333), "30 fps");
         assert_eq!(VideoQuality::default(), VideoQuality::High);
     }
     /// Compare with `cargo test --release -p rusttalk-client video_frame_cost -- --ignored --nocapture`.

@@ -2,6 +2,34 @@
 
 > Pflichtdokumentation aller Testläufe. Neueste oben.
 
+## 2026-11-12 (31) – Release v0.10.0: PR #10 (Linux-Client, Kürzel) + E4
+
+**Merge:** `main` mit PR #4 (AGENTS.md, TLS-Schlüssel aus dem Repo) und PR #10 (Linux/Wayland-Client, globale Stumm/Taub-Kürzel, Builds für Windows/Linux x64+ARM64) in den E4-Stand gemergt. Konflikte: Release-Workflow und Lockfile vom PR übernommen; E4 in die neue Aufteilung `video_common.rs` (gemeinsam) / `video.rs` (Windows) übertragen.
+**Nachgezogen:** NASM im neuen Build-Workflow für Windows x64 (sonst ~5x langsamere Videokodierung im Release); `cargo.ps1` nimmt CMake aus Visual Studio/Build Tools (PR #10 braucht CMake für Opus) und setzt `CMAKE_POLICY_VERSION_MINIMUM`; README nennt CMake.
+**Vorher geprüft:** PR #10 einzeln unter Windows gebaut und getestet (alle Tests grün mit CMake aus den Build Tools), CI des PR auf allen vier Plattformen grün.
+
+**Tests (zusammengeführt):** Client 97, Server 54, test_client 1, Integration 18, shared 18 ✅; `--locked` Release-Build ✅; E4-Messung unverändert (Aufnahme 1,2 ms, Skalieren 12 ms, Kodieren 20 ms pro Frame, keine übersprungenen Frames); live zwei Debug-Clients: Watch → Bild, Farben korrekt ✅.
+**Offen aus dem Review von PR #10:** Stumm/Taub-Kürzel sind immer global aktiv (auch ohne globales PTT); Opus als Vorabversion (`audiopus 0.3.0-rc.0`). Nicht geprüft: Linux-Client (kein Linux hier), ARM64.
+
+---
+
+## 2026-11-12 (30) – E4: Videoqualität und Bildrate
+
+**Messung zuerst** (neue ignorierte Tests `quality_report`, `hw_screen_stage_times`; Bilder nur im Speicher): Bildschirmübertragung lief real mit **~12 fps** statt 25. Ursachen pro Frame auf einem 2560×1440-Monitor: GDI-Aufnahme 72 ms, Skalieren 40 ms, H.264 80 ms (OpenH264 ohne Assembler gebaut – kein `nasm` vorhanden, auch nicht im Release-Workflow), davon 15 ms langsame RGB→YUV-Umrechnung.
+
+**Änderungen:**
+- NASM: lokal per winget installiert (mit Zustimmung), Release-Workflow installiert es per choco, `cargo.ps1` findet es selbst. Debug-Builds: OpenH264 ohne `-g` (mit NASM 3.x fehlten sonst die SSE-Funktionen beim Linken) und optimiert.
+- RGB/RGBA→YUV über den SIMD-Pfad (`from_rgb8_source`/`from_rgba8_source`): 15 → 1,6 ms.
+- Monitore über DXGI Desktop Duplication (xcap `video_recorder`, pro Monitor einmal erzeugt und wiederverwendet, GDI als Rückfall): 72 → ~1 ms. Ruhender Bildschirm: letztes Bild alle 0,5 s erneut (späte Zuschauer, Keyframes).
+- Skalieren mit `fast_image_resize` (SIMD, Catmull-Rom) im Aufnahme-Thread parallel zum Encoder: 40 → 14 ms; RGBA bleibt RGBA.
+- Encoder: 30 fps, Bitraten-Modus ohne Frame-Skipping (kein Ruckeln), Qualitätsgrenze QP 36 (Bildschirm) / 40 (Kamera); neue Stufe „Best“ (1440p, Kamera 1080p), „High“ 6 Mbit/s.
+
+**Ergebnis (Release, 2560×1440 → 1080p):** Aufnahme ~1 ms + Skalieren 14 ms (Thread 1) ‖ Kodieren ~21 ms (Thread 2) → 30 fps möglich (vorher ~12). Kodierte Qualität gleich/besser (PSNR 35,8 dB, keine übersprungenen Frames).
+**Tests:** Client 94 (neu: schnelles Skalieren behält Format/Seitenverhältnis, RGBA-Kodierung; Pacer 30 fps), Server 54, Integration 18, shared 18 ✅. **Live:** Fensterübertragung zwischen zwei Debug-Clients, Farben korrekt ✅; Monitorübertragung nur per Pixelstatistik geprüft (Screenshot enthielt den echten Bildschirm, nicht angesehen, gelöscht).
+**Nicht geprüft:** Kamera mit „Best“ (1080p) an echter Kamera, Bildrate bei einem Zuschauer im echten Netz, GitHub-Build mit choco-NASM (erst beim nächsten Release).
+
+---
+
 ## 2026-11-12 (29) – Streams nur auf Klick (Opt-in), Protokoll v14
 
 **Wunsch:** Wer einem Kanal beitritt, in dem jemand streamt, bekam das Video sofort (erzwungene Bandbreite). Jetzt nur auf Klick.

@@ -420,11 +420,11 @@ impl RustTalkApp {
         });
         card(ui, |ui| {
             caption(ui, "Streaming");
-            setting_row(ui, "Stream quality", Some("Camera and screen share. \"High\" for LAN, \"Balanced\" for Wi-Fi."), false, |ui| {
+            setting_row(ui, "Stream quality", Some("Camera and screen share. \"High\" for LAN, \"Best\" for big screens on fast connections, \"Balanced\" for Wi-Fi."), false, |ui| {
                 egui::ComboBox::from_id_salt("video_quality")
                     .selected_text(self.config.video_quality.label())
                     .show_ui(ui, |ui| {
-                        for q in [video::VideoQuality::High, video::VideoQuality::Balanced] {
+                        for q in [video::VideoQuality::Best, video::VideoQuality::High, video::VideoQuality::Balanced] {
                             ui.selectable_value(&mut self.config.video_quality, q, q.label());
                         }
                     });
