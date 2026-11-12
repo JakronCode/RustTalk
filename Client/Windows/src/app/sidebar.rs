@@ -1000,10 +1000,10 @@ fn split_button(
         p.rect_filled(rect, 6.0, theme::RED.gamma_multiply(0.15));
     }
     if main.hovered() && enabled {
-        p.rect_filled(main_r, egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 }, theme::HOVER);
+        p.rect_filled(main_r, egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 }, egui::Color32::from_white_alpha(14));
     }
     if caret.hovered() {
-        p.rect_filled(caret_r, egui::CornerRadius { nw: 0, sw: 0, ne: 6, se: 6 }, theme::HOVER);
+        p.rect_filled(caret_r, egui::CornerRadius { nw: 0, sw: 0, ne: 6, se: 6 }, egui::Color32::from_white_alpha(14));
     }
     p.text(main_r.center(), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(18.0), fg);
     p.text(caret_r.center(), egui::Align2::CENTER_CENTER, icons::regular::CARET_DOWN, egui::FontId::proportional(12.0), theme::MUTED);

@@ -228,11 +228,17 @@ pub fn icon_button(ui: &mut egui::Ui, icon: &str, state: IconState, tooltip: &st
         IconState::Danger => (RED, egui::Color32::TRANSPARENT),
         IconState::Disabled => (DISABLED, egui::Color32::TRANSPARENT),
     };
+    let hover_bg = ui.painter().add(egui::Shape::Noop);
     let btn = egui::Button::new(egui::RichText::new(icon).size(18.0).color(fg))
         .fill(bg)
         .min_size(egui::vec2(32.0, 32.0));
     let resp = ui.add_enabled(state != IconState::Disabled, btn);
-    resp.on_hover_text(tooltip).on_disabled_hover_text(tooltip)
+    // Transparent buttons get no hover fill from egui; paint one (red tint for Danger).
+    if resp.hovered() && matches!(state, IconState::Normal | IconState::Danger) {
+        let fill = if state == IconState::Danger { RED.gamma_multiply(0.18) } else { egui::Color32::from_white_alpha(14) };
+        ui.painter().set(hover_bg, egui::Shape::rect_filled(resp.rect, 6.0, fill));
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tooltip).on_disabled_hover_text(tooltip)
 }
 
 /// Primary (accent) button.
