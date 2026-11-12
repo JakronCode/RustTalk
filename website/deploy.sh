@@ -7,6 +7,6 @@ host="${RUSTTALK_WEB_HOST:?set RUSTTALK_WEB_HOST, e.g. root@your-server}"
 dest="${RUSTTALK_WEB_ROOT:-/var/www/rusttalk}"
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-files=(index.html impressum.html datenschutz.html legal.css lang.js favicon.svg img)
+files=(index.html roadmap.html impressum.html datenschutz.html legal.css lang.js favicon.svg img)
 tar -czf - "${files[@]}" | ssh "$host" "set -e; mkdir -p '$dest'; tar -xzf - -C '$dest' --no-same-owner; chmod -R a+rX '$dest'"
 echo "Deployed to $host:$dest"

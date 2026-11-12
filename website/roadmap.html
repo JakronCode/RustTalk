@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roadmap – RustTalk</title>
+<meta name="description" content="What RustTalk already does, what is planned next and what we are thinking about.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="img/apple-touch-icon.png">
+<link rel="stylesheet" href="legal.css">
+<style>
+.wrap.wide{max-width:1000px}
+.lead{font-size:18px;color:var(--muted);max-width:680px;margin:0 0 26px}
+.legend{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 8px}
+.chip{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;padding:4px 10px;border-radius:999px;border:1px solid var(--line);background:var(--bg2);color:var(--text);white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;flex:none}
+.c-plan .dot,.dot.plan{background:#5865f2}.c-idea .dot,.dot.idea{background:#f0b232}.c-done .dot,.dot.done{background:#23a55a}
+section{margin-top:52px}
+section>h2{display:flex;align-items:center;gap:10px;font-size:26px;margin:0 0 6px}
+section>p{margin:0 0 20px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+.card{background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:20px;display:flex;flex-direction:column;gap:6px}
+.card .top{display:flex;align-items:center;gap:10px}
+.card .ic{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;font-size:19px;flex:none;background:rgba(88,101,242,.18)}
+.idea .card .ic{background:rgba(240,178,50,.16)}
+.card h3{margin:0;font-size:17px;line-height:1.3}
+.card p{margin:0;font-size:15px}
+.card a.issue{font-size:13px;color:var(--dim);text-decoration:none;margin-top:4px}
+.card a.issue:hover{color:var(--text)}
+.more{margin-top:18px;background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:16px 20px}
+.more h3{margin:0 0 8px;font-size:15px;color:var(--text)}
+.more ul{margin:0;padding-left:18px;color:var(--muted);font-size:15px}
+.more li{margin:3px 0}
+.more a{color:var(--muted)}
+.timeline{position:relative;margin-left:6px;padding-left:26px;border-left:2px solid var(--line)}
+.rel{position:relative;padding:0 0 26px}
+.rel::before{content:"";position:absolute;left:-33px;top:5px;width:12px;height:12px;border-radius:50%;background:#23a55a;border:3px solid var(--bg)}
+.rel h3{margin:0;font-size:17px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.rel h3 small{font-weight:400;color:var(--dim);font-size:13px}
+.rel ul{margin:6px 0 0;padding-left:18px;color:var(--muted);font-size:15px}
+.rel li{margin:2px 0}
+.cta{margin-top:40px;background:var(--bg2);border:1px solid var(--line);border-radius:14px;padding:20px;color:var(--muted)}
+.cta a{color:#8b93ff}
+@media(max-width:560px){.cards{grid-template-columns:1fr}section>h2{font-size:22px}.timeline{padding-left:20px}.rel::before{left:-27px}}
+</style>
+</head>
+<body>
+<nav><div class="wrap wide">
+  <a class="brand" href="./"><img src="favicon.svg" alt="" width="30" height="30">RustTalk</a>
+  <div class="lang" role="group" aria-label="Language"><button type="button" data-set="en">EN</button><button type="button" data-set="de">DE</button></div>
+</div></nav>
+
+<main class="wrap wide">
+  <h1>Roadmap</h1>
+  <p class="lead" data-l="en">What RustTalk already does, what we are building next and what we are still thinking about. No dates: we ship when it is ready and safe.</p>
+  <p class="lead" data-l="de">Was RustTalk schon kann, woran wir als Nächstes arbeiten und worüber wir noch nachdenken. Ohne Termine: Wir veröffentlichen, wenn es fertig und sicher ist.</p>
+  <div class="legend">
+    <span class="chip c-plan"><span class="dot"></span><span data-l="en">Planned</span><span data-l="de">Geplant</span></span>
+    <span class="chip c-idea"><span class="dot"></span><span data-l="en">Maybe later</span><span data-l="de">Vielleicht später</span></span>
+    <span class="chip c-done"><span class="dot"></span><span data-l="en">Shipped</span><span data-l="de">Erledigt</span></span>
+  </div>
+
+  <section id="planned">
+    <h2><span class="dot plan"></span><span data-l="en">Planned</span><span data-l="de">Geplant</span></h2>
+    <p data-l="en">On our list. The order is not fixed yet.</p>
+    <p data-l="de">Steht auf unserer Liste. Die Reihenfolge ist noch offen.</p>
+    <div class="cards">
+      <div class="card"><div class="top"><div class="ic">💻</div><h3 data-l="en">macOS app</h3><h3 data-l="de">macOS-App</h3></div>
+        <p data-l="en">A native RustTalk app for Mac, with the same features as on Windows and Linux.</p>
+        <p data-l="de">Eine eigene RustTalk-App für den Mac, mit denselben Funktionen wie unter Windows und Linux.</p></div>
+      <div class="card"><div class="top"><div class="ic">🤖</div><h3 data-l="en">Android app</h3><h3 data-l="de">Android-App</h3></div>
+        <p data-l="en">Voice and chat on the go, with push-to-talk and notifications.</p>
+        <p data-l="de">Sprache und Chat unterwegs, mit Push-to-Talk und Benachrichtigungen.</p></div>
+      <div class="card"><div class="top"><div class="ic">🔗</div><h3 data-l="en">Peer-to-peer video &amp; screen sharing</h3><h3 data-l="de">Peer-to-Peer Video &amp; Bildschirm</h3></div>
+        <p data-l="en">Streams go straight between participants for lower latency and less server load, with an encrypted relay as fallback.</p>
+        <p data-l="de">Streams laufen direkt zwischen den Teilnehmern: weniger Verzögerung, weniger Serverlast. Ein verschlüsseltes Relay springt ein, wenn es direkt nicht geht.</p>
+        <a class="issue" href="https://github.com/rusttalkcrew/RustTalk/issues/39" rel="noopener">GitHub #39 →</a></div>
+      <div class="card"><div class="top"><div class="ic">📤</div><h3 data-l="en">Peer-to-peer file sharing</h3><h3 data-l="de">Peer-to-Peer Dateiaustausch</h3></div>
+        <p data-l="en">Send files directly and encrypted to another user, without the file ever touching the server.</p>
+        <p data-l="de">Dateien direkt und verschlüsselt an andere schicken, ohne dass die Datei über den Server läuft.</p>
+        <a class="issue" href="https://github.com/rusttalkcrew/RustTalk/issues/38" rel="noopener">GitHub #38 →</a></div>
+      <div class="card"><div class="top"><div class="ic">🗂️</div><h3 data-l="en">File hosting on the server</h3><h3 data-l="de">Dateiablage auf dem Server</h3></div>
+        <p data-l="en">Upload files to a channel, like in TeamSpeak. Admins set storage quotas and how long files are kept.</p>
+        <p data-l="de">Dateien in einen Kanal hochladen, wie bei TeamSpeak. Admins legen Speicherlimits und Aufbewahrungsdauer fest.</p>
+        <a class="issue" href="https://github.com/rusttalkcrew/RustTalk/issues/37" rel="noopener">GitHub #37 →</a></div>
+      <div class="card"><div class="top"><div class="ic">🎧</div><h3 data-l="en">Share audio only</h3><h3 data-l="de">Nur Audio teilen</h3></div>
+        <p data-l="en">Share just the sound of one app, for example Spotify or Audible, so everyone can listen along. No video needed.</p>
+        <p data-l="de">Nur den Ton einer App teilen, zum Beispiel Spotify oder Audible, damit alle mithören können. Ganz ohne Video.</p>
+        <a class="issue" href="https://github.com/rusttalkcrew/RustTalk/issues/27" rel="noopener">GitHub #27 →</a></div>
+    </div>
+    <div class="more">
+      <h3 data-l="en">Also on the list</h3><h3 data-l="de">Außerdem auf der Liste</h3>
+      <ul>
+        <li><a href="https://github.com/rusttalkcrew/RustTalk/issues/22" rel="noopener"><span data-l="en">Several servers at once, with a server switcher</span><span data-l="de">Mehrere Server gleichzeitig, mit Server-Umschalter</span></a></li>
+        <li><a href="https://github.com/rusttalkcrew/RustTalk/issues/19" rel="noopener"><span data-l="en">App in your language (German and more)</span><span data-l="de">App in deiner Sprache (Deutsch und mehr)</span></a></li>
+        <li><a href="https://github.com/rusttalkcrew/RustTalk/issues/28" rel="noopener"><span data-l="en">Remote control in screen sharing</span><span data-l="de">Fernsteuerung beim Bildschirm teilen</span></a></li>
+        <li><a href="https://github.com/rusttalkcrew/RustTalk/issues/36" rel="noopener"><span data-l="en">Use your identity on several devices, with recovery</span><span data-l="de">Identität auf mehreren Geräten nutzen, mit Wiederherstellung</span></a></li>
+        <li><a href="https://github.com/rusttalkcrew/RustTalk/issues/7" rel="noopener"><span data-l="en">Apps and servers one version apart still connect</span><span data-l="de">App und Server dürfen eine Version auseinander liegen</span></a></li>
+        <li><a href="https://github.com/rusttalkcrew/RustTalk/issues/8" rel="noopener"><span data-l="en">Optional automatic server updates</span><span data-l="de">Optionale automatische Server-Updates</span></a></li>
+        <li><a href="https://github.com/rusttalkcrew/RustTalk/issues/5" rel="noopener"><span data-l="en">Voice activation that learns your microphone</span><span data-l="de">Sprachaktivierung, die sich auf dein Mikrofon einstellt</span></a></li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="maybe" class="idea">
+    <h2><span class="dot idea"></span><span data-l="en">Maybe later</span><span data-l="de">Vielleicht später</span></h2>
+    <p data-l="en">Things we would like to have, but there is no plan for when yet.</p>
+    <p data-l="de">Wünschen wir uns, aber wann es kommt, ist noch offen.</p>
+    <div class="cards">
+      <div class="card"><div class="top"><div class="ic">📱</div><h3 data-l="en">iOS app</h3><h3 data-l="de">iOS-App</h3></div>
+        <p data-l="en">RustTalk on iPhone and iPad.</p>
+        <p data-l="de">RustTalk auf iPhone und iPad.</p></div>
+      <div class="card"><div class="top"><div class="ic">🎮</div><h3 data-l="en">Steam Deck integration</h3><h3 data-l="de">Steam-Deck-Integration</h3></div>
+        <p data-l="en">Talk while you play in Gaming Mode, for example as a Decky Loader plugin with push-to-talk on a Deck button.</p>
+        <p data-l="de">Im Gaming-Modus sprechen, während du spielst, zum Beispiel als Decky-Loader-Plugin mit Push-to-Talk auf einer Deck-Taste.</p></div>
+    </div>
+  </section>
+
+  <section id="shipped">
+    <h2><span class="dot done"></span><span data-l="en">Shipped</span><span data-l="de">Erledigt</span></h2>
+    <p data-l="en">What is already in RustTalk, newest first.</p>
+    <p data-l="de">Was RustTalk schon kann, das Neueste zuerst.</p>
+    <div class="timeline">
+      <div class="rel"><h3>v0.11 <small>Nov 2026</small></h3>
+        <ul data-l="en"><li>Redesigned settings with sections and search</li><li>Markdown in chat, with code highlighting</li><li>Update notice with one-click install</li><li>Saved servers on the home screen</li></ul>
+        <ul data-l="de"><li>Neue Einstellungen mit Bereichen und Suche</li><li>Markdown im Chat, mit Code-Hervorhebung</li><li>Update-Hinweis mit Installation per Klick</li><li>Gespeicherte Server auf dem Startbildschirm</li></ul></div>
+      <div class="rel"><h3>v0.10 <small>Nov 2026</small></h3>
+        <ul data-l="en"><li><b>Linux app</b> (AppImage, Wayland, global shortcuts) and ARM64 builds</li><li>Official Docker image for the server</li><li>Appearance settings: primary color, density, resizable sidebar</li><li>Voice connection stats (ping graph, packet loss)</li><li>Saved-server nicknames, clearer join errors, certificate prompt</li><li>Smoother video: 30 fps</li></ul>
+        <ul data-l="de"><li><b>Linux-App</b> (AppImage, Wayland, globale Tastenkürzel) und ARM64-Versionen</li><li>Offizielles Docker-Image für den Server</li><li>Darstellung: Hauptfarbe, Dichte, verstellbare Seitenleiste</li><li>Verbindungsstatistik (Ping-Verlauf, Paketverlust)</li><li>Spitznamen für Server, verständlichere Fehler, Zertifikatsabfrage</li><li>Flüssigeres Video: 30 fps</li></ul></div>
+      <div class="rel"><h3>v0.8 – v0.9 <small>Nov 2026</small></h3>
+        <ul data-l="en"><li>Voice stage with video tiles</li><li>Poke someone with a message, TeamSpeak style</li><li>Watch streams only when you click them</li></ul>
+        <ul data-l="de"><li>Sprach-Bühne mit Videokacheln</li><li>Anstupsen mit Nachricht, wie bei TeamSpeak</li><li>Streams nur ansehen, wenn du sie anklickst</li></ul></div>
+      <div class="rel"><h3>v0.6 – v0.7 <small>Nov 2026</small></h3>
+        <ul data-l="en"><li><b>Encryption</b>: TLS with certificate pinning, encrypted voice</li><li>Echo cancellation and computer audio in screen sharing</li><li>H.264 video</li><li>Name announcements with natural offline voices</li><li>Server updates with one command</li></ul>
+        <ul data-l="de"><li><b>Verschlüsselung</b>: TLS mit Zertifikat-Pinning, verschlüsselte Sprache</li><li>Echounterdrückung und Systemton beim Bildschirm teilen</li><li>H.264-Video</li><li>Namensansagen mit natürlichen Offline-Stimmen</li><li>Server-Updates mit einem Befehl</li></ul></div>
+      <div class="rel"><h3>v0.5 <small>Nov 2026</small></h3>
+        <ul data-l="en"><li>Identities and roles: admin, moderator, member</li><li>Move, kick and ban; invite links; audit log</li></ul>
+        <ul data-l="de"><li>Identitäten und Rollen: Admin, Moderator, Mitglied</li><li>Verschieben, kicken, bannen; Einladungslinks; Audit-Log</li></ul></div>
+      <div class="rel"><h3>v0.4 <small>Nov 2026</small></h3>
+        <ul data-l="en"><li>Installer and in-app updates</li><li>Global push-to-talk, per-user volume, auto-reconnect</li><li>GIF picker, replies, editing, @mentions, search</li><li>Windows notifications</li></ul>
+        <ul data-l="de"><li>Installation und Updates in der App</li><li>Globales Push-to-Talk, Lautstärke pro Person, automatisches Wiederverbinden</li><li>GIF-Auswahl, Antworten, Bearbeiten, @Erwähnungen, Suche</li><li>Windows-Benachrichtigungen</li></ul></div>
+      <div class="rel"><h3>v0.2 – v0.3 <small>Nov 2026</small></h3>
+        <ul data-l="en"><li>Webcam, screen and window sharing, fullscreen</li><li>Better voice: resampler, automatic gain, error correction</li><li>Channel drag &amp; drop, server settings, AFK mover</li></ul>
+        <ul data-l="de"><li>Webcam, Bildschirm und Fenster teilen, Vollbild</li><li>Bessere Sprache: Resampler, automatische Lautstärke, Fehlerkorrektur</li><li>Kanäle per Drag &amp; Drop, Servereinstellungen, AFK-Verschieber</li></ul></div>
+      <div class="rel"><h3>v0.1 <small>Nov 2026</small></h3>
+        <ul data-l="en"><li>First release: voice chat, text chat with images, Windows app, Linux server</li></ul>
+        <ul data-l="de"><li>Erste Version: Sprach-Chat, Text-Chat mit Bildern, Windows-App, Linux-Server</li></ul></div>
+    </div>
+  </section>
+
+  <div class="cta">
+    <span data-l="en">Missing something? <a href="https://github.com/rusttalkcrew/RustTalk/issues" rel="noopener">Suggest a feature on GitHub</a>.</span>
+    <span data-l="de">Fehlt dir etwas? <a href="https://github.com/rusttalkcrew/RustTalk/issues" rel="noopener">Schlag eine Funktion auf GitHub vor</a>.</span>
+  </div>
+</main>
+
+<footer><div class="wrap wide">
+  <a href="./">RustTalk</a>
+  <span><a href="impressum.html">Impressum</a> · <a href="datenschutz.html"><span data-l="de">Datenschutz</span><span data-l="en">Privacy</span></a></span>
+</div></footer>
+<script src="lang.js"></script>
+</body>
+</html>
