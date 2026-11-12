@@ -99,7 +99,7 @@ impl RustTalkApp {
                         self.send_poke(dlg.target, &dlg.name, &dlg.message);
                         done = true;
                     }
-                    if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                    if theme::ghost_button(ui, "Cancel").clicked() {
                         done = true;
                     }
                 });
@@ -150,7 +150,8 @@ impl RustTalkApp {
                     }
                     let online = self.users.contains_key(&from_id);
                     if ui
-                        .add_enabled(online, egui::Button::new(format!("{}  Poke Back", icons::regular::HAND_WAVING)).frame(false))
+                        .add_enabled_ui(online, |ui| theme::ghost_button(ui, format!("{}  Poke Back", icons::regular::HAND_WAVING)))
+                        .inner
                         .clicked()
                     {
                         reply = true;

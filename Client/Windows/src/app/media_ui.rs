@@ -92,11 +92,11 @@ impl RustTalkApp {
                                             let active = (user.id, k) == key;
                                             let btn = egui::Button::new(
                                                 egui::RichText::new(kind_icon(k)).color(
-                                                    if active { egui::Color32::WHITE } else { theme::MUTED },
+                                                    if active { theme::on_accent() } else { theme::MUTED },
                                                 ),
                                             )
                                             .small()
-                                            .fill(if active { theme::ACCENT } else { theme::HOVER });
+                                            .fill(if active { theme::accent() } else { theme::HOVER });
                                             if ui
                                                 .add(btn)
                                                 .on_hover_text(format!(
@@ -583,15 +583,15 @@ impl RustTalkApp {
                                     "{}  Turn On Camera",
                                     icons::regular::VIDEO_CAMERA
                                 ))
-                                .color(egui::Color32::WHITE),
+                                .color(theme::on_accent()),
                             )
-                            .fill(theme::ACCENT),
+                            .fill(theme::accent()),
                         )
                         .clicked()
                     {
                         action = Some(true);
                     }
-                    if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                    if theme::ghost_button(ui, "Cancel").clicked() {
                         action = Some(false);
                     }
                 });
@@ -777,15 +777,15 @@ impl RustTalkApp {
                                         "{}  Go Live",
                                         icons::regular::BROADCAST
                                     ))
-                                    .color(egui::Color32::WHITE),
+                                    .color(theme::on_accent()),
                                 )
-                                .fill(theme::ACCENT),
+                                .fill(theme::accent()),
                             )
                             .clicked()
                         {
                             share = picker.selected;
                         }
-                        if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                        if theme::ghost_button(ui, "Cancel").clicked() {
                             cancel = true;
                         }
                     });
@@ -1003,7 +1003,7 @@ impl RustTalkApp {
                                     }
                                 }
                                 if hovered {
-                                    ui.painter().rect_stroke(rect, 6.0, egui::Stroke::new(2.0_f32, theme::ACCENT), egui::StrokeKind::Inside);
+                                    ui.painter().rect_stroke(rect, 6.0, egui::Stroke::new(2.0_f32, theme::accent()), egui::StrokeKind::Inside);
                                 }
                                 let resp = if g.title.is_empty() { resp } else { resp.on_hover_text(&g.title) };
                                 if resp.clicked() && !self.giphy.sending {
@@ -1172,7 +1172,7 @@ fn share_card(
         painter.rect_stroke(
             rect.shrink(1.0),
             8.0,
-            egui::Stroke::new(2.0_f32, theme::ACCENT),
+            egui::Stroke::new(2.0_f32, theme::accent()),
             egui::StrokeKind::Inside,
         );
     }

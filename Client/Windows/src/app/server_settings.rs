@@ -126,8 +126,8 @@ impl RustTalkApp {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let save = ui.add_enabled(
                                 changed,
-                                egui::Button::new(egui::RichText::new("Save Changes").strong().color(egui::Color32::WHITE))
-                                    .fill(theme::ACCENT)
+                                egui::Button::new(egui::RichText::new("Save Changes").strong().color(theme::on_accent()))
+                                    .fill(theme::accent())
                                     .min_size(egui::vec2(110.0, 32.0)),
                             );
                             if save.clicked() {
@@ -136,7 +136,7 @@ impl RustTalkApp {
                                 }
                                 close = true;
                             }
-                            if ui.add(egui::Button::new(if changed { "Discard" } else { "Close" }).frame(false)).clicked() {
+                            if theme::ghost_button(ui, if changed { "Discard" } else { "Close" }).clicked() {
                                 close = true;
                             }
                             if changed {
@@ -171,7 +171,7 @@ impl RustTalkApp {
                                 Err(e) => dlg.error = Some(e),
                             }
                         }
-                        if dlg.draft.icon.is_some() && ui.add(egui::Button::new(egui::RichText::new("Remove").color(theme::RED)).frame(false)).clicked() {
+                        if dlg.draft.icon.is_some() && theme::ghost_button(ui, egui::RichText::new("Remove").color(theme::RED)).clicked() {
                             dlg.draft.icon = None;
                         }
                     });

@@ -231,6 +231,38 @@ impl RustTalkApp {
             });
         });
         card(ui, |ui| {
+            caption(ui, "Primary color");
+            ui.label(egui::RichText::new("Buttons, highlights, selections and links").size(12.0).color(theme::MUTED));
+            ui.add_space(4.0);
+            let before = self.config.accent_color;
+            ui.horizontal_wrapped(|ui| {
+                for (name, rgb) in theme::ACCENT_PRESETS {
+                    accent_swatch(ui, name, rgb, &mut self.config.accent_color);
+                }
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("Custom").color(theme::MUTED));
+                ui.color_edit_button_srgb(&mut self.config.accent_color).on_hover_text("Pick any color");
+                if self.config.accent_color != crate::config::DEFAULT_ACCENT && ui.small_button("Reset").clicked() {
+                    self.config.accent_color = crate::config::DEFAULT_ACCENT;
+                }
+            });
+            if before != self.config.accent_color {
+                theme::set_appearance(ui.ctx(), self.config.accent_color, self.config.compact);
+            }
+        });
+        card(ui, |ui| {
+            caption(ui, "Density");
+            let mut compact = self.config.compact;
+            ui.horizontal(|ui| {
+                mode_card(ui, &mut compact, false, icons::regular::ROWS, "Cozy", "Roomy, avatars in chat");
+                mode_card(ui, &mut compact, true, icons::regular::LIST_DASHES, "Compact", "More fits on screen");
+            });
+            if compact != self.config.compact {
+                self.config.compact = compact;
+                theme::set_appearance(ui.ctx(), self.config.accent_color, compact);
+            }
+        });
+        card(ui, |ui| {
             caption(ui, "Scaling");
             setting_row(ui, "UI scale", Some("Zoom the whole interface (also Ctrl + / Ctrl -)"), false, |ui| {
                 let mut pct = (self.config.ui_scale * 100.0).round();
@@ -249,10 +281,6 @@ impl RustTalkApp {
             caption(ui, "Chat");
             setting_row(ui, "Show timestamps", Some("Time next to every message"), false, |ui| {
                 toggle(ui, &mut self.config.show_timestamps);
-            });
-            ui.separator();
-            setting_row(ui, "Compact mode", Some("Denser message list"), true, |ui| {
-                toggle(ui, &mut false.clone());
             });
             ui.separator();
             setting_row(ui, "Animated GIFs", Some("Play GIFs in chat (off = first frame only)"), false, |ui| {
@@ -837,6 +865,23 @@ fn device_combo(ui: &mut egui::Ui, id: &str, selected: &mut Option<String>, devi
         });
 }
 
+/// Round color swatch; click selects `rgb`.
+fn accent_swatch(ui: &mut egui::Ui, name: &str, rgb: [u8; 3], current: &mut [u8; 3]) {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
+    let color = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+    let p = ui.painter();
+    p.circle_filled(rect.center(), 12.0, color);
+    if *current == rgb {
+        p.circle_stroke(rect.center(), 13.5, egui::Stroke::new(2.0_f32, theme::HEADER));
+        p.text(rect.center(), egui::Align2::CENTER_CENTER, icons::regular::CHECK, egui::FontId::proportional(14.0), egui::Color32::WHITE);
+    } else if resp.hovered() {
+        p.circle_stroke(rect.center(), 13.5, egui::Stroke::new(1.5_f32, theme::MUTED));
+    }
+    if resp.on_hover_text(name).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        *current = rgb;
+    }
+}
+
 /// Large selectable card for the input mode.
 fn mode_card(ui: &mut egui::Ui, value: &mut bool, this: bool, icon: &str, title: &str, desc: &str) {
     let selected = *value == this;
@@ -844,9 +889,9 @@ fn mode_card(ui: &mut egui::Ui, value: &mut bool, this: bool, icon: &str, title:
     let p = ui.painter();
     p.rect_filled(rect, 8.0, if selected { theme::SELECTED } else if resp.hovered() { theme::HOVER } else { theme::INPUT });
     if selected {
-        p.rect_stroke(rect, 8.0, egui::Stroke::new(2.0_f32, theme::ACCENT), egui::StrokeKind::Inside);
+        p.rect_stroke(rect, 8.0, egui::Stroke::new(2.0_f32, theme::accent()), egui::StrokeKind::Inside);
     }
-    p.text(rect.left_center() + egui::vec2(18.0, 0.0), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(22.0), if selected { theme::ACCENT } else { theme::MUTED });
+    p.text(rect.left_center() + egui::vec2(18.0, 0.0), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(22.0), if selected { theme::accent() } else { theme::MUTED });
     p.text(rect.left_top() + egui::vec2(38.0, 14.0), egui::Align2::LEFT_TOP, title, egui::FontId::proportional(14.5), theme::HEADER);
     p.text(rect.left_top() + egui::vec2(38.0, 34.0), egui::Align2::LEFT_TOP, desc, egui::FontId::proportional(12.0), theme::MUTED);
     if resp.clicked() {
@@ -858,10 +903,10 @@ fn theme_swatch(ui: &mut egui::Ui, name: &str, color: egui::Color32, selected: b
     ui.vertical(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(64.0, 44.0), egui::Sense::hover());
         ui.painter().rect_filled(rect, 8.0, color);
-        let stroke = if selected { egui::Stroke::new(2.0_f32, theme::ACCENT) } else { egui::Stroke::new(1.0_f32, theme::BORDER) };
+        let stroke = if selected { egui::Stroke::new(2.0_f32, theme::accent()) } else { egui::Stroke::new(1.0_f32, theme::BORDER) };
         ui.painter().rect_stroke(rect, 8.0, stroke, egui::StrokeKind::Inside);
         if selected {
-            ui.painter().text(rect.right_top() + egui::vec2(-10.0, 10.0), egui::Align2::CENTER_CENTER, icons::regular::CHECK_CIRCLE, egui::FontId::proportional(14.0), theme::ACCENT);
+            ui.painter().text(rect.right_top() + egui::vec2(-10.0, 10.0), egui::Align2::CENTER_CENTER, icons::regular::CHECK_CIRCLE, egui::FontId::proportional(14.0), theme::accent());
         }
         ui.label(egui::RichText::new(name).size(12.0).color(if enabled { theme::HEADER } else { theme::DISABLED }));
     });

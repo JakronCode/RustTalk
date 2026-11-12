@@ -139,7 +139,9 @@ impl RustTalkApp {
                 }
                 resp.on_hover_text("Click = fill in  -  double click = connect  -  right click = remove")
                     .context_menu(|ui| {
-                        if ui.button(egui::RichText::new(format!("{}  Remove", icons::regular::TRASH)).color(theme::RED)).clicked() {
+                        ui.set_width(160.0);
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        if theme::menu_item(ui, icons::regular::TRASH, "Remove", true).clicked() {
                             remove_idx = Some(i);
                             ui.close_menu();
                         }
@@ -183,8 +185,8 @@ impl RustTalkApp {
         };
         let connect = ui.add_enabled(
             !connecting,
-            egui::Button::new(egui::RichText::new(format!("{}  {label}", icons::regular::SIGN_IN)).size(15.0).strong().color(egui::Color32::WHITE))
-                .fill(theme::ACCENT)
+            egui::Button::new(egui::RichText::new(format!("{}  {label}", icons::regular::SIGN_IN)).size(15.0).strong().color(theme::on_accent()))
+                .fill(theme::accent())
                 .min_size(egui::vec2(w, 38.0)),
         );
         if connect.clicked() || (!connecting && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
@@ -212,7 +214,7 @@ impl RustTalkApp {
         }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.add(egui::Button::new(format!("{}  Save server", icons::regular::BOOKMARK_SIMPLE)).frame(false)).clicked() {
+            if theme::ghost_button(ui, format!("{}  Save server", icons::regular::BOOKMARK_SIMPLE)).clicked() {
                 let addr = self.config.server_address.trim().to_string();
                 if !addr.is_empty() && !self.config.bookmarks.iter().any(|b| b.address == addr) {
                     self.config.bookmarks.push(ServerBookmark {
@@ -224,7 +226,7 @@ impl RustTalkApp {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(egui::Button::new(format!("{}  Settings", icons::regular::GEAR_SIX)).frame(false)).clicked() {
+                if theme::ghost_button(ui, format!("{}  Settings", icons::regular::GEAR_SIX)).clicked() {
                     self.open_settings(SettingsPage::Voice);
                 }
             });

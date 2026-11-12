@@ -221,10 +221,10 @@ fn ping_graph(ui: &mut egui::Ui, points: &[(f32, f32)]) {
     let line: Vec<egui::Pos2> = points.iter().map(|&(age, ms)| to_screen(age, ms)).collect();
     painter.add(egui::Shape::line(
         line.clone(),
-        egui::Stroke::new(2.0_f32, theme::ACCENT),
+        egui::Stroke::new(2.0_f32, theme::accent()),
     ));
     if let Some(&last) = line.last() {
-        painter.circle_filled(last, 3.0, theme::ACCENT);
+        painter.circle_filled(last, 3.0, theme::accent());
     }
 }
 

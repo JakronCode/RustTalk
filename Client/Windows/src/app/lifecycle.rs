@@ -94,8 +94,8 @@ impl RustTalkApp {
                             ui.add_space(12.0);
                             let install = ui.add_sized(
                                 [ui.available_width(), 38.0],
-                                egui::Button::new(egui::RichText::new(format!("{}  Install", icons::regular::DOWNLOAD_SIMPLE)).size(15.0).strong().color(egui::Color32::WHITE))
-                                    .fill(theme::ACCENT),
+                                egui::Button::new(egui::RichText::new(format!("{}  Install", icons::regular::DOWNLOAD_SIMPLE)).size(15.0).strong().color(theme::on_accent()))
+                                    .fill(theme::accent()),
                             );
                             if install.clicked() {
                                 match install::install(screen.desktop_shortcut) {
