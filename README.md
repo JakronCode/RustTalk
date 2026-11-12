@@ -13,7 +13,7 @@ Website: [rusttalk.com](https://rusttalk.com) (source in [website/](website/))
 ### Working
 
 - **Echo cancellation** (WebRTC AEC3, pure Rust): speakers instead of headphones work
-- **Encryption:** control connection over TLS (the server's own certificate, pinned by the client on first connect like SSH; a changed certificate is refused with a warning), voice and screen audio encrypted with ChaCha20-Poly1305 (per-session key)
+- **Encryption:** control connection over TLS (the server's own certificate: on first connect the client shows its fingerprint and asks before sending anything, then pins it like SSH; a changed certificate is refused with a warning), voice and screen audio encrypted with ChaCha20-Poly1305 (per-session key)
 - **Voice:** push-to-talk (optionally **global**, also while RustTalk is in the background; keys or side mouse buttons) + voice activity (VAD using RMS *and* RNNoise speech probability), Opus 64 kbit/s 48 kHz/20 ms over UDP with in-band FEC, jitter buffer with FEC/PLC, sinc resampler for any microphone sample rate; click "Voice Connected" for connection stats (ping graph of the last 4 minutes, jitter, inbound/outbound packet loss)
 - **Automatic gain control** (AGC + limiter): quiet microphones are boosted, loud ones tamed — can be turned off
 - **AI noise suppression** (RNNoise via `nnnoiseless`) — can be turned off
@@ -272,7 +272,7 @@ bash Server/Test_Scripts/e2e_local.sh
 
 ## Known limitations
 
-- The server certificate is self-signed: compare the fingerprint in the server log (`TLS-Fingerprint: ...`) with Settings > Advanced on first connect if you want to rule out a man in the middle
+- The server certificate is self-signed: on first connect RustTalk shows its SHA-256 fingerprint and asks before sending anything (name, identity, password). Compare it with the `TLS fingerprint: ...` line in the server log to rule out a man in the middle. Once trusted it is pinned; a changed certificate is a hard stop
 - GIFs need one free GIPHY API key per server (developers.giphy.com), entered under Server Settings > Integrations
 - Video runs over the TCP control connection (H.264): fine in a LAN, on weak Wi-Fi pick "Balanced"
 - Natural voices use `ort` 2.0 release candidate `=2.0.0-rc.15` (no stable 2.0 exists yet; pinned exactly so builds don't change on their own). Switch to 2.0.0 once it is out

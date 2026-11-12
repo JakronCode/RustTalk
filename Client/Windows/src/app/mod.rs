@@ -19,6 +19,7 @@ mod connect;
 mod connection_ui;
 #[cfg(debug_assertions)]
 mod dev_input;
+mod join_error;
 mod lifecycle;
 mod media_ui;
 mod moderation_ui;
@@ -371,8 +372,16 @@ pub struct RustTalkApp {
     connect_on_start: bool,
     /// TLS fingerprint of the connected server.
     server_fingerprint: String,
-    /// The server's certificate changed: (address, new fingerprint).
-    cert_warning: Option<(String, String)>,
+    /// Certificate waiting for the user's trust decision (new or changed).
+    cert_check: Option<join_error::CertCheck>,
+    /// Last failed join, shown as a panel on the connect screen.
+    join_error: Option<join_error::JoinError>,
+    /// Focus the password field on the next frame.
+    focus_password: bool,
+    /// Saved server being renamed: (index, text being edited).
+    renaming_bookmark: Option<(usize, String)>,
+    server_nickname: String,
+    show_connect_form: bool,
     /// Not installed yet: the whole window is the install screen.
     install_screen: Option<lifecycle::InstallScreen>,
     update: lifecycle::UpdateState,
@@ -414,6 +423,9 @@ impl RustTalkApp {
         let (video_tx, video_rx) = std::sync::mpsc::channel::<media_ui::DecodeMsg>();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let (giphy_tx, giphy_rx) = std::sync::mpsc::channel::<GiphyMsg>();
+        let server_nickname = config.bookmarks.iter()
+            .find(|b| b.address == config.server_address)
+            .and_then(|b| b.nickname()).unwrap_or_default().to_string();
         let sfx: sfx::SfxQueue = Default::default();
         Self {
             control,
@@ -505,7 +517,12 @@ impl RustTalkApp {
             removed: None,
             connect_on_start,
             server_fingerprint: String::new(),
-            cert_warning: None,
+            cert_check: None,
+            join_error: None,
+            focus_password: false,
+            renaming_bookmark: None,
+            server_nickname,
+            show_connect_form: false,
             install_screen: (crate::install::mode() == crate::install::Mode::NotInstalled).then(lifecycle::InstallScreen::new),
             update: lifecycle::UpdateState::new(),
             toast_tx,
@@ -543,11 +560,17 @@ impl RustTalkApp {
     }
 
     fn start_connect(&mut self) {
+        if let Some(tx) = self.cmd_tx.take() {
+            let _ = tx.send(Command::Disconnect);
+        }
+        reset_event_channel(&mut self.event_tx, &mut self.event_rx);
+        self.cert_check = None;
         // An invite link in the address field: address + invite code.
         if let Some((addr, code)) = moderation_ui::parse_invite_link(&self.config.server_address) {
             self.config.server_address = addr;
             self.config.invite = code;
         }
+        self.join_error = None;
         self.set_status(format!("Connecting to {}...", self.config.server_address));
         self.control.set_vad_threshold(self.config.vad_threshold);
         self.control
@@ -570,6 +593,7 @@ impl RustTalkApp {
     }
 
     fn disconnect(&mut self) {
+        reset_event_channel(&mut self.event_tx, &mut self.event_rx);
         self.global_ptt.lock().unwrap().set([None; 3]);
         self.control.ptt_pressed.store(false, Ordering::Relaxed);
         if let Some(tx) = self.cmd_tx.take() {
@@ -661,21 +685,26 @@ impl RustTalkApp {
         }
     }
 
+    /// Unknown or changed certificate: never go on by ourselves - the user decides.
+    fn on_cert_check(&mut self, check: join_error::CertCheck) {
+        if self.cmd_tx.is_none() {
+            return; // attempt was cancelled meanwhile
+        }
+        self.reconnect = None;
+        self.disconnect();
+        self.join_error = Some(join_error::JoinError::cert_check(&check.fingerprint, check.changed));
+        self.set_error(if check.changed { "The server's identity changed" } else { "New server - trust it to connect" });
+        self.cert_check = Some(check);
+    }
+
     /// Network thread ended. After a successful login this starts the
     /// automatic reconnect; a failed reconnect attempt schedules the next one.
     fn on_connection_lost(&mut self, reason: String) {
-        // Certificate changed: never reconnect on our own - the user decides.
-        if let Some(fp) = reason.strip_prefix(rusttalk_shared::secure::CERT_CHANGED).map(|r| r.trim_start_matches(':').trim().to_string()) {
-            self.reconnect = None;
-            self.disconnect();
-            self.cert_warning = Some((net::normalize_addr(&self.config.server_address), fp));
-            self.set_error("The server's identity changed - see the warning above");
-            return;
-        }
         // Kicked or banned: no automatic reconnect.
         if let Some(why) = self.removed.take() {
             self.reconnect = None;
             self.disconnect();
+            self.join_error = Some(join_error::JoinError::classify(&why));
             self.set_error(why);
             return;
         }
@@ -694,8 +723,14 @@ impl RustTalkApp {
                 deafened: self.control.self_deafened.load(Ordering::Relaxed),
             });
         }
+        let failure = join_error::JoinError::classify(&reason);
+        // Wrong password, ban, version mismatch: retrying won't help.
+        if failure.is_fatal() {
+            self.reconnect = None;
+        }
         self.disconnect();
         let Some(rc) = self.reconnect.as_mut() else {
+            self.join_error = Some(failure);
             self.set_error(format!("Disconnected: {reason}"));
             return;
         };
@@ -704,6 +739,7 @@ impl RustTalkApp {
         }
         if rc.attempt > MAX_RECONNECT_ATTEMPTS {
             self.reconnect = None;
+            self.join_error = Some(join_error::JoinError::classify(&format!("{reason} (gave up reconnecting)")));
             self.set_error(format!("Disconnected: {reason} (gave up reconnecting)"));
             return;
         }
@@ -939,14 +975,10 @@ impl RustTalkApp {
                 }
                 self.connected = true;
                 self.gif_available = gif_search;
-                // Trust on first use: remember the server's certificate.
-                let key = net::normalize_addr(&self.config.server_address);
-                if !fingerprint.is_empty() && !self.config.known_servers.contains_key(&key) {
-                    self.config.known_servers.insert(key, fingerprint.clone());
-                    self.config.save();
-                }
+                // Pinned before Hello (the user trusted it), nothing to learn here.
                 self.server_fingerprint = fingerprint;
-                self.cert_warning = None;
+                self.cert_check = None;
+                self.join_error = None;
                 self.open_permissions = open_permissions;
                 self.config.invite = None; // used
                 self.server_settings = settings;
@@ -1007,6 +1039,9 @@ impl RustTalkApp {
             NetEvent::Message(msg) => self.handle_server_message(msg),
             NetEvent::Status(text) => self.set_error(text),
             NetEvent::Disconnected { reason } => self.on_connection_lost(reason),
+            NetEvent::CertCheck { addr, fingerprint, changed } => {
+                self.on_cert_check(join_error::CertCheck { addr, fingerprint, changed })
+            }
         }
     }
 
@@ -1670,4 +1705,43 @@ mod tests {
         assert_eq!(format_time(90_061), "01:01"); // next day (UTC)
     }
 
+}
+
+// Dropping the old receiver also discards late network and media worker results.
+fn reset_event_channel(
+    tx: &mut std::sync::mpsc::Sender<NetEvent>,
+    rx: &mut std::sync::mpsc::Receiver<NetEvent>,
+) {
+    (*tx, *rx) = std::sync::mpsc::channel();
+}
+
+#[cfg(test)]
+mod connection_event_tests {
+    use super::*;
+
+    #[test]
+    fn replaced_attempt_cannot_deliver_late_or_queued_events() {
+        let (mut tx, mut rx) = std::sync::mpsc::channel();
+        let old = tx.clone();
+        old.send(NetEvent::Disconnected {
+            reason: "old failure".into(),
+        })
+        .unwrap();
+        reset_event_channel(&mut tx, &mut rx);
+        assert!(old
+            .send(NetEvent::CertCheck {
+                addr: "old:7331".into(),
+                fingerprint: "old".into(),
+                changed: false,
+            })
+            .is_err());
+        assert!(rx.try_recv().is_err());
+        tx.send(NetEvent::Disconnected {
+            reason: "current".into(),
+        })
+        .unwrap();
+        assert!(
+            matches!(rx.try_recv(), Ok(NetEvent::Disconnected { reason }) if reason == "current")
+        );
+    }
 }
