@@ -1,12 +1,14 @@
 name: Build
-# Full release builds and packages. Pull requests only run tests (test.yml).
+# Full builds for releases and manual validation. PRs run tests (test.yml).
 on:
   workflow_call:
-  push:
-    branches: [main, master]
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  # Manual runs share a ref; release invocations stay isolated by run ID.
+  group: full-build-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 jobs:
   build:
     name: ${{ matrix.os }} / ${{ matrix.arch }}
