@@ -1,7 +1,7 @@
 name: Build
+# Full release builds and packages. Pull requests only run tests (test.yml).
 on:
   workflow_call:
-  pull_request:
   push:
     branches: [main, master]
   workflow_dispatch:

@@ -24,7 +24,7 @@ Server/tests/      integration tests (real server process + synthetic clients)
 Server/deploy/     systemd unit + install script
 Client/Windows/    egui client (app/, audio/, linux/, net, media, video, update, ...)
 packaging/ scripts/  Linux AppImage packaging
-.github/workflows/ build.yml (test + build matrix), release.yml
+.github/workflows/ build.yml (test + build matrix on main), test.yml (PRs: tests + clippy), release.yml
 ```
 
 ## Issue board first (avoid duplicate work)
@@ -83,7 +83,7 @@ Changing `shared/src/protocol.rs` or the wire format means bumping `PROTOCOL_VER
 
 ## Working in this repo
 
-- **Read the task runner first.** There is no Makefile. The scripts that carry the project's flags are `Server/Test_Scripts/run_tests.sh`, `Server/Test_Scripts/e2e_local.sh`, `Client/Windows/Test_Scripts/*.ps1` and `scripts/package-linux.sh`. CI is `.github/workflows/build.yml`. Use `--locked`.
+- **Read the task runner first.** There is no Makefile. The scripts that carry the project's flags are `Server/Test_Scripts/run_tests.sh`, `Server/Test_Scripts/e2e_local.sh`, `Client/Windows/Test_Scripts/*.ps1` and `scripts/package-linux.sh`. CI is `.github/workflows/test.yml` for pull requests and `.github/workflows/build.yml` for main and releases. Use `--locked`.
 - **Run tests serially where required.** Integration tests share TLS files and run with a single thread in CI.
 - **Quality gate before saying "done":** `cargo test --locked` for the touched crates (`bash Server/Test_Scripts/run_tests.sh` for the server), `cargo clippy` clean for new code, `cargo fmt`. Report failures honestly, with the output.
 - **Releases:** bump the version in `Client/Windows/Cargo.toml`, `Server/Cargo.toml` and `shared/Cargo.toml` together, then tag `vX.Y.Z`. The release workflow checks the versions match.
