@@ -168,10 +168,10 @@ pub fn play(queue: &SfxQueue, sound: Sound) {
 /// was queued with it; several announcements play one after another.
 pub fn play_speech(queue: &SfxQueue, samples: &[f32]) {
     let mut q = queue.lock().unwrap();
-    if q.speech.len() + samples.len() > MAX_SPEECH {
+    let lead = (SAMPLE_RATE as f32 * SPEECH_LEAD_MS / 1000.0) as usize;
+    if q.speech.len() + lead + samples.len() > MAX_SPEECH {
         return;
     }
-    let lead = (SAMPLE_RATE as f32 * SPEECH_LEAD_MS / 1000.0) as usize;
     q.speech.extend(std::iter::repeat(0.0).take(lead));
     q.speech.extend(samples);
 }
@@ -271,6 +271,15 @@ mod tests {
         let mut silent = [0.0f32; 960];
         mix_into(&q, &mut silent);
         assert!(silent.iter().all(|x| *x == 0.0));
+    }
+
+    #[test]
+    fn speech_cap_includes_lead_without_a_playback_consumer() {
+        let q: SfxQueue = Default::default();
+        play_speech(&q, &vec![0.1; MAX_SPEECH]);
+        assert!(q.lock().unwrap().speech.is_empty());
+        for _ in 0..1000 { play_speech(&q, &[]); }
+        assert!(q.lock().unwrap().speech.len() <= MAX_SPEECH);
     }
 
     /// Listening test: `cargo test -p rusttalk-client dump_sounds -- --ignored`

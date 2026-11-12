@@ -254,30 +254,37 @@ impl RustTalkApp {
     /// connected, the running audio). Falls back to `previous` if it fails.
     pub(in crate::app) fn apply_devices(&mut self, previous: (Option<String>, Option<String>)) {
         self.mic_monitor = None; // restarts with the new input next frame
+        let voice_channel = self.my_voice_channel().filter(|_| self.connected);
         if let Some(engine) = self.audio.as_mut() {
             let (input, output) = (
                 self.config.input_device.clone(),
                 self.config.output_device.clone(),
             );
-            if let Err(e) = engine.restart(input.as_deref(), output.as_deref()) {
+            if let Err(e) = engine.restart(input.as_deref(), output.as_deref(), voice_channel) {
                 let failed = format!("{e:#}");
                 (self.config.input_device, self.config.output_device) = previous;
                 let back = engine.restart(
                     self.config.input_device.as_deref(),
                     self.config.output_device.as_deref(),
+                    voice_channel,
                 );
+                if back.is_err() {
+                    self.audio = None;
+                    let _ = self.start_audio(None);
+                }
                 self.set_error(match back {
                     Ok(()) => {
                         format!("Could not use that device ({failed}) - kept the previous one")
                     }
-                    Err(e) => format!("Audio stopped: {e:#} - reconnect to try again"),
+                    Err(e) => format!("Voice audio stopped: {e:#} - rejoin voice to try again"),
                 });
             }
             // Computer audio of a screen share follows the output device.
             self.screen_audio = None;
             self.screen_audio_failed = false;
+        } else {
+            self.sync_voice_audio();
         }
-        self.config.save();
     }
 
     fn section_devices(&mut self, ui: &mut egui::Ui) {
@@ -320,6 +327,7 @@ impl RustTalkApp {
             )
         {
             self.apply_devices(before);
+            self.config.save();
         }
         setting_row(
             ui,
@@ -421,14 +429,18 @@ impl RustTalkApp {
     }
 
     fn section_mic_test(&mut self, ui: &mut egui::Ui) {
-        let level = if self.audio.is_some() {
+        let capture_running = self
+            .audio
+            .as_ref()
+            .is_some_and(|audio| audio.voice_channel.is_some());
+        let level = if capture_running {
             self.control.mic_level()
         } else {
             self.mic_monitor.as_ref().map(|m| m.level()).unwrap_or(0.0)
         };
         ui.add_space(4.0);
         theme::mic_meter(ui, level, self.config.vad_threshold);
-        if self.audio.is_none() && self.mic_monitor.is_none() {
+        if !capture_running && self.mic_monitor.is_none() {
             ui.label(
                 egui::RichText::new("No microphone access (monitor could not start).")
                     .color(theme::RED),
@@ -436,7 +448,7 @@ impl RustTalkApp {
         } else {
             hint(
                 ui,
-                "Speak to see your level. Green = above the threshold (sent).",
+                "This page opens your microphone for a local level preview outside voice channels. Green = above the voice threshold.",
             );
         }
     }
