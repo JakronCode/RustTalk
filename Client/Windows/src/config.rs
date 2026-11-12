@@ -92,6 +92,16 @@ pub struct ClientConfig {
     pub sound_message: bool,
     #[serde(default = "default_true")]
     pub sound_mute: bool,
+    /// Say the user's name after the join / leave sound.
+    #[serde(default = "default_true")]
+    pub announce_names: bool,
+    /// Voice for the names: a Windows voice name, "neural:<preset>" for a
+    /// natural voice, or None for the Windows default voice.
+    #[serde(default)]
+    pub announce_voice: Option<String>,
+    /// Language of the sentence with natural voices ("en" or "de").
+    #[serde(default = "default_announce_language")]
+    pub announce_language: String,
     /// Play animated GIFs in chat (off = first frame only).
     #[serde(default = "default_true")]
     pub animate_gifs: bool,
@@ -117,6 +127,9 @@ fn default_ptt_key() -> String {
 }
 fn default_vad_threshold() -> f32 {
     0.02
+}
+fn default_announce_language() -> String {
+    "en".to_string()
 }
 fn default_one() -> f32 {
     1.0
@@ -157,6 +170,9 @@ impl Default for ClientConfig {
             sound_leave: true,
             sound_message: true,
             sound_mute: true,
+            announce_names: true,
+            announce_voice: None,
+            announce_language: default_announce_language(),
             animate_gifs: true,
             global_ptt: false,
             input_volume: 1.0,
@@ -257,6 +273,9 @@ mod tests {
             sound_leave: false,
             sound_message: true,
             sound_mute: false,
+            announce_names: false,
+            announce_voice: Some("neural:F1".into()),
+            announce_language: "de".into(),
             animate_gifs: false,
             global_ptt: true,
             input_volume: 0.5,
@@ -275,6 +294,9 @@ mod tests {
         assert!(back.global_ptt);
         assert!(!back.animate_gifs);
         assert!(!back.flash_taskbar && !back.sound_leave && back.sound_join);
+        assert!(!back.announce_names);
+        assert_eq!(back.announce_voice.as_deref(), Some("neural:F1"));
+        assert_eq!(back.announce_language, "de");
         assert!(!back.desktop_notifications && !back.notification_preview && !back.check_updates);
         assert_eq!(back.identity, "ab".repeat(32));
         assert_eq!(back.invite, None, "invite codes are not saved");
@@ -309,6 +331,8 @@ mod tests {
         assert!(cfg.animate_gifs);
         assert!(cfg.desktop_notifications && cfg.notification_preview && cfg.check_updates);
         assert!(cfg.flash_taskbar && cfg.sound_join && cfg.sound_leave && cfg.sound_message && cfg.sound_mute);
+        assert!(cfg.announce_names && cfg.announce_voice.is_none());
+        assert_eq!(cfg.announce_language, "en");
         assert!(cfg.user_volumes.is_empty());
         assert!(cfg.server_address.ends_with(":7331"));
     }

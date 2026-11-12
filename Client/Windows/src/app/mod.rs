@@ -286,6 +286,10 @@ pub struct RustTalkApp {
     local_muted: LocalMuteSet,
     /// Notification sounds waiting for the output stream.
     sfx: sfx::SfxQueue,
+    /// Speaks names after the join / leave sound.
+    announcer: crate::audio::speech::Announcer,
+    /// The downloadable natural voices (state of the download).
+    voice_pack: crate::audio::voice_pack::Pack,
     /// Binding for the global PTT poller (`None` = off / focused window only).
     global_ptt: hotkey::GlobalBinding,
     /// Per-user playback volume (client id -> gain), filled from `config.user_volumes`.
@@ -384,6 +388,7 @@ impl RustTalkApp {
         let (video_tx, video_rx) = std::sync::mpsc::channel::<media_ui::DecodeMsg>();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let (giphy_tx, giphy_rx) = std::sync::mpsc::channel::<GiphyMsg>();
+        let sfx: sfx::SfxQueue = Default::default();
         Self {
             control,
             config,
@@ -432,7 +437,9 @@ impl RustTalkApp {
             talking: Arc::new(Mutex::new(HashMap::new())),
             local_muted: Arc::new(Mutex::new(HashSet::new())),
             global_ptt,
-            sfx: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            announcer: crate::audio::speech::Announcer::new(sfx.clone()),
+            voice_pack: crate::audio::voice_pack::Pack::new(),
+            sfx,
             user_volumes: Arc::new(Mutex::new(HashMap::new())),
             mic_monitor: None,
             textures: TextureCache::default(),
@@ -727,11 +734,37 @@ impl RustTalkApp {
         let on = match sound {
             Sound::Join => self.config.sound_join,
             Sound::Leave => self.config.sound_leave,
-            Sound::Message => self.config.sound_message,
+            Sound::Message | Sound::Mention => self.config.sound_message,
             Sound::Mute | Sound::Unmute => self.config.sound_mute,
         };
         if on && self.audio.is_some() {
             sfx::play(&self.sfx, sound);
+        }
+    }
+
+    /// Join / leave sound for someone in your voice channel, followed by the
+    /// spoken name (if enabled).
+    fn notify_presence(&self, name: Option<&str>, joined: bool) {
+        self.notify(if joined { Sound::Join } else { Sound::Leave });
+        let on = if joined { self.config.sound_join } else { self.config.sound_leave };
+        if let (true, true, true, Some(name)) = (on, self.config.announce_names, self.audio.is_some(), name) {
+            self.announcer.announce(name, joined, self.config.announce_voice.as_deref(), &self.config.announce_language);
+        }
+    }
+
+    /// Lets a natural voice make the clips for this name ahead of time, so
+    /// the name follows the chime without a pause when it is needed.
+    fn prepare_name(&self, name: &str) {
+        if self.config.announce_names && name != self.config.username {
+            self.announcer.prepare(name, self.config.announce_voice.as_deref(), &self.config.announce_language);
+        }
+    }
+
+    /// The same for everyone on the server (after connecting or when the
+    /// voice was changed).
+    pub(super) fn prepare_all_names(&self) {
+        for u in self.users.values() {
+            self.prepare_name(&u.name);
         }
     }
 
@@ -836,6 +869,7 @@ impl RustTalkApp {
                 self.my_id = my_id;
                 self.channels = channels.into_iter().map(|c| (c.id, c)).collect();
                 self.users = users.into_iter().map(|u| (u.id, u)).collect();
+                self.prepare_all_names();
                 let known: Vec<(u64, String)> = self.users.values().map(|u| (u.id, u.name.clone())).collect();
                 for (id, name) in known {
                     self.apply_user_volume(id, &name);
@@ -901,12 +935,13 @@ impl RustTalkApp {
                     }
                 }
                 self.apply_user_volume(user.id, &user.name);
+                self.prepare_name(&user.name);
                 self.users.insert(user.id, user);
                 // Join-Zeile kommt serverseitig via SpawnLogEntry.
             }
             ServerMessage::UserLeft { client_id } => {
-                if self.users.get(&client_id).is_some_and(|u| Some(u.channel_id) == self.my_voice_channel()) {
-                    self.notify(Sound::Leave);
+                if let Some(u) = self.users.get(&client_id).filter(|u| Some(u.channel_id) == self.my_voice_channel()) {
+                    self.notify_presence(Some(&u.name), false);
                 }
                 self.users.remove(&client_id);
                 self.user_volumes.lock().unwrap().remove(&client_id);
@@ -936,9 +971,9 @@ impl RustTalkApp {
                     let mine = self.my_voice_channel();
                     let old = self.users.get(&client_id).map(|u| u.channel_id);
                     if mine.is_some() && Some(channel_id) == mine {
-                        self.notify(Sound::Join);
+                        self.notify_presence(name.as_deref(), true);
                     } else if mine.is_some() && old == mine {
-                        self.notify(Sound::Leave);
+                        self.notify_presence(name.as_deref(), false);
                     }
                 }
                 if let Some(u) = self.users.get_mut(&client_id) {
@@ -1009,7 +1044,7 @@ impl RustTalkApp {
                     let focused = self.window_focused();
                     let mentioned = mentions(&text, &self.config.username);
                     if mentioned || !focused || self.selected_channel != Some(channel_id) {
-                        self.notify(Sound::Message);
+                        self.notify(if mentioned { Sound::Mention } else { Sound::Message });
                     }
                     if !focused {
                         self.message_toast(channel_id, &from_name, &text, image.is_some(), mentioned);

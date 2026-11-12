@@ -27,6 +27,8 @@ serde_json = "1"
 device_query = "4"
 # Windows toasts (pop-ups), install (registry, Start menu link), update check (SHA-256)
 tauri-winrt-notification = "0.8"
+# Spoken names for join/leave (Windows speech voices)
+windows = { version = "0.62", features = ["Media_Core", "Media_SpeechSynthesis", "Storage_Streams", "Foundation_Collections"] }
 winreg = "0.55"
 mslnk = "0.1"
 sha2 = "0.10"
@@ -34,6 +36,9 @@ sha2 = "0.10"
 getrandom = "0.3"
 # Echo cancellation (pure Rust port of WebRTC AEC3)
 aec3 = "0.4"
+# Natural voices: ONNX Runtime (prebuilt, linked statically) runs the speech model
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-native", "api-31"] }
+unicode-normalization = "0.1"
 # H.264 video (OpenH264 built from source, needs only a C++ compiler)
 openh264 = "0.9"
 # TLS for the control connection

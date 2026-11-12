@@ -2,7 +2,8 @@
 //! (account, appearance, voice, video, keybinds, notifications, advanced,
 //! about). Placeholders are clearly marked with a WIP badge.
 
-use super::theme::{self, card, caption, setting_row, toggle};
+use super::theme::{self, card, caption, primary_button, setting_row, toggle};
+use crate::audio::voice_pack::{self, State as PackState};
 use super::*;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -475,7 +476,7 @@ impl RustTalkApp {
             let rows: [(&str, Option<&str>, Sound, &mut bool); 4] = [
                 ("User joins your channel", None, Sound::Join, &mut self.config.sound_join),
                 ("User leaves your channel", None, Sound::Leave, &mut self.config.sound_leave),
-                ("New message", Some("In another channel, while RustTalk is in the background, or when you are @mentioned"), Sound::Message, &mut self.config.sound_message),
+                ("New message", Some("In another channel or while RustTalk is in the background. @mentions always ring, with their own sound."), Sound::Message, &mut self.config.sound_message),
                 ("Mute / unmute", Some("Also for deafen"), Sound::Mute, &mut self.config.sound_mute),
             ];
             let mut preview = None;
@@ -490,11 +491,107 @@ impl RustTalkApp {
                     }
                 });
             }
-            if let Some(sound) = preview {
-                if self.audio.is_some() {
-                    crate::audio::sfx::play(&self.sfx, sound);
-                } else {
+            ui.separator();
+            let mut preview_name = false;
+            let mut voice_changed = false;
+            setting_row(ui, "Say names", Some("Speak the user's name after the join / leave sound, e.g. \"Alex joined\""), false, |ui| {
+                voice_changed |= toggle(ui, &mut self.config.announce_names).changed();
+                if ui.small_button(icons::regular::PLAY).on_hover_text("Preview with your own name (while connected)").clicked() {
+                    preview_name = true;
+                }
+            });
+            let voices = crate::audio::speech::voices();
+            let pack = self.voice_pack.state();
+            let pack_ready = pack == PackState::Installed;
+            let natural = self.config.announce_voice.as_deref().is_some_and(|v| voice_pack::neural_id(v).is_some());
+            ui.separator();
+            ui.add_enabled_ui(self.config.announce_names, |ui| {
+                setting_row(ui, "Voice", Some("Natural voices sound like a person; Windows voices are the ones installed in Windows"), false, |ui| {
+                    let current = match &self.config.announce_voice {
+                        Some(v) if natural && !pack_ready => format!("{} (not installed)", voice_pack::label(v)),
+                        Some(v) => voice_pack::label(v),
+                        None if voices.is_empty() => "No Windows voice installed".to_string(),
+                        None => "Windows default".to_string(),
+                    };
+                    let before = self.config.announce_voice.clone();
+                    egui::ComboBox::from_id_salt("announce_voice").selected_text(current).height(360.0).show_ui(ui, |ui| {
+                        if pack_ready {
+                            for (id, label) in voice_pack::VOICES {
+                                ui.selectable_value(&mut self.config.announce_voice, Some(format!("{}{id}", voice_pack::PREFIX)), label);
+                            }
+                            ui.separator();
+                        }
+                        ui.selectable_value(&mut self.config.announce_voice, None, "Windows default");
+                        for v in voices {
+                            ui.selectable_value(&mut self.config.announce_voice, Some(v.name.clone()), format!("{} ({})", v.name, v.language));
+                        }
+                    });
+                    if self.config.announce_voice != before {
+                        voice_changed = true;
+                        preview_name = true;
+                    }
+                });
+                ui.separator();
+                ui.add_enabled_ui(natural && pack_ready, |ui| {
+                    setting_row(ui, "Language", Some("What natural voices say: \"Alex joined\" or \"Alex ist beigetreten\". Windows voices use their own language."), false, |ui| {
+                        let before = self.config.announce_language.clone();
+                        let current = if before == "de" { "Deutsch" } else { "English" };
+                        egui::ComboBox::from_id_salt("announce_language").selected_text(current).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.config.announce_language, "en".to_string(), "English");
+                            ui.selectable_value(&mut self.config.announce_language, "de".to_string(), "Deutsch");
+                        });
+                        if self.config.announce_language != before {
+                            voice_changed = true;
+                            preview_name = true;
+                        }
+                    });
+                });
+            });
+            ui.separator();
+            let size_mb = voice_pack::total_size() / 1_000_000;
+            let desc = match &pack {
+                PackState::Missing => format!("10 voices that sound like a person, speak English and German, and work offline. One-time download of {size_mb} MB."),
+                PackState::Downloading { done, total } => format!("Downloading... {} of {} MB", done / 1_000_000, total / 1_000_000),
+                PackState::Failed(e) => format!("Download failed: {e}"),
+                PackState::Installed => format!("Installed ({size_mb} MB). Removing them switches back to the Windows voice."),
+            };
+            let mut download = false;
+            let mut remove = false;
+            setting_row(ui, "Natural voices", Some(&desc), false, |ui| match &pack {
+                PackState::Missing => download = primary_button(ui, "Download").clicked(),
+                PackState::Failed(_) => download = primary_button(ui, "Try again").clicked(),
+                PackState::Downloading { done, total } => {
+                    ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).desired_width(140.0).show_percentage());
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+                }
+                PackState::Installed => remove = ui.button("Remove").clicked(),
+            });
+            if download {
+                self.voice_pack.download();
+            }
+            if remove {
+                self.voice_pack.remove();
+                if natural {
+                    self.config.announce_voice = None;
+                    voice_changed = true;
+                }
+            }
+            if voice_changed {
+                self.config.save();
+                self.prepare_all_names();
+            }
+            if preview.is_some() || preview_name {
+                if self.audio.is_none() {
                     self.set_status("Connect to a server to preview sounds");
+                } else if let Some(sound) = preview {
+                    crate::audio::sfx::play(&self.sfx, sound);
+                    if sound == Sound::Message {
+                        // The @mention sound shares this switch: play it right after.
+                        crate::audio::sfx::play(&self.sfx, Sound::Mention);
+                    }
+                } else {
+                    crate::audio::sfx::play(&self.sfx, Sound::Join);
+                    self.announcer.announce(&self.config.username, true, self.config.announce_voice.as_deref(), &self.config.announce_language);
                 }
             }
         });

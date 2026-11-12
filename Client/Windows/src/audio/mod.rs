@@ -11,10 +11,13 @@ pub mod capture;
 pub mod dsp;
 pub mod encoder;
 pub mod jitter;
+pub mod neural;
 pub mod playback;
 pub mod resample;
 pub mod screen_audio;
 pub mod sfx;
+pub mod speech;
+pub mod voice_pack;
 
 use std::collections::{HashMap, HashSet};
 use std::net::UdpSocket;
