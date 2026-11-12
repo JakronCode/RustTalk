@@ -1,0 +1,49 @@
+name: Test
+# Pull requests: tests and clippy only, no release builds or packages (build.yml).
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    name: test / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, os: linux}
+          - {runner: windows-2025, os: windows}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: test-${{ matrix.os }}
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake nasm pkg-config libssl-dev libasound2-dev libasound2-plugins libopus-dev libudev-dev libwayland-dev libxkbcommon-dev libgl1-mesa-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-pipewire pipewire-alsa libpipewire-0.3-dev
+      - name: Windows CMake compatibility
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '"CMAKE_POLICY_VERSION_MINIMUM=3.5" >> $env:GITHUB_ENV'
+      - name: Windows NASM
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm -y --no-progress
+          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Test
+        run: cargo test --locked --workspace -- --test-threads=1
+      # Warnings are shown but do not fail the job (the tree is not clippy-clean yet).
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets
