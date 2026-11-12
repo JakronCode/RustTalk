@@ -136,49 +136,70 @@ impl RustTalkApp {
         let talking: HashMap<u64, Instant> = self.talking.lock().unwrap().clone();
         let self_tx = self.control.transmitting.load(Ordering::Relaxed);
 
-        // Stage (top, dark).
+        // Stage (top, dark): all tiles in one centered grid that scales with
+        // the available space.
+        let has_video = members
+            .iter()
+            .any(|u| [VideoKind::Screen, VideoKind::Camera].iter().any(|k| self.video_frames.contains_key(&(u.id, *k))));
+        // With video the stage takes most of the height (big streams), the
+        // chat below stays usable; without video it stays compact.
+        let full = ui.available_height();
+        let stage_h = if has_video { (full * 0.62).max(260.0) } else { 260.0f32.min(full * 0.5) };
         egui::TopBottomPanel::top(format!("stage_{ch_id}"))
-            .resizable(true)
-            .default_height(260.0)
-            .min_height(150.0)
+            .exact_height(stage_h)
             .frame(egui::Frame::default().fill(theme::DARK).inner_margin(egui::Margin::same(16)))
             .show_inside(ui, |ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    if members.is_empty() {
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(30.0);
-                            ui.label(egui::RichText::new(icons::regular::SPEAKER_HIGH).size(40.0).color(theme::MUTED));
-                            ui.label(egui::RichText::new("Nobody is here yet").size(18.0).color(theme::HEADER));
-                            if theme::primary_button(ui, "Join Voice").clicked() {
-                                let _ = cmd_tx.send(Command::JoinChannel(ch_id));
-                            }
-                        });
-                        return;
-                    }
-                    let mut open_fs = None;
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(12.0, 12.0);
-                        // Video tiles first (screen before camera).
-                        for user in &members {
-                            for kind in [VideoKind::Screen, VideoKind::Camera] {
-                                if let Some(view) = self.video_frames.get(&(user.id, kind)) {
-                                    let tex = view.tex.clone();
-                                    if video_tile(ui, tex.as_ref(), user, kind).clicked() {
-                                        open_fs = Some((user.id, kind));
-                                    }
-                                }
-                            }
-                        }
-                        for user in &members {
-                            let speaking = talking.get(&user.id).is_some_and(|t| t.elapsed() < Duration::from_millis(250))
-                                || (user.id == self.my_id && self_tx);
-                            member_card(ui, user, speaking, user.id == self.my_id);
+                if members.is_empty() {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(30.0);
+                        ui.label(egui::RichText::new(icons::regular::SPEAKER_HIGH).size(40.0).color(theme::MUTED));
+                        ui.label(egui::RichText::new("Nobody is here yet").size(18.0).color(theme::HEADER));
+                        if theme::primary_button(ui, "Join Voice").clicked() {
+                            let _ = cmd_tx.send(Command::JoinChannel(ch_id));
                         }
                     });
-                    if let Some(key) = open_fs {
-                        self.enter_fullscreen(key);
+                    return;
+                }
+                // Tiles: screen shares first, then everyone else - with the
+                // camera instead of the avatar card when it is on.
+                let speaking_of = |u: &UserInfo| {
+                    talking.get(&u.id).is_some_and(|t| t.elapsed() < Duration::from_millis(250))
+                        || (u.id == self.my_id && self_tx)
+                };
+                let mut tiles: Vec<(UserInfo, Option<VideoKind>)> = Vec::new();
+                for user in &members {
+                    if self.video_frames.contains_key(&(user.id, VideoKind::Screen)) {
+                        tiles.push((user.clone(), Some(VideoKind::Screen)));
                     }
-                });
+                }
+                for user in &members {
+                    let cam = self.video_frames.contains_key(&(user.id, VideoKind::Camera));
+                    tiles.push((user.clone(), cam.then_some(VideoKind::Camera)));
+                }
+
+                let area = ui.available_rect_before_wrap();
+                ui.allocate_rect(area, egui::Sense::hover());
+                let gap = 12.0;
+                let (cols, tile) = stage_grid(tiles.len(), area.size(), gap);
+                let mut open_fs = None;
+                for (i, rect) in grid_rects(tiles.len(), cols, tile, gap, area).into_iter().enumerate() {
+                    let (user, kind) = &tiles[i];
+                    let me = user.id == self.my_id;
+                    match kind {
+                        Some(kind) => {
+                            let tex = self.video_frames.get(&(user.id, *kind)).and_then(|v| v.tex.clone());
+                            // Speaking ring only on the person's camera, not on screen shares.
+                            let speaking = *kind == VideoKind::Camera && speaking_of(user);
+                            if video_tile(ui, rect, tex.as_ref(), user, *kind, speaking, me).clicked() {
+                                open_fs = Some((user.id, *kind));
+                            }
+                        }
+                        None => member_card(ui, rect, user, speaking_of(user), me),
+                    }
+                }
+                if let Some(key) = open_fs {
+                    self.enter_fullscreen(key);
+                }
             });
 
         // Text feed below the stage.
@@ -602,44 +623,107 @@ fn empty_state(ui: &mut egui::Ui, icon: &str, title: &str, text: &str) {
     });
 }
 
-/// Member card on the voice stage.
-fn member_card(ui: &mut egui::Ui, user: &UserInfo, speaking: bool, me: bool) {
-    let size = egui::vec2(150.0, 112.0);
-    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-    let p = ui.painter();
-    p.rect_filled(rect, 10.0, theme::avatar_color(&user.name).linear_multiply(0.35));
-    if speaking {
-        p.rect_stroke(rect, 10.0, egui::Stroke::new(2.0_f32, theme::GREEN), egui::StrokeKind::Inside);
+/// Columns and tile size for `n` equal 16:9 tiles in `avail`: tries every
+/// column count and keeps the one with the biggest tiles.
+pub(super) fn stage_grid(n: usize, avail: egui::Vec2, gap: f32) -> (usize, egui::Vec2) {
+    const ASPECT: f32 = 16.0 / 9.0;
+    if n == 0 || avail.x <= 0.0 || avail.y <= 0.0 {
+        return (1, egui::Vec2::ZERO);
     }
-    let av = egui::Rect::from_center_size(rect.center() - egui::vec2(0.0, 12.0), egui::vec2(52.0, 52.0));
-    theme::paint_avatar(p, av, &user.name, speaking);
-    let label = if me { format!("{} (you)", user.name) } else { user.name.clone() };
-    p.text(
-        egui::pos2(rect.center().x, rect.bottom() - 18.0),
-        egui::Align2::CENTER_CENTER,
-        label,
-        egui::FontId::proportional(13.0),
-        theme::HEADER,
-    );
-    let mut x = rect.right() - 16.0;
+    let mut best = (1, egui::Vec2::ZERO);
+    for cols in 1..=n {
+        let rows = n.div_ceil(cols);
+        let w_by_width = (avail.x - gap * (cols as f32 - 1.0)) / cols as f32;
+        let h_by_height = (avail.y - gap * (rows as f32 - 1.0)) / rows as f32;
+        let w = w_by_width.min(h_by_height * ASPECT).max(0.0);
+        if w > best.1.x {
+            best = (cols, egui::vec2(w, w / ASPECT));
+        }
+    }
+    best
+}
+
+/// Positions of the tiles: rows centered horizontally (also the last,
+/// shorter row), the whole block centered vertically.
+pub(super) fn grid_rects(n: usize, cols: usize, tile: egui::Vec2, gap: f32, area: egui::Rect) -> Vec<egui::Rect> {
+    if n == 0 || cols == 0 {
+        return Vec::new();
+    }
+    let rows = n.div_ceil(cols);
+    let block_h = rows as f32 * tile.y + (rows as f32 - 1.0) * gap;
+    let top = area.top() + ((area.height() - block_h) / 2.0).max(0.0);
+    let mut out = Vec::with_capacity(n);
+    for row in 0..rows {
+        let in_row = (n - row * cols).min(cols);
+        let row_w = in_row as f32 * tile.x + (in_row as f32 - 1.0) * gap;
+        let left = area.left() + ((area.width() - row_w) / 2.0).max(0.0);
+        for c in 0..in_row {
+            let min = egui::pos2(left + c as f32 * (tile.x + gap), top + row as f32 * (tile.y + gap));
+            out.push(egui::Rect::from_min_size(min, tile));
+        }
+    }
+    out
+}
+
+/// Mute/deafen badges in the top right corner of a tile.
+fn status_badges(p: &egui::Painter, rect: egui::Rect, user: &UserInfo) {
+    let r = (rect.height() * 0.09).clamp(10.0, 15.0);
+    let mut x = rect.right() - r - 6.0;
     for (on, icon) in [(user.deafened, icons::regular::SPEAKER_SLASH), (user.muted, icons::regular::MICROPHONE_SLASH)] {
         if on {
-            p.circle_filled(egui::pos2(x, rect.top() + 16.0), 11.0, theme::DARK);
-            p.text(egui::pos2(x, rect.top() + 16.0), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(13.0), theme::RED);
-            x -= 26.0;
+            let c = egui::pos2(x, rect.top() + r + 6.0);
+            p.circle_filled(c, r, theme::DARK);
+            p.text(c, egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(r * 1.15), theme::RED);
+            x -= 2.0 * r + 6.0;
         }
     }
 }
 
-/// Video tile (click = fullscreen).
+/// Name pill in the bottom left corner of a tile.
+fn name_pill(p: &egui::Painter, rect: egui::Rect, text: String) {
+    let size = (rect.height() * 0.075).clamp(12.0, 15.0);
+    let galley = p.layout_no_wrap(text, egui::FontId::proportional(size), egui::Color32::WHITE);
+    let pill = egui::Rect::from_min_size(
+        rect.left_bottom() + egui::vec2(8.0, -(galley.size().y + 16.0)),
+        galley.size() + egui::vec2(14.0, 8.0),
+    );
+    p.rect_filled(pill, 6.0, egui::Color32::from_black_alpha(170));
+    p.galley(pill.min + egui::vec2(7.0, 4.0), galley, egui::Color32::WHITE);
+}
+
+/// Member without camera: avatar + name, scales with the tile.
+fn member_card(ui: &mut egui::Ui, rect: egui::Rect, user: &UserInfo, speaking: bool, me: bool) {
+    let p = ui.painter();
+    p.rect_filled(rect, 10.0, theme::avatar_color(&user.name).linear_multiply(0.35));
+    if speaking {
+        p.rect_stroke(rect, 10.0, egui::Stroke::new(3.0_f32, theme::GREEN), egui::StrokeKind::Inside);
+    }
+    let d = (rect.height() * 0.42).clamp(40.0, 128.0);
+    let av = egui::Rect::from_center_size(rect.center() - egui::vec2(0.0, rect.height() * 0.08), egui::vec2(d, d));
+    theme::paint_avatar(p, av, &user.name, speaking);
+    let label = if me { format!("{} (you)", user.name) } else { user.name.clone() };
+    p.text(
+        egui::pos2(rect.center().x, av.bottom() + (rect.bottom() - av.bottom()) / 2.0),
+        egui::Align2::CENTER_CENTER,
+        label,
+        egui::FontId::proportional((rect.height() * 0.08).clamp(13.0, 17.0)),
+        theme::HEADER,
+    );
+    status_badges(p, rect, user);
+}
+
+/// Camera or screen tile (click = fullscreen). The camera replaces the
+/// avatar card: green frame while the person speaks, no avatar.
 fn video_tile(
     ui: &mut egui::Ui,
+    rect: egui::Rect,
     tex: Option<&egui::TextureHandle>,
     user: &UserInfo,
     kind: VideoKind,
+    speaking: bool,
+    me: bool,
 ) -> egui::Response {
-    let size = egui::vec2(300.0, 169.0);
-    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let resp = ui.interact(rect, ui.id().with(("stage_tile", user.id, kind)), egui::Sense::click());
     let p = ui.painter();
     p.rect_filled(rect, 10.0, egui::Color32::BLACK);
     match tex {
@@ -654,14 +738,24 @@ fn video_tile(
             p.text(rect.center(), egui::Align2::CENTER_CENTER, "Connecting...", egui::FontId::proportional(13.0), theme::MUTED);
         }
     }
-    let label = format!("{}  {}", kind_icon(kind), user.name);
-    let galley = p.layout_no_wrap(label, egui::FontId::proportional(12.5), egui::Color32::WHITE);
-    let pill = egui::Rect::from_min_size(rect.left_bottom() + egui::vec2(8.0, -28.0), galley.size() + egui::vec2(14.0, 8.0));
-    p.rect_filled(pill, 6.0, egui::Color32::from_black_alpha(170));
-    p.galley(pill.min + egui::vec2(7.0, 4.0), galley, egui::Color32::WHITE);
-    if resp.hovered() {
+    let name = if me { format!("{} (you)", user.name) } else { user.name.clone() };
+    let label = match kind {
+        VideoKind::Screen => format!("{}  {name}", kind_icon(kind)),
+        VideoKind::Camera => name,
+    };
+    name_pill(p, rect, label);
+    if kind == VideoKind::Camera {
+        status_badges(p, rect, user);
+    }
+    if speaking {
+        p.rect_stroke(rect, 10.0, egui::Stroke::new(3.0_f32, theme::GREEN), egui::StrokeKind::Inside);
+    } else if resp.hovered() {
         p.rect_stroke(rect, 10.0, egui::Stroke::new(2.0_f32, theme::ACCENT), egui::StrokeKind::Inside);
-        p.text(rect.right_top() + egui::vec2(-14.0, 14.0), egui::Align2::CENTER_CENTER, icons::regular::CORNERS_OUT, egui::FontId::proportional(16.0), egui::Color32::WHITE);
+    }
+    if resp.hovered() {
+        let c = rect.right_bottom() + egui::vec2(-20.0, -20.0);
+        p.circle_filled(c, 14.0, egui::Color32::from_black_alpha(150));
+        p.text(c, egui::Align2::CENTER_CENTER, icons::regular::CORNERS_OUT, egui::FontId::proportional(16.0), egui::Color32::WHITE);
     }
     resp.on_hover_text("Click for fullscreen").on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -956,6 +1050,42 @@ fn inline_editor(ui: &mut egui::Ui, id: u64, edit: EditBox) -> Option<ChatAction
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stage_grid_uses_space_and_keeps_16_9() {
+        // One tile in a wide stage: limited by the height, full 16:9.
+        let (c, t) = stage_grid(1, egui::vec2(1200.0, 400.0), 12.0);
+        assert_eq!(c, 1);
+        assert!((t.y - 400.0).abs() < 0.01 && (t.x / t.y - 16.0 / 9.0).abs() < 0.01);
+        // Two tiles side by side, not stacked (bigger).
+        let (c, t) = stage_grid(2, egui::vec2(1200.0, 400.0), 12.0);
+        assert_eq!(c, 2);
+        assert!(t.x > 500.0);
+        // Four tiles in a square area: 2x2.
+        assert_eq!(stage_grid(4, egui::vec2(800.0, 450.0), 12.0).0, 2);
+        // Tiles always fit.
+        for n in 1..=9 {
+            let area = egui::vec2(900.0, 380.0);
+            let (c, t) = stage_grid(n, area, 12.0);
+            let rows = n.div_ceil(c) as f32;
+            assert!(c as f32 * t.x + (c as f32 - 1.0) * 12.0 <= area.x + 0.01, "n={n}");
+            assert!(rows * t.y + (rows - 1.0) * 12.0 <= area.y + 0.01, "n={n}");
+        }
+    }
+
+    #[test]
+    fn grid_rects_are_centered() {
+        let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 500.0));
+        let tile = egui::vec2(160.0, 90.0);
+        // Two tiles: centered horizontally and vertically.
+        let r = grid_rects(2, 2, tile, 10.0, area);
+        assert!((r[0].left() - (1000.0 - 330.0) / 2.0).abs() < 0.01);
+        assert!((r[1].right() - (1000.0 + 330.0) / 2.0).abs() < 0.01);
+        assert!((r[0].center().y - 250.0).abs() < 0.01);
+        // Three tiles in two columns: the single tile of the last row is centered.
+        let r = grid_rects(3, 2, tile, 10.0, area);
+        assert!((r[2].center().x - 500.0).abs() < 0.01);
+    }
 
     /// Runs one egui frame with `events` and draws a single own chat line.
     fn frame(ctx: &egui::Context, lines: &[ChatLine], textures: &mut TextureCache, events: Vec<egui::Event>) -> Option<ChatAction> {

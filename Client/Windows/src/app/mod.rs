@@ -304,6 +304,12 @@ pub struct RustTalkApp {
     /// Letzte Video-Frames pro (User, Art) als JPEG – Kamera und Bildschirm
     /// eines Users sind getrennte Kacheln.
     video_frames: HashMap<(u64, VideoKind), media_ui::VideoView>,
+    /// Recently ended streams: late frames must not bring the tile back
+    /// (otherwise the last picture stays frozen on screen).
+    video_stopped: HashMap<(u64, VideoKind), Instant>,
+    /// Per own source (camera, screen): bumped when it stops; frame sinks of
+    /// an older generation drop their late frames.
+    video_epoch: Arc<[std::sync::atomic::AtomicU64; 2]>,
     /// Decoded pictures / keyframe needs from the decoder threads.
     video_tx: std::sync::mpsc::Sender<media_ui::DecodeMsg>,
     video_rx: std::sync::mpsc::Receiver<media_ui::DecodeMsg>,
@@ -445,6 +451,8 @@ impl RustTalkApp {
             textures: TextureCache::default(),
             pending_image: None,
             video_frames: HashMap::new(),
+            video_stopped: HashMap::new(),
+            video_epoch: Arc::new([std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)]),
             video_tx,
             video_rx,
             screen_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -573,6 +581,10 @@ impl RustTalkApp {
         *self.local_preview.lock().unwrap() = None;
         self.local_preview_tex = None;
         self.video_frames.clear();
+        self.video_stopped.clear();
+        for e in self.video_epoch.iter() {
+            e.fetch_add(1, Ordering::Relaxed);
+        }
         self.leave_fullscreen();
         self.pending_image = None;
     }
@@ -1357,10 +1369,34 @@ impl RustTalkApp {
     /// Debug builds only: env-controlled shortcuts for UI screenshots/tests.
     /// `RUSTTALK_DEV_AUTOCONNECT=1` connects at start,
     /// `RUSTTALK_DEV_OPEN=settings:<page>|channel:<name>|new_channel|select:<name>`.
+    /// `RUSTTALK_DEV_SHARE=<secs>` starts sharing the first screen once we are
+    /// in a voice channel and stops it again after `<secs>` (0 = keep).
     #[cfg(debug_assertions)]
     fn dev_hooks(&mut self, _ctx: &egui::Context) {
         use std::sync::atomic::AtomicU8;
         static STAGE: AtomicU8 = AtomicU8::new(0);
+        static SHARE: Mutex<(u8, Option<Instant>)> = Mutex::new((0, None));
+        if let Ok(secs) = std::env::var("RUSTTALK_DEV_SHARE") {
+            let mut share = SHARE.lock().unwrap();
+            let in_voice = self.connected && self.my_channel().is_some() && !self.in_lobby();
+            if share.0 == 0 && in_voice {
+                if let (Some(src), Some(tx)) = (
+                    video::list_share_sources().into_iter().find(|e| matches!(e.source, ShareSource::Monitor(_))),
+                    self.cmd_tx.clone(),
+                ) {
+                    self.start_screen_share(src.source, &tx);
+                    *share = (1, Some(Instant::now()));
+                }
+            } else if share.0 == 1 {
+                let secs: u64 = secs.parse().unwrap_or(0);
+                if secs > 0 && share.1.is_some_and(|t| t.elapsed() >= Duration::from_secs(secs)) {
+                    if let Some(tx) = self.cmd_tx.clone() {
+                        self.toggle_screen(&tx);
+                    }
+                    share.0 = 2;
+                }
+            }
+        }
         match STAGE.load(Ordering::Relaxed) {
             0 => {
                 STAGE.store(1, Ordering::Relaxed);
