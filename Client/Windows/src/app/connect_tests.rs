@@ -150,3 +150,42 @@ fn editing_address_updates_original_bookmark_and_rejects_collisions() {
         Some("other-password")
     );
 }
+
+#[test]
+fn removing_another_bookmark_preserves_edit_collision_protection() {
+    let mut app = app();
+    for (name, address) in [
+        ("Other", "other.invalid"),
+        ("Unrelated", "unrelated.invalid"),
+    ] {
+        app.config.bookmarks.push(ServerBookmark {
+            name: name.into(),
+            address: address.into(),
+            password: Some(name.into()),
+        });
+    }
+    app.editing_bookmark = Some("example.invalid:7331".into());
+    app.show_connect_form = true;
+    app.config.server_address = "other.invalid".into();
+    app.server_nickname = "Must not overwrite Other".into();
+    app.config.server_password = None;
+    let row = text_position(&frame(&mut app, 0.0, vec![]).1, "Unrelated");
+    assert!(!click(&mut app, row, 0.1, egui::PointerButton::Secondary));
+    frame(&mut app, 0.2, vec![]);
+    let remove = text_position(&frame(&mut app, 0.3, vec![]).1, "Remove");
+    assert!(!click(&mut app, remove, 0.4, egui::PointerButton::Primary));
+    assert_eq!(app.config.bookmarks.len(), 2);
+    assert_eq!(
+        app.editing_bookmark.as_deref(),
+        Some("example.invalid:7331")
+    );
+    assert!(app.update_saved_server().is_err());
+    assert_eq!(app.config.bookmarks[1].nickname(), Some("Other"));
+    assert_eq!(app.config.bookmarks[1].password.as_deref(), Some("Other"));
+
+    // Deletion through Settings must not turn a stale edit into an overwrite either.
+    app.config.bookmarks.remove(0);
+    assert!(app.update_saved_server().is_err());
+    assert_eq!(app.config.bookmarks[0].nickname(), Some("Other"));
+    assert_eq!(app.config.bookmarks[0].password.as_deref(), Some("Other"));
+}

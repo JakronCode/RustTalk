@@ -165,7 +165,6 @@ impl RustTalkApp {
         });
         if let Some(i) = remove_idx {
             self.config.bookmarks.remove(i);
-            self.editing_bookmark = None;
             self.config.save();
         }
         if !self.show_connect_form {
@@ -197,6 +196,9 @@ impl RustTalkApp {
         }
         let editing = self.editing_bookmark.as_ref().and_then(|address|
             self.config.bookmarks.iter().position(|b| &b.address == address));
+        if self.editing_bookmark.is_some() && editing.is_none() {
+            return Err("This saved server was removed. Select a server or add a new one.");
+        }
         let existing = self.config.bookmarks.iter().position(|b| b.address == addr);
         if editing.is_some() && existing.is_some() && editing != existing {
             return Err("Another saved server already uses this address.");
