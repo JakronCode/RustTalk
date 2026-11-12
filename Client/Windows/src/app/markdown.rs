@@ -379,7 +379,10 @@ impl Cache {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         source.hash(&mut hasher);
         text.len().hash(&mut hasher);
-        ui.available_width().to_bits().hash(&mut hasher);
+        ui.available_size_before_wrap()
+            .x
+            .to_bits()
+            .hash(&mut hasher);
         ui.ctx().pixels_per_point().to_bits().hash(&mut hasher);
         theme::compact().hash(&mut hasher);
         ui.spacing().item_spacing.x.to_bits().hash(&mut hasher);
@@ -388,7 +391,7 @@ impl Cache {
         if let Some(&(old, size)) = self.measurements.get(&measurement_id) {
             let rect = egui::Rect::from_min_size(ui.next_widget_position(), size);
             if old == fingerprint && !ui.is_rect_visible(rect) {
-                ui.allocate_exact_size(size, egui::Sense::hover());
+                ui.vertical(|ui| ui.set_min_size(size));
                 return;
             }
         }
@@ -487,6 +490,72 @@ pub(super) fn composer(ui: &egui::Ui, text: &str, width: f32) -> std::sync::Arc<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn measured_rows_keep_geometry_after_scroll_and_timestamp_changes() {
+        let (tx, _work) = mpsc::sync_channel(1);
+        let (_result, rx) = mpsc::sync_channel(1);
+        let mut cache = Cache {
+            entries: VecDeque::new(),
+            serial: 0,
+            measurements: HashMap::new(),
+            pending: true,
+            tx,
+            rx,
+        };
+        let ctx = egui::Context::default();
+        let draw = |cache: &mut Cache, offset, timestamps, text: &str| {
+            let mut height = 0.0;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(360.0, 300.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        height = egui::ScrollArea::vertical()
+                            .vertical_scroll_offset(offset)
+                            .show(ui, |ui| {
+                                for id in 0..100 {
+                                    ui.horizontal_wrapped(|ui| {
+                                        if timestamps {
+                                            ui.label("12:34");
+                                        }
+                                        ui.label("Alice");
+                                        cache.show(ui, id, text);
+                                    });
+                                }
+                            })
+                            .content_size
+                            .y;
+                    });
+                },
+            );
+            height
+        };
+        let first = draw(&mut cache, 0.0, true, "short");
+        for offset in [0.0, 500.0, 1000.0, 0.0] {
+            assert!((draw(&mut cache, offset, true, "short") - first).abs() < 0.1);
+        }
+        let text = "some words wrapping across several lines ".repeat(5);
+        draw(&mut cache, 0.0, true, &text);
+        draw(&mut cache, 0.0, true, &text);
+        let serial = cache.serial;
+        let cached = draw(&mut cache, 0.0, false, &text);
+        assert!(
+            cache.serial > serial,
+            "remaining width change must invalidate offscreen rows"
+        );
+        cache.measurements.clear();
+        let fresh = draw(&mut cache, 0.0, false, &text);
+        assert!(
+            (cached - fresh).abs() < 0.1,
+            "timestamp change kept stale wrapping"
+        );
+    }
 
     #[test]
     fn escaped_closing_markers_preserve_text() {
