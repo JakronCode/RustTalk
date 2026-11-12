@@ -384,8 +384,8 @@ pub struct RustTalkApp {
     join_error: Option<join_error::JoinError>,
     /// Focus the password field on the next frame.
     focus_password: bool,
-    /// Saved server being renamed: (index, text being edited).
-    renaming_bookmark: Option<(usize, String)>,
+    /// Original address of the saved server being edited.
+    editing_bookmark: Option<String>,
     server_nickname: String,
     show_connect_form: bool,
     /// Not installed yet: the whole window is the install screen.
@@ -537,7 +537,7 @@ impl RustTalkApp {
             cert_check: None,
             join_error: None,
             focus_password: false,
-            renaming_bookmark: None,
+            editing_bookmark: None,
             server_nickname,
             show_connect_form: false,
             install_screen: (crate::install::mode() == crate::install::Mode::NotInstalled).then(lifecycle::InstallScreen::new),
