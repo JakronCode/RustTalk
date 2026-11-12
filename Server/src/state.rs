@@ -61,6 +61,8 @@ pub struct Client {
     /// Session key for the audio packets (opens what the client sends, seals what it gets).
     pub udp_cipher: Arc<rusttalk_shared::secure::PacketCipher>,
     pub udp_key: Vec<u8>,
+    /// Replay window, ping limiter and packet counters (connection stats).
+    pub udp_link: crate::link::UdpLink,
 }
 
 impl Client {
@@ -834,6 +836,7 @@ impl State {
                 role,
                 udp_cipher,
                 udp_key,
+                udp_link: crate::link::UdpLink::new(Instant::now()),
             },
         );
         (id, token)
@@ -1333,6 +1336,37 @@ impl State {
             .filter_map(|a| self.clients.values().find(|c| c.udp_addr == Some(a)).map(|c| (a, c.udp_cipher.clone())))
             .collect();
         Some((speaker, targets))
+    }
+
+    /// Replay check for an authenticated packet; `false` = drop it.
+    pub fn udp_accept(&mut self, token: u64, counter: u64) -> bool {
+        let Some(id) = self.token_index.get(&token) else { return false };
+        self.clients.get_mut(id).is_some_and(|c| c.udp_link.accept(counter))
+    }
+
+    /// Authenticated ping: learns the address and returns the pong, or
+    /// `None` when the client exceeds the ping rate.
+    pub fn udp_ping(&mut self, token: u64, from: SocketAddr, now: Instant) -> Option<rusttalk_shared::audio_packet::Control> {
+        let id = *self.token_index.get(&token)?;
+        let c = self.clients.get_mut(&id)?;
+        if c.udp_addr != Some(from) {
+            c.udp_addr = Some(from);
+        }
+        c.udp_link.allow_ping(now).then_some(rusttalk_shared::audio_packet::Control::Pong {
+            audio_received: c.udp_link.audio_received,
+            audio_relayed: c.udp_link.audio_relayed,
+        })
+    }
+
+    /// Counts one audio packet from `speaker_id` and its relay to `targets`.
+    pub fn udp_count_audio(&mut self, speaker_id: u64, targets: &[SocketAddr]) {
+        for c in self.clients.values_mut() {
+            if c.id == speaker_id {
+                c.udp_link.audio_received = c.udp_link.audio_received.wrapping_add(1);
+            } else if c.udp_addr.is_some_and(|a| targets.contains(&a)) {
+                c.udp_link.audio_relayed = c.udp_link.audio_relayed.wrapping_add(1);
+            }
+        }
     }
 
     pub fn udp_targets(&mut self, token: u64, from: SocketAddr) -> Option<(u64, Vec<SocketAddr>)> {

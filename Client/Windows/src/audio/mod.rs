@@ -11,6 +11,7 @@ pub mod capture;
 pub mod dsp;
 pub mod encoder;
 pub mod jitter;
+pub mod link;
 pub mod neural;
 pub mod playback;
 pub mod resample;
@@ -28,7 +29,8 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use ringbuf::traits::Split;
 use ringbuf::HeapRb;
-use rusttalk_shared::audio_packet::{decode, SAMPLE_RATE};
+use rusttalk_shared::audio_packet::{decode, seal_packet, AudioHeader, Control, FLAG_CONTROL, SAMPLE_RATE};
+use rusttalk_shared::secure::DIR_TO_SERVER;
 
 use self::jitter::UserAudio;
 
@@ -58,6 +60,8 @@ pub struct AudioControl {
     mic_level: Arc<AtomicU32>,
     /// Wir senden gerade (Gate offen) – fuer den Selbst-Sprech-Indikator.
     pub transmitting: AtomicBool,
+    /// Ping and packet-loss stats for the connection panel.
+    pub link: Arc<link::LinkStats>,
 }
 
 impl AudioControl {
@@ -75,6 +79,7 @@ impl AudioControl {
             input_volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             mic_level: Arc::new(AtomicU32::new(0)),
             transmitting: AtomicBool::new(false),
+            link: Arc::new(link::LinkStats::default()),
         }
     }
 
@@ -207,7 +212,8 @@ impl AudioEngine {
                 let talking = talking.clone();
                 let stop = stop.clone();
                 let cipher = cipher.clone();
-                move || recv_loop(recv_udp, mixer, talking, stop, cipher)
+                let link = control.link.clone();
+                move || recv_loop(recv_udp, token, mixer, talking, stop, cipher, link)
             })
             .context("Empfangsthread starten")?;
 
@@ -253,7 +259,7 @@ impl AudioEngine {
     /// Starts sending the computer audio (screen share with sound).
     pub fn start_screen_audio(&self, output_device: Option<&str>) -> Result<screen_audio::ScreenAudio> {
         let udp = self.udp.try_clone().context("UDP-Socket klonen")?;
-        screen_audio::ScreenAudio::start(udp, self.token, self.cipher.clone(), output_device, self.render_tap.clone())
+        screen_audio::ScreenAudio::start(udp, self.token, self.cipher.clone(), self.shared.control.link.clone(), output_device, self.render_tap.clone())
     }
 
     pub fn stop(&self) {
@@ -267,10 +273,35 @@ impl Drop for AudioEngine {
     }
 }
 
-/// Empfangsschleife: UDP-Pakete in die Jitter-Buffer der Sprecher einsortieren.
-fn recv_loop(udp: UdpSocket, mixer: SharedMixer, talking: TalkingMap, stop: Arc<AtomicBool>, cipher: Arc<rusttalk_shared::secure::PacketCipher>) {
+/// Sends an encrypted ping every [`link::PING_INTERVAL`].
+fn send_ping(udp: &UdpSocket, token: u64, cipher: &rusttalk_shared::secure::PacketCipher, link: &link::LinkStats, pinger: &mut link::Pinger) {
+    let now = Instant::now();
+    if !pinger.due(now) {
+        return;
+    }
+    let id = link.next_ping_id();
+    let mut header = AudioHeader::new(token, id, 0);
+    header.flags = FLAG_CONTROL;
+    // Snapshot before sending: audio sent after the ping is not in the server's count yet.
+    pinger.sent(id, now, link.audio_sent.load(Ordering::Relaxed));
+    let _ = udp.send(&seal_packet(&header, cipher, DIR_TO_SERVER, &Control::Ping.encode()));
+}
+
+/// Empfangsschleife: UDP-Pakete in die Jitter-Buffer der Sprecher einsortieren;
+/// sends the pings and evaluates the pongs.
+fn recv_loop(
+    udp: UdpSocket,
+    token: u64,
+    mixer: SharedMixer,
+    talking: TalkingMap,
+    stop: Arc<AtomicBool>,
+    cipher: Arc<rusttalk_shared::secure::PacketCipher>,
+    link: Arc<link::LinkStats>,
+) {
     let mut buf = [0u8; rusttalk_shared::audio_packet::MAX_PACKET_LEN];
+    let mut pinger = link::Pinger::default();
     while !stop.load(Ordering::Relaxed) {
+        send_ping(&udp, token, &cipher, &link, &mut pinger);
         match udp.recv(&mut buf) {
             Ok(n) => {
                 let Some((header, _)) = decode(&buf[..n]) else { continue };
@@ -278,10 +309,23 @@ fn recv_loop(udp: UdpSocket, mixer: SharedMixer, talking: TalkingMap, stop: Arc<
                 let Some(payload) = rusttalk_shared::audio_packet::open_packet(&header, &buf[..n], &cipher, rusttalk_shared::secure::DIR_TO_CLIENT) else {
                     continue;
                 };
+                if !link.replay.lock().unwrap().accept(header.counter) {
+                    continue; // replayed
+                }
+                if header.flags & FLAG_CONTROL != 0 {
+                    if let (0, Some(Control::Pong { audio_received, audio_relayed })) = (header.token, Control::decode(&payload)) {
+                        let received = link.audio_received.load(Ordering::Relaxed);
+                        if let Some(sample) = pinger.pong(header.sequence, Instant::now(), audio_received, audio_relayed, received) {
+                            link.record(sample);
+                        }
+                    }
+                    continue;
+                }
                 let payload = payload.as_slice();
                 if payload.is_empty() {
                     continue; // Registrierungs-Ping o. ae.
                 }
+                link.audio_received.fetch_add(1, Ordering::Relaxed);
                 let speaker = header.token; // Relay: Token-Feld = client_id des Sprechers
                 let screen = header.flags & rusttalk_shared::audio_packet::FLAG_SCREEN_AUDIO != 0;
                 let key = mixer_key(speaker, screen);

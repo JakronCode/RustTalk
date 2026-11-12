@@ -9,12 +9,14 @@
 //! - `settings`      app settings window (categories)
 //! - `channel_settings` channel settings (WIP), create/delete dialogs
 //! - `media_ui`      fullscreen, camera preview, screen picker, GIF search
+//! - `connection_ui` voice connection popup (ping graph, packet loss)
 //!
 //! Channel kinds: Lobby (house, pinned, join log, no talking), Category
 //! (collapsible group), Voice (speaker, click = join), Text (speech bubble).
 
 mod channel_settings;
 mod connect;
+mod connection_ui;
 #[cfg(debug_assertions)]
 mod dev_input;
 mod lifecycle;
@@ -280,6 +282,8 @@ pub struct RustTalkApp {
     poke_dialog: Option<poke::PokeDialog>,
     /// Received pokes not yet dismissed (popup, newest last).
     poke_inbox: Vec<poke::PokeNote>,
+    /// Voice connection popup, anchored at this point (`None` = closed).
+    connection_panel: Option<egui::Pos2>,
     status: String,
     status_is_error: bool,
     /// When `status` last changed (toast fade-out).
@@ -451,6 +455,7 @@ impl RustTalkApp {
             server_settings: ServerSettings::default(),
             server_settings_dialog: None,
             poke_dialog: None,
+            connection_panel: None,
             poke_inbox: Vec::new(),
             status: String::new(),
             status_is_error: false,
@@ -981,6 +986,7 @@ impl RustTalkApp {
                     self.restore_after_reconnect(rc);
                 }
                 if let (Some(sock), Some(cipher)) = (udp_socket, udp_cipher) {
+                    self.control.link.reset(); // new session: server counters start at 0
                     match AudioEngine::start(
                         sock,
                         udp_token,
@@ -1379,6 +1385,7 @@ impl eframe::App for RustTalkApp {
         self.ui_server_settings(ctx);
         self.ui_poke_dialog(ctx);
         self.ui_poke_popup(ctx);
+        self.ui_connection_panel(ctx);
         self.ui_confirm_delete(ctx);
         self.ui_confirm_delete_message(ctx);
         self.ui_mod_dialog(ctx);

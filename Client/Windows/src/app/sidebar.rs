@@ -694,11 +694,20 @@ impl RustTalkApp {
                     ui.label(egui::RichText::new(format!("{}  In the Lobby", icons::regular::HOUSE)).strong().color(theme::MUTED));
                     ui.label(egui::RichText::new("Join a voice channel to talk").size(12.0).color(theme::MUTED));
                 } else {
-                    ui.label(
-                        egui::RichText::new(format!("{}  Voice Connected", icons::regular::CELL_SIGNAL_FULL))
-                            .strong()
-                            .color(theme::GREEN),
-                    );
+                    let r = ui
+                        .add(
+                            egui::Label::new(
+                                egui::RichText::new(format!("{}  Voice Connected", icons::regular::CELL_SIGNAL_FULL))
+                                    .strong()
+                                    .color(theme::GREEN),
+                            )
+                            .sense(egui::Sense::click()),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("Connection details");
+                    if r.clicked() {
+                        self.toggle_connection_panel(r.rect.left_top() - egui::vec2(0.0, 8.0));
+                    }
                     ui.label(egui::RichText::new(self.channel_name(my_ch)).size(12.0).color(theme::MUTED));
                 }
             });
