@@ -103,7 +103,7 @@ With persistence enabled, the channels in `server.toml` are only used on the ver
 
 Open port **7331** (TCP+UDP) in the firewall if nftables/ufw is active.
 
-Prebuilt binaries are attached to the [GitHub releases](https://github.com/JakronCode/RustTalk/releases) (`rusttalk-server-linux-x86_64.tar.gz`).
+Prebuilt binaries are attached to the [GitHub releases](https://github.com/rusttalkcrew/RustTalk/releases) (`rusttalk-server-linux-x86_64.tar.gz`).
 
 **Updates:** the server looks for a newer release on start and once a day (`check_updates` in `server.toml`, on by default) and shows admins "Server update available" in the client. It never installs anything by itself - the service user cannot write its own program. To update, run on the server:
 
@@ -116,13 +116,13 @@ The previous version stays next to it as `rusttalk-server.old` (to go back: `sud
 
 ### Server (Docker)
 
-The official image is `ghcr.io/jakroncode/rusttalk-server` (linux/amd64 and linux/arm64), built from [Server/Dockerfile](Server/Dockerfile) by the release workflow. It is distroless: no shell, no package manager, the program owned by root and the server running as user 65532. Pulling it contacts GitHub's container registry (`ghcr.io`); the server itself makes no connections beyond the ones it makes without Docker (the GitHub release check).
+The official image is `ghcr.io/rusttalkcrew/rusttalk-server` (linux/amd64 and linux/arm64), built from [Server/Dockerfile](Server/Dockerfile) by the release workflow. It is distroless: no shell, no package manager, the program owned by root and the server running as user 65532. Pulling it contacts GitHub's container registry (`ghcr.io`); the server itself makes no connections beyond the ones it makes without Docker (the GitHub release check).
 
 Setup with the [compose example](Server/deploy/docker-compose.yml) (commands work in bash and fish):
 
 ```bash
 mkdir rusttalk && cd rusttalk
-curl -fsSLO https://raw.githubusercontent.com/JakronCode/RustTalk/main/Server/deploy/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/rusttalkcrew/RustTalk/main/Server/deploy/docker-compose.yml
 touch admin_password.txt && chmod 600 admin_password.txt && openssl rand -base64 32 > admin_password.txt
 sudo chown 65532:65532 admin_password.txt && sudo chmod 0400 admin_password.txt
 docker compose up -d
@@ -163,8 +163,8 @@ docker compose pull && docker compose up -d
 Tags: `X.Y.Z` never changes, `X.Y` (used by the example) moves to new patch releases, `latest` moves to every release, including new minor versions that may refuse older clients. To freeze an exact build, pin its digest (shown in the release workflow summary):
 
 ```bash
-docker buildx imagetools inspect ghcr.io/jakroncode/rusttalk-server:0.10
-# then in docker-compose.yml: image: ghcr.io/jakroncode/rusttalk-server:0.10@sha256:<digest>
+docker buildx imagetools inspect ghcr.io/rusttalkcrew/rusttalk-server:0.10
+# then in docker-compose.yml: image: ghcr.io/rusttalkcrew/rusttalk-server:0.10@sha256:<digest>
 ```
 
 Each image carries build provenance and an SBOM (`docker buildx imagetools inspect <image> --format '{{json .Provenance}}'`, or `.SBOM`).
@@ -186,7 +186,7 @@ Build and test the image yourself: `make docker-build` (or `docker build -f Serv
 
 ### Client (Windows) – install
 
-Download `rusttalk-windows.exe` from the [latest release](https://github.com/JakronCode/RustTalk/releases/latest) and run it. It installs itself for your user (no admin rights): `%LOCALAPPDATA%\Programs\RustTalk`, Start menu entry (optional desktop shortcut), settings in `%APPDATA%\RustTalk`. Uninstall via Windows **Apps & features**.
+Download `rusttalk-windows.exe` from the [latest release](https://github.com/rusttalkcrew/RustTalk/releases/latest) and run it. It installs itself for your user (no admin rights): `%LOCALAPPDATA%\Programs\RustTalk`, Start menu entry (optional desktop shortcut), settings in `%APPDATA%\RustTalk`. Uninstall via Windows **Apps & features**.
 
 **Updates:** the installed app checks GitHub for a newer release on start (Settings > About > Updates) and installs it on one click (download, SHA-256 check, restart).
 
@@ -288,7 +288,7 @@ Integration tests run serially because their server fixtures share TLS files.
 The [release workflow](.github/workflows/release.yml) verifies package versions
 and publishes only after the entire matrix succeeds. It also builds the server
 image for linux/amd64 and linux/arm64, smoke-tests it and pushes it to
-`ghcr.io/jakroncode/rusttalk-server` as `X.Y.Z`, `X.Y` and `latest` (pull
+`ghcr.io/rusttalkcrew/rusttalk-server` as `vX.Y.Z`, `X.Y.Z`, `X.Y` and `latest` (pull
 requests only build and test it, see the [Docker workflow](.github/workflows/docker.yml)).
 When the minor version changes, also update the image tag in
 `Server/deploy/docker-compose.yml`; the version check refuses the release otherwise.

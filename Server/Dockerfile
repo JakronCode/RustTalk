@@ -45,7 +45,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cc66d222f0a7ec996b78a99fe76a969bc80b539a5016ad866c14d1949bc6d0ab
 LABEL org.opencontainers.image.title="rusttalk-server" \
       org.opencontainers.image.description="RustTalk voice chat server" \
-      org.opencontainers.image.source="https://github.com/JakronCode/RustTalk"
+      org.opencontainers.image.source="https://github.com/rusttalkcrew/RustTalk"
 # Root-owned program (the server cannot replace itself); the state volume belongs to the server user.
 COPY --from=build --chmod=755 /out/rusttalk-server /usr/local/bin/rusttalk-server
 COPY --from=build --chown=65532:65532 --chmod=700 /out/data /data

@@ -20,7 +20,7 @@ jobs:
               assert version == tag, f'{path}: {version} does not match tag {tag}'
           if '-' not in tag:
               compose = pathlib.Path('Server/deploy/docker-compose.yml')
-              found = re.search(r'ghcr\.io/jakroncode/rusttalk-server:([^\s@]+)', compose.read_text())
+              found = re.search(r'ghcr\.io/rusttalkcrew/rusttalk-server:([^\s@]+)', compose.read_text())
               minor = '.'.join(tag.split('.')[:2])
               assert found and found.group(1) == minor, f'{compose}: image tag should be {minor}'
           PY
@@ -30,7 +30,7 @@ jobs:
   # Server image on ghcr.io: upstream only, after the version check and all builds and tests passed.
   image:
     needs: build
-    if: github.repository == 'JakronCode/RustTalk'
+    if: github.repository == 'rusttalkcrew/RustTalk'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -54,7 +54,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/jakroncode/rusttalk-server
+          images: ghcr.io/rusttalkcrew/rusttalk-server
           # vX.Y.Z, X.Y.Z, X.Y and latest; pre-releases only get version aliases.
           tags: |
             type=semver,pattern=v{{version}}
@@ -83,7 +83,7 @@ jobs:
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
-          echo "Server image: ghcr.io/jakroncode/rusttalk-server@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          echo "Server image: ghcr.io/rusttalkcrew/rusttalk-server@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
   publish:
     needs: build
     runs-on: ubuntu-24.04
