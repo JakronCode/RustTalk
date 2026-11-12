@@ -168,8 +168,8 @@ docker compose pull && docker compose up -d
 Tags: `X.Y.Z` never changes, `X.Y` (used by the example) moves to new patch releases, `latest` moves to every release, including new minor versions that may refuse older clients. To freeze an exact build, pin its digest (shown in the release workflow summary):
 
 ```bash
-docker buildx imagetools inspect ghcr.io/rusttalkcrew/rusttalk-server:0.10
-# then in docker-compose.yml: image: ghcr.io/rusttalkcrew/rusttalk-server:0.10@sha256:<digest>
+docker buildx imagetools inspect ghcr.io/rusttalkcrew/rusttalk-server:0.11
+# then in docker-compose.yml: image: ghcr.io/rusttalkcrew/rusttalk-server:0.11@sha256:<digest>
 ```
 
 Each image carries build provenance and an SBOM (`docker buildx imagetools inspect <image> --format '{{json .Provenance}}'`, or `.SBOM`).

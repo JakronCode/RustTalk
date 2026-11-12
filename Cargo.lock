@@ -4710,7 +4710,7 @@ dependencies = [
 
 [[package]]
 name = "rusttalk-client"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "aec3",
  "anyhow",
@@ -4758,7 +4758,7 @@ dependencies = [
 
 [[package]]
 name = "rusttalk-server"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -4782,7 +4782,7 @@ dependencies = [
 
 [[package]]
 name = "rusttalk-shared"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "bincode",
  "chacha20poly1305",
