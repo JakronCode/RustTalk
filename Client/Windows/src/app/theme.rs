@@ -3,6 +3,8 @@
 //! Dark only (by design). Palette follows the familiar Discord-style
 //! layering: darkest = server/user bars, mid = sidebar, lightest = content.
 
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
 use eframe::egui;
 
 use super::icons;
@@ -15,7 +17,8 @@ pub const INPUT: egui::Color32 = egui::Color32::from_rgb(0x38, 0x3A, 0x40);
 pub const HOVER: egui::Color32 = egui::Color32::from_rgb(0x35, 0x37, 0x3C);
 pub const SELECTED: egui::Color32 = egui::Color32::from_rgb(0x40, 0x42, 0x49);
 pub const BORDER: egui::Color32 = egui::Color32::from_rgb(0x1F, 0x20, 0x23);
-pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x58, 0x65, 0xF2);
+/// Fixed blurple, for things that must not follow the user's primary color (role badges).
+pub const BLURPLE: egui::Color32 = egui::Color32::from_rgb(0x58, 0x65, 0xF2);
 pub const GREEN: egui::Color32 = egui::Color32::from_rgb(0x23, 0xA5, 0x5A);
 pub const RED: egui::Color32 = egui::Color32::from_rgb(0xF2, 0x3F, 0x43);
 pub const YELLOW: egui::Color32 = egui::Color32::from_rgb(0xF0, 0xB2, 0x32);
@@ -36,16 +39,74 @@ pub const AVATAR_PALETTE: [egui::Color32; 8] = [
     egui::Color32::from_rgb(0x1F, 0xA0, 0x92),
 ];
 
-/// Global egui style (call once at startup).
+/// Preset primary colors for the appearance settings.
+pub const ACCENT_PRESETS: [(&str, [u8; 3]); 8] = [
+    ("Blurple", [0x58, 0x65, 0xF2]),
+    ("Green", [0x23, 0xA5, 0x5A]),
+    ("Teal", [0x1F, 0xA0, 0x92]),
+    ("Sky", [0x1E, 0x90, 0xD8]),
+    ("Purple", [0x9B, 0x59, 0xD9]),
+    ("Pink", [0xEB, 0x45, 0x95]),
+    ("Red", [0xE0, 0x3E, 0x3E]),
+    ("Orange", [0xE0, 0x6C, 0x18]),
+];
+
+static ACCENT: AtomicU32 = AtomicU32::new(0x5865F2);
+static COMPACT: AtomicBool = AtomicBool::new(false);
+
+/// The user's primary color.
+pub fn accent() -> egui::Color32 {
+    let v = ACCENT.load(Ordering::Relaxed);
+    egui::Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
+}
+
+/// Readable text color on an `accent()` fill (dark text on light accents).
+pub fn on_accent() -> egui::Color32 {
+    on_color(accent())
+}
+
+fn on_color(c: egui::Color32) -> egui::Color32 {
+    let lum = 0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32;
+    if lum > 165.0 {
+        DARK
+    } else {
+        egui::Color32::WHITE
+    }
+}
+
+/// Compact density (tighter spacing, chat without avatars).
+pub fn compact() -> bool {
+    COMPACT.load(Ordering::Relaxed)
+}
+
+/// Pick `cozy` or `compact` by the current density.
+pub fn dense(cozy: f32, compact: f32) -> f32 {
+    if self::compact() {
+        compact
+    } else {
+        cozy
+    }
+}
+
+/// Set primary color and density, then restyle egui.
+pub fn set_appearance(ctx: &egui::Context, accent: [u8; 3], compact: bool) {
+    let [r, g, b] = accent;
+    ACCENT.store(u32::from_be_bytes([0, r, g, b]), Ordering::Relaxed);
+    COMPACT.store(compact, Ordering::Relaxed);
+    apply(ctx);
+}
+
+/// Global egui style from the current appearance.
 pub fn apply(ctx: &egui::Context) {
+    let accent = accent();
     let mut v = egui::Visuals::dark();
     v.panel_fill = BG;
     v.window_fill = BG;
     v.extreme_bg_color = INPUT;
     v.faint_bg_color = SIDEBAR;
     v.code_bg_color = DARK;
-    v.hyperlink_color = ACCENT;
-    v.selection.bg_fill = ACCENT.linear_multiply(0.6);
+    v.hyperlink_color = accent;
+    v.selection.bg_fill = accent.linear_multiply(0.6);
     v.selection.stroke = egui::Stroke::new(1.0_f32, HEADER);
     v.window_corner_radius = egui::CornerRadius::same(10);
     v.menu_corner_radius = egui::CornerRadius::same(8);
@@ -80,20 +141,28 @@ pub fn apply(ctx: &egui::Context) {
     w.hovered.fg_stroke.color = HEADER;
     w.hovered.bg_stroke = egui::Stroke::NONE;
     w.hovered.corner_radius = r;
-    w.active.bg_fill = ACCENT;
-    w.active.weak_bg_fill = ACCENT;
-    w.active.fg_stroke.color = egui::Color32::WHITE;
+    w.active.bg_fill = accent;
+    w.active.weak_bg_fill = accent;
+    w.active.fg_stroke.color = on_color(accent);
     w.active.corner_radius = r;
     w.open.bg_fill = SELECTED;
     w.open.weak_bg_fill = SELECTED;
     w.open.corner_radius = r;
     ctx.set_visuals(v);
 
+    let compact = compact();
     ctx.style_mut(|s| {
-        s.spacing.item_spacing = egui::vec2(8.0, 6.0);
-        s.spacing.button_padding = egui::vec2(10.0, 5.0);
-        s.spacing.interact_size.y = 26.0;
-        s.spacing.window_margin = egui::Margin::same(14);
+        if compact {
+            s.spacing.item_spacing = egui::vec2(6.0, 4.0);
+            s.spacing.button_padding = egui::vec2(8.0, 3.0);
+            s.spacing.interact_size.y = 22.0;
+            s.spacing.window_margin = egui::Margin::same(10);
+        } else {
+            s.spacing.item_spacing = egui::vec2(8.0, 6.0);
+            s.spacing.button_padding = egui::vec2(10.0, 5.0);
+            s.spacing.interact_size.y = 26.0;
+            s.spacing.window_margin = egui::Margin::same(14);
+        }
         s.spacing.menu_margin = egui::Margin::same(6);
         s.spacing.combo_width = 220.0;
         s.spacing.slider_width = 220.0;
@@ -166,11 +235,11 @@ pub fn icon_button(ui: &mut egui::Ui, icon: &str, state: IconState, tooltip: &st
     resp.on_hover_text(tooltip).on_disabled_hover_text(tooltip)
 }
 
-/// Primary (blurple) button.
+/// Primary (accent) button.
 pub fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(
-        egui::Button::new(egui::RichText::new(label).color(egui::Color32::WHITE).strong())
-            .fill(ACCENT)
+        egui::Button::new(egui::RichText::new(label).color(on_accent()).strong())
+            .fill(accent())
             .min_size(egui::vec2(96.0, 32.0)),
     )
 }
@@ -332,7 +401,7 @@ pub fn toast(ctx: &egui::Context, text: &str, age_secs: f32, is_error: bool) {
                 .show(ui, |ui| {
                     ui.set_max_width(380.0);
                     let icon = if is_error { icons::regular::WARNING_CIRCLE } else { icons::regular::INFO };
-                    let color = if is_error { RED } else { ACCENT };
+                    let color = if is_error { RED } else { accent() };
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(icon).color(color.linear_multiply(alpha)));
                         ui.label(egui::RichText::new(text).color(HEADER.linear_multiply(alpha)));
@@ -351,6 +420,12 @@ mod tests {
         assert_eq!(avatar_color("alice"), avatar_color("alice"));
         assert!(AVATAR_PALETTE.contains(&avatar_color("alice")));
         assert!(AVATAR_PALETTE.contains(&avatar_color("bob")));
+    }
+
+    #[test]
+    fn text_on_accent_is_readable() {
+        assert_eq!(on_color(BLURPLE), egui::Color32::WHITE);
+        assert_eq!(on_color(egui::Color32::from_rgb(0xF0, 0xE0, 0x40)), DARK);
     }
 
     #[test]

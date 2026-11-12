@@ -83,7 +83,7 @@ fn short_date(ts: u64) -> String {
 pub(super) fn role_color(role: Role) -> egui::Color32 {
     match role {
         Role::Admin => theme::RED,
-        Role::Moderator => theme::ACCENT,
+        Role::Moderator => theme::BLURPLE,
         Role::Member => theme::MUTED,
     }
 }

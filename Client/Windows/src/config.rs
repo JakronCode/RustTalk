@@ -124,6 +124,18 @@ pub struct ClientConfig {
     /// Per-user playback volume by username (local only; missing = 100 %).
     #[serde(default)]
     pub user_volumes: std::collections::BTreeMap<String, f32>,
+    /// Compact layout: tighter spacing, chat without avatars.
+    #[serde(default)]
+    pub compact: bool,
+    /// Primary (accent) color as RGB.
+    #[serde(default = "default_accent")]
+    pub accent_color: [u8; 3],
+}
+
+pub const DEFAULT_ACCENT: [u8; 3] = [0x58, 0x65, 0xF2];
+
+fn default_accent() -> [u8; 3] {
+    DEFAULT_ACCENT
 }
 
 fn default_username() -> String {
@@ -191,6 +203,8 @@ impl Default for ClientConfig {
             global_ptt: false,
             input_volume: 1.0,
             user_volumes: Default::default(),
+            compact: false,
+            accent_color: DEFAULT_ACCENT,
         }
     }
 }
@@ -309,6 +323,8 @@ mod tests {
             global_ptt: true,
             input_volume: 0.5,
             user_volumes: [("anna".to_string(), 1.5)].into_iter().collect(),
+            compact: true,
+            accent_color: [0xEB, 0x45, 0x95],
         };
         let text = toml::to_string_pretty(&cfg).unwrap();
         let back: ClientConfig = toml::from_str(&text).unwrap();
@@ -323,6 +339,8 @@ mod tests {
         assert!(!back.echo_cancellation);
         assert_eq!(back.input_volume, 0.5);
         assert!(back.global_ptt);
+        assert!(back.compact);
+        assert_eq!(back.accent_color, [0xEB, 0x45, 0x95]);
         assert!(!back.animate_gifs);
         assert!(!back.flash_taskbar && !back.sound_leave && back.sound_join);
         assert!(!back.announce_names);
@@ -366,6 +384,8 @@ mod tests {
         assert!(cfg.announce_names && cfg.announce_voice.is_none());
         assert_eq!(cfg.announce_language, "en");
         assert!(cfg.user_volumes.is_empty());
+        assert!(!cfg.compact);
+        assert_eq!(cfg.accent_color, DEFAULT_ACCENT);
         assert!(cfg.server_address.ends_with(":7331"));
     }
 }

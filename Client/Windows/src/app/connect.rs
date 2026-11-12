@@ -183,8 +183,8 @@ impl RustTalkApp {
         };
         let connect = ui.add_enabled(
             !connecting,
-            egui::Button::new(egui::RichText::new(format!("{}  {label}", icons::regular::SIGN_IN)).size(15.0).strong().color(egui::Color32::WHITE))
-                .fill(theme::ACCENT)
+            egui::Button::new(egui::RichText::new(format!("{}  {label}", icons::regular::SIGN_IN)).size(15.0).strong().color(theme::on_accent()))
+                .fill(theme::accent())
                 .min_size(egui::vec2(w, 38.0)),
         );
         if connect.clicked() || (!connecting && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
