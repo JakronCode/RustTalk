@@ -417,8 +417,7 @@ impl RustTalkApp {
             .inner_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if ui
-                        .add(egui::Button::new(egui::RichText::new(icons::regular::PLUS_CIRCLE).size(20.0).color(theme::MUTED)).frame(false))
+                    if theme::ghost_button(ui, egui::RichText::new(icons::regular::PLUS_CIRCLE).size(20.0).color(theme::MUTED))
                         .on_hover_text("Attach image")
                         .clicked()
                     {
@@ -463,13 +462,11 @@ impl RustTalkApp {
                         resp.request_focus();
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let send = ui
-                            .add(egui::Button::new(egui::RichText::new(icons::regular::PAPER_PLANE_RIGHT).size(18.0).color(theme::accent())).frame(false))
+                        let send = theme::ghost_button(ui, egui::RichText::new(icons::regular::PAPER_PLANE_RIGHT).size(18.0).color(theme::accent()))
                             .on_hover_text("Send (Enter)  -  Shift+Enter for a new line")
                             .clicked();
                         let gif_color = if self.giphy.open { theme::accent() } else { theme::MUTED };
-                        let gif = ui
-                            .add(egui::Button::new(egui::RichText::new(icons::regular::GIF).size(18.0).color(gif_color)).frame(false))
+                        let gif = theme::ghost_button(ui, egui::RichText::new(icons::regular::GIF).size(18.0).color(gif_color))
                             .on_hover_text("GIFs");
                         self.gif_button_rect = Some(gif.rect);
                         if gif.clicked() {
@@ -599,7 +596,7 @@ impl RustTalkApp {
                     if theme::danger_button(ui, &format!("{}  Delete", icons::regular::TRASH)).clicked() {
                         confirm = true;
                     }
-                    if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                    if theme::ghost_button(ui, "Cancel").clicked() {
                         cancel = true;
                     }
                 });

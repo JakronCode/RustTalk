@@ -207,7 +207,7 @@ impl RustTalkApp {
                         self.send_raw(msg);
                         done = true;
                     }
-                    if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                    if theme::ghost_button(ui, "Cancel").clicked() {
                         done = true;
                     }
                 });

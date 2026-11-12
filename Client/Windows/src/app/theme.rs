@@ -280,6 +280,16 @@ pub fn menu_separator(ui: &mut egui::Ui) {
     );
 }
 
+/// Text-only button (Cancel, Close, ...) with a subtle background on hover.
+pub fn ghost_button(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response {
+    let bg = ui.painter().add(egui::Shape::Noop);
+    let resp = ui.add(egui::Button::new(text).frame(false));
+    if resp.hovered() && ui.is_enabled() {
+        ui.painter().set(bg, egui::Shape::rect_filled(resp.rect.expand(2.0), 6.0, HOVER));
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Red button for destructive actions.
 pub fn danger_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(

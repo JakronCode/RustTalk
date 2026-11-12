@@ -136,7 +136,7 @@ impl RustTalkApp {
                                 }
                                 close = true;
                             }
-                            if ui.add(egui::Button::new(if changed { "Discard" } else { "Close" }).frame(false)).clicked() {
+                            if theme::ghost_button(ui, if changed { "Discard" } else { "Close" }).clicked() {
                                 close = true;
                             }
                             if changed {
@@ -171,7 +171,7 @@ impl RustTalkApp {
                                 Err(e) => dlg.error = Some(e),
                             }
                         }
-                        if dlg.draft.icon.is_some() && ui.add(egui::Button::new(egui::RichText::new("Remove").color(theme::RED)).frame(false)).clicked() {
+                        if dlg.draft.icon.is_some() && theme::ghost_button(ui, egui::RichText::new("Remove").color(theme::RED)).clicked() {
                             dlg.draft.icon = None;
                         }
                     });

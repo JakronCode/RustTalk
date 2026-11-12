@@ -591,7 +591,7 @@ impl RustTalkApp {
                     {
                         action = Some(true);
                     }
-                    if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                    if theme::ghost_button(ui, "Cancel").clicked() {
                         action = Some(false);
                     }
                 });
@@ -785,7 +785,7 @@ impl RustTalkApp {
                         {
                             share = picker.selected;
                         }
-                        if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                        if theme::ghost_button(ui, "Cancel").clicked() {
                             cancel = true;
                         }
                     });

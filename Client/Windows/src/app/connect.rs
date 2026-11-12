@@ -214,7 +214,7 @@ impl RustTalkApp {
         }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.add(egui::Button::new(format!("{}  Save server", icons::regular::BOOKMARK_SIMPLE)).frame(false)).clicked() {
+            if theme::ghost_button(ui, format!("{}  Save server", icons::regular::BOOKMARK_SIMPLE)).clicked() {
                 let addr = self.config.server_address.trim().to_string();
                 if !addr.is_empty() && !self.config.bookmarks.iter().any(|b| b.address == addr) {
                     self.config.bookmarks.push(ServerBookmark {
@@ -226,7 +226,7 @@ impl RustTalkApp {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(egui::Button::new(format!("{}  Settings", icons::regular::GEAR_SIX)).frame(false)).clicked() {
+                if theme::ghost_button(ui, format!("{}  Settings", icons::regular::GEAR_SIX)).clicked() {
                     self.open_settings(SettingsPage::Voice);
                 }
             });
