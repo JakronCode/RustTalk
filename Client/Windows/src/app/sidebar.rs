@@ -601,11 +601,11 @@ impl RustTalkApp {
         let locally_muted = local_muted.contains(&user.id);
 
         let (rect, resp) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), theme::dense(28.0, 22.0)), egui::Sense::click());
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), theme::dense(34.0, 22.0)), egui::Sense::click());
         if resp.hovered() {
             ui.painter().rect_filled(rect, 6.0, theme::HOVER);
         }
-        let d = theme::dense(22.0, 18.0);
+        let d = theme::dense(24.0, 18.0);
         let av = egui::Rect::from_center_size(rect.left_center() + egui::vec2(40.0, 0.0), egui::vec2(d, d));
         theme::paint_avatar(ui.painter(), av, &user.name, talking_now);
         let name_color = if locally_muted {
