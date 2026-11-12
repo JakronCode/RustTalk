@@ -494,7 +494,8 @@ impl RustTalkApp {
             if i_am_here { theme::GREEN } else { fg },
         );
         let name_font = egui::FontId::proportional(14.5);
-        let max_name_w = rect.width() - 34.0 - indent - if hovered { 30.0 } else { 6.0 };
+        let is_lobby = ch.kind == ChannelKind::Spawn;
+        let max_name_w = rect.width() - 34.0 - indent - if hovered { 30.0 } else { 6.0 } - if is_lobby { 26.0 } else { 0.0 };
         let name = elide(ui, &ch.name, &name_font, max_name_w);
         p.text(
             egui::pos2(x + 24.0, rect.center().y),
@@ -506,8 +507,20 @@ impl RustTalkApp {
 
         // Hover: gear (channel settings) - by pointer position, see the category row.
         let mut action_hit = false;
+        // Lobby row: always-visible server disconnect on the right.
+        let lobby_shift = if is_lobby {
+            let btn = egui::Rect::from_center_size(rect.right_center() - egui::vec2(14.0, 0.0), egui::vec2(22.0, 22.0));
+            let tip = format!("Disconnect from {}", self.server_settings.name);
+            if disconnect_icon(ui, btn, &tip).clicked() {
+                self.pending_disconnect = true;
+                action_hit = true;
+            }
+            26.0
+        } else {
+            0.0
+        };
         if !is_dragged && pointer_on(ui, rect) {
-            let gear = egui::Rect::from_center_size(rect.right_center() - egui::vec2(14.0, 0.0), egui::vec2(22.0, 22.0));
+            let gear = egui::Rect::from_center_size(rect.right_center() - egui::vec2(14.0 + lobby_shift, 0.0), egui::vec2(22.0, 22.0));
             if small_icon(ui, gear, icons::regular::GEAR_SIX, "Channel settings").clicked() {
                 self.open_channel_settings(ch.id);
                 action_hit = true;
@@ -704,40 +717,34 @@ impl RustTalkApp {
         ui: &mut egui::Ui,
         cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
     ) {
+        // Lobby: no voice, so no voice panel (server disconnect sits on the Lobby row).
         let Some(my_ch) = self.my_channel() else { return };
-        let in_lobby = self.in_lobby();
+        if self.in_lobby() {
+            return;
+        }
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
-                if in_lobby {
-                    ui.label(egui::RichText::new(format!("{}  In the Lobby", icons::regular::HOUSE)).strong().color(theme::MUTED));
-                    ui.label(egui::RichText::new("Join a voice channel to talk").size(12.0).color(theme::MUTED));
-                } else {
-                    ui.label(
-                        egui::RichText::new(format!("{}  Voice Connected", icons::regular::CELL_SIGNAL_FULL))
-                            .strong()
-                            .color(theme::GREEN),
-                    );
-                    ui.label(egui::RichText::new(self.channel_name(my_ch)).size(12.0).color(theme::MUTED));
-                }
+                ui.label(
+                    egui::RichText::new(format!("{}  Voice Connected", icons::regular::CELL_SIGNAL_FULL))
+                        .strong()
+                        .color(theme::GREEN),
+                );
+                ui.label(egui::RichText::new(self.channel_name(my_ch)).size(12.0).color(theme::MUTED));
             });
-            // Always visible: disconnect from the SERVER (leaving a voice
-            // channel = click the lobby in the channel list).
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let tip = format!("Disconnect from {}", self.server_settings.name);
-                if theme::icon_button(ui, icons::regular::PHONE_DISCONNECT, IconState::Danger, &tip).clicked() {
-                    self.pending_disconnect = true;
+                if theme::icon_button(ui, icons::regular::PHONE_DISCONNECT, IconState::Danger, "Leave voice (back to the lobby)").clicked() {
+                    if let Some(spawn) = self.spawn_channel_id() {
+                        let _ = cmd_tx.send(Command::JoinChannel(spawn));
+                    }
                 }
             });
         });
 
-        // Camera / screen: disabled in the lobby.
         let cam_live = self.cam.as_ref().is_some_and(|c| c.is_sending());
         let screen_live = self.screen.is_some();
         ui.columns(2, |cols| {
-            let (cam_state, cam_tip) = if in_lobby {
-                (IconState::Disabled, "Camera is disabled in the lobby")
-            } else if cam_live {
+            let (cam_state, cam_tip) = if cam_live {
                 (IconState::Active, "Turn off camera")
             } else {
                 (IconState::Normal, "Turn on camera (with preview)")
@@ -745,9 +752,7 @@ impl RustTalkApp {
             if wide_toggle(&mut cols[0], icons::regular::VIDEO_CAMERA, "Camera", cam_state, cam_tip).clicked() {
                 self.toggle_cam(cmd_tx);
             }
-            let (scr_state, scr_tip) = if in_lobby {
-                (IconState::Disabled, "Screen sharing is disabled in the lobby")
-            } else if screen_live {
+            let (scr_state, scr_tip) = if screen_live {
                 (IconState::Active, "Stop sharing")
             } else {
                 (IconState::Normal, "Share a screen or window")
@@ -942,6 +947,16 @@ pub(super) fn channel_icon(kind: ChannelKind) -> &'static str {
         ChannelKind::Voice => icons::regular::SPEAKER_HIGH,
         ChannelKind::Category => icons::regular::FOLDER,
     }
+}
+
+/// Red "disconnect from server" icon at a fixed rect (Lobby row).
+fn disconnect_icon(ui: &mut egui::Ui, rect: egui::Rect, tip: &str) -> egui::Response {
+    let resp = ui.interact(rect, ui.id().with("lobby_disconnect"), egui::Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 4.0, theme::RED.gamma_multiply(0.18));
+    }
+    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, icons::regular::SIGN_OUT, egui::FontId::proportional(15.0), theme::RED);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip)
 }
 
 /// Small borderless icon button placed at a fixed rect (row hover actions).
