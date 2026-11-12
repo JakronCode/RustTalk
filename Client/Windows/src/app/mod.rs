@@ -18,6 +18,7 @@ mod connect;
 mod lifecycle;
 mod media_ui;
 mod moderation_ui;
+mod poke;
 mod server_settings;
 mod settings;
 mod sidebar;
@@ -270,6 +271,10 @@ pub struct RustTalkApp {
     server_settings: ServerSettings,
     /// Open "Server Settings" dialog (edit copy).
     server_settings_dialog: Option<server_settings::ServerSettingsDialog>,
+    /// "Poke ..." dialog (target + message being written).
+    poke_dialog: Option<poke::PokeDialog>,
+    /// Received pokes not yet dismissed (popup, newest last).
+    poke_inbox: Vec<poke::PokeNote>,
     status: String,
     status_is_error: bool,
     /// When `status` last changed (toast fade-out).
@@ -432,6 +437,8 @@ impl RustTalkApp {
             connected: false,
             server_settings: ServerSettings::default(),
             server_settings_dialog: None,
+            poke_dialog: None,
+            poke_inbox: Vec::new(),
             status: String::new(),
             status_is_error: false,
             status_at: Instant::now(),
@@ -547,6 +554,7 @@ impl RustTalkApp {
         self.connected = false;
         self.channel_settings = None;
         self.server_settings_dialog = None;
+        self.poke_dialog = None;
         self.confirm_delete = None;
         self.show_new_channel = false;
         self.audio = None; // stops the audio threads
@@ -748,6 +756,8 @@ impl RustTalkApp {
             Sound::Leave => self.config.sound_leave,
             Sound::Message | Sound::Mention => self.config.sound_message,
             Sound::Mute | Sound::Unmute => self.config.sound_mute,
+            // A poke is meant to wake you up: always rings.
+            Sound::Poke => true,
         };
         if on && self.audio.is_some() {
             sfx::play(&self.sfx, sound);
@@ -1197,6 +1207,7 @@ impl RustTalkApp {
             ServerMessage::ServerSettingsChanged { settings } => {
                 self.server_settings = settings;
             }
+            ServerMessage::Poked { from_id, from_name, message } => self.receive_poke(from_id, from_name, message),
             ServerMessage::Notice { message } => {
                 self.set_status(message);
             }
@@ -1270,6 +1281,8 @@ impl eframe::App for RustTalkApp {
         self.ui_new_channel(ctx);
         self.ui_channel_settings(ctx);
         self.ui_server_settings(ctx);
+        self.ui_poke_dialog(ctx);
+        self.ui_poke_popup(ctx);
         self.ui_confirm_delete(ctx);
         self.ui_confirm_delete_message(ctx);
         self.ui_mod_dialog(ctx);
@@ -1355,6 +1368,8 @@ impl RustTalkApp {
         // Toast only without an open dialog (it would cover dialog buttons).
         let dialog_open = self.channel_settings.is_some()
             || self.server_settings_dialog.is_some()
+            || self.poke_dialog.is_some()
+            || !self.poke_inbox.is_empty()
             || self.show_new_channel
             || self.confirm_delete.is_some()
             || self.confirm_delete_msg.is_some()
@@ -1440,6 +1455,13 @@ impl RustTalkApp {
                                 self.select_channel(id);
                             }
                         }
+                        "poke" => {
+                            if let Some(user) = self.users.values().find(|u| u.name == arg).cloned() {
+                                self.open_poke(&user);
+                            }
+                        }
+                        // Opens the "⋯" menu on that user's stage tile once it is drawn.
+                        "tile_menu" => *views::DEV_TILE_MENU.lock().unwrap() = Some(arg.to_string()),
                         "new_channel" => self.open_new_channel(None, ChannelKind::Text),
                         "gif" => self.open_gif_picker(),
                         // Share the RustTalk window itself (screenshot tests without the desktop).

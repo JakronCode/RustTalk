@@ -29,11 +29,16 @@
 //!     packets ChaCha20-Poly1305 with a per-session key (`Welcome.udp_key`).
 //!     Video is H.264 (`VideoFrame.data` = frame number + Annex-B); viewers
 //!     ask the sender for a keyframe (`RequestKeyframe` -> `KeyframeRequest`).
+//! v13: Poke: `Poke { target, message }` -> the target gets `Poked` (popup +
+//!     wake-up sound, like TeamSpeak).
 
 use serde::{Deserialize, Serialize};
 
 /// Aktuelle Protokollversion. Client und Server müssen übereinstimmen.
-pub const PROTOCOL_VERSION: u16 = 12;
+pub const PROTOCOL_VERSION: u16 = 13;
+
+/// Max. length of a poke message.
+pub const MAX_POKE_LEN: usize = 100;
 
 /// Art eines Video-Streams. Ein User kann beide gleichzeitig senden.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -430,6 +435,12 @@ pub enum ClientMessage {
     StopVideo {
         kind: VideoKind,
     },
+    /// Poke another user: they get a popup with `message` (may be empty) and
+    /// a wake-up sound.
+    Poke {
+        target: u64,
+        message: String,
+    },
     /// Viewer: please send a full picture of this stream (joined late / frames lost).
     RequestKeyframe {
         from_id: u64,
@@ -573,6 +584,12 @@ pub enum ServerMessage {
     ServerSettingsChanged {
         settings: ServerSettings,
     },
+    /// You were poked (only to the target).
+    Poked {
+        from_id: u64,
+        from_name: String,
+        message: String,
+    },
     /// Hinweis an einen Client (z. B. "wegen Inaktivitaet verschoben").
     Notice {
         message: String,
@@ -655,6 +672,7 @@ mod tests {
             ClientMessage::VideoFrame { kind: VideoKind::Camera, data: vec![1, 2, 3] },
             ClientMessage::StopVideo { kind: VideoKind::Screen },
             ClientMessage::UpdateServerSettings { settings: ServerSettings { icon: Some(vec![1, 2]), ..Default::default() } },
+            ClientMessage::Poke { target: 3, message: "Hey".into() },
             ClientMessage::Disconnect,
         ];
         for msg in msgs {
@@ -770,6 +788,7 @@ mod tests {
             ServerMessage::VideoFrame { from_id: 1, kind: VideoKind::Screen, data: vec![9, 8, 7] },
             ServerMessage::VideoStopped { from_id: 1, kind: VideoKind::Camera },
             ServerMessage::ServerSettingsChanged { settings: ServerSettings::default() },
+            ServerMessage::Poked { from_id: 3, from_name: "Phil".into(), message: "Aufwachen!".into() },
             ServerMessage::Notice { message: "AFK".into() },
             ServerMessage::Error { message: "Fehler".into() },
         ];

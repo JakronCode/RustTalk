@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use rusttalk_shared::protocol::{AuditEntry, BanInfo, InviteInfo, Role, RoleEntry,
     ChannelInfo, ChannelKind, ChannelPlacement, ChatRecord, LogEntry, ServerMessage, UserInfo,
     ServerSettings, MAX_CHAT_LEN, MAX_ICON_BYTES, MAX_NAME_LEN, MAX_SERVER_MESSAGE_LEN, MAX_WELCOME_LEN,
-    SPAWN_LOG_CAP, DEFAULT_AFK_NOTICE, fill_template,
+    SPAWN_LOG_CAP, DEFAULT_AFK_NOTICE, fill_template, MAX_POKE_LEN,
 };
 use tokio::sync::mpsc;
 
@@ -23,6 +23,9 @@ use crate::db::Db;
 /// werden Frames fuer diesen Zuschauer verworfen: langsame oder tote
 /// Verbindungen bremsen niemanden und fressen keinen Speicher.
 pub const MAX_VIDEO_BACKLOG: usize = 3 * 1024 * 1024;
+
+/// Min. time between two pokes from the same sender to the same target.
+pub const POKE_COOLDOWN: Duration = Duration::from_secs(3);
 
 /// Sender name of server announcements in text channels (client id 0).
 pub const ANNOUNCER_NAME: &str = "RustTalk";
@@ -102,6 +105,8 @@ pub struct State {
     /// GIPHY key for the GIF search (None = GIF button off for everyone).
     gif_key: Option<String>,
     gif_cache: crate::gif::GifCache,
+    /// Last poke per (sender, target), for the cooldown.
+    pokes: HashMap<(u64, u64), Instant>,
     moderation: crate::moderation::Moderation,
     admin_password: Option<String>,
     /// "Server update available ..." once the daily check found one.
@@ -138,6 +143,7 @@ impl State {
             next_message_id: 1 << 48,
             gif_key: None,
             gif_cache: Default::default(),
+            pokes: HashMap::new(),
             moderation: Default::default(),
             admin_password: cfg.admin_password.clone().filter(|p| !p.is_empty()),
             update_notice: None,
@@ -433,6 +439,29 @@ impl State {
         };
         let mins = self.settings.afk_timeout_mins.to_string();
         fill_template(template, &[("channel", channel_name), ("minutes", &mins)])
+    }
+
+    /// Poke (TeamSpeak style): checks the target and message and returns the
+    /// message for the target. At most one poke per sender and target every
+    /// `POKE_COOLDOWN` (no popup spam).
+    pub fn poke(&mut self, from: u64, target: u64, message: &str, now: Instant) -> Result<ServerMessage, String> {
+        if from == target {
+            return Err("You cannot poke yourself".to_string());
+        }
+        let from_name = self.clients.get(&from).map(|c| c.name.clone()).ok_or("Unknown client")?;
+        if !self.clients.contains_key(&target) {
+            return Err("This user is not online anymore".to_string());
+        }
+        let message = message.trim();
+        if message.chars().count() > MAX_POKE_LEN {
+            return Err(format!("Poke message too long (max. {MAX_POKE_LEN} characters)"));
+        }
+        self.pokes.retain(|_, t| now.saturating_duration_since(*t) < POKE_COOLDOWN);
+        if self.pokes.contains_key(&(from, target)) {
+            return Err("Please wait a moment before poking again".to_string());
+        }
+        self.pokes.insert((from, target), now);
+        Ok(ServerMessage::Poked { from_id: from, from_name, message: message.to_string() })
     }
 
     /// Auto-AFK: Clients in Voice-Channels, die laenger als das Limit stumm
@@ -1290,6 +1319,30 @@ category = "Talk"
     fn add_test_client(state: &mut State, name: &str) -> (u64, u64) {
         let (tx, _rx) = mpsc::unbounded_channel();
         state.add_client(name.to_string(), tx)
+    }
+
+    #[test]
+    fn poke_rules_and_cooldown() {
+        let mut st = test_state();
+        let (a, _) = add_test_client(&mut st, "alice");
+        let (b, _) = add_test_client(&mut st, "bob");
+        let (c, _) = add_test_client(&mut st, "carol");
+        let now = Instant::now();
+        match st.poke(a, b, "  wach auf!  ", now) {
+            Ok(ServerMessage::Poked { from_id, from_name, message }) => {
+                assert_eq!((from_id, from_name.as_str(), message.as_str()), (a, "alice", "wach auf!"));
+            }
+            other => panic!("Poked erwartet: {other:?}"),
+        }
+        // Gleiches Ziel sofort nochmal: Cooldown. Anderes Ziel geht.
+        assert!(st.poke(a, b, "", now + Duration::from_secs(1)).is_err());
+        assert!(st.poke(a, c, "", now + Duration::from_secs(1)).is_ok());
+        assert!(st.poke(a, b, "", now + POKE_COOLDOWN).is_ok(), "nach dem Cooldown wieder erlaubt");
+        // Sich selbst, unbekanntes Ziel, zu lange Nachricht.
+        assert!(st.poke(a, a, "", now).is_err());
+        assert!(st.poke(a, 999, "", now).is_err());
+        assert!(st.poke(c, a, &"x".repeat(MAX_POKE_LEN + 1), now).is_err());
+        assert!(st.poke(c, a, &"x".repeat(MAX_POKE_LEN), now).is_ok());
     }
 
     #[test]

@@ -33,6 +33,10 @@ struct Args {
     /// Channel-ID fuer --chat (Default: Join-Ziel oder 1).
     chat_channel: Option<u64>,
     create_channel: Option<String>,
+    /// Poke this client id after `poke_after` seconds (with `poke_message`).
+    poke: Option<u64>,
+    poke_message: String,
+    poke_after: u64,
     join_channel: Option<u64>,
     /// Ersten Channel dieser Art joinen (z. B. "voice").
     join_kind: Option<ChannelKind>,
@@ -49,6 +53,9 @@ impl Default for Args {
             chat: None,
             chat_channel: None,
             create_channel: None,
+            poke: None,
+            poke_message: String::new(),
+            poke_after: 0,
             join_channel: None,
             join_kind: None,
         }
@@ -70,6 +77,9 @@ fn parse_args() -> Result<Args> {
             "--duration-secs" => args.duration_secs = value("--duration-secs")?.parse()?,
             "--chat" => args.chat = Some(value("--chat")?),
             "--chat-channel" => args.chat_channel = Some(value("--chat-channel")?.parse()?),
+            "--poke" => args.poke = Some(value("--poke")?.parse()?),
+            "--poke-message" => args.poke_message = value("--poke-message")?,
+            "--poke-after" => args.poke_after = value("--poke-after")?.parse()?,
             "--create-channel" => args.create_channel = Some(value("--create-channel")?),
             "--join-channel" => args.join_channel = Some(value("--join-channel")?.parse()?),
             "--join-kind" => {
@@ -208,6 +218,7 @@ async fn run(args: &Args) -> Result<()> {
     let mut timestamp: u32 = 0;
     let mut audio_rx: u64 = 0;
     let mut senders: HashSet<u64> = HashSet::new();
+    let mut poke_pending = args.poke;
 
     loop {
         tokio::select! {
@@ -237,6 +248,13 @@ async fn run(args: &Args) -> Result<()> {
             }
             _ = interval.tick() => {
                 let now = Instant::now();
+                if let Some(target) = poke_pending {
+                    if now >= start + Duration::from_secs(args.poke_after) {
+                        write_frame(&mut writer, &ClientMessage::Poke { target, message: args.poke_message.clone() }).await?;
+                        println!("POKED {target}");
+                        poke_pending = None;
+                    }
+                }
                 if now < audio_until {
                     let pkt = audio_packet::seal_packet(
                         &AudioHeader::new(udp_token, seq, timestamp),

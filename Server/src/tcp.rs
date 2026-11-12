@@ -456,6 +456,12 @@ async fn message_loop(
                     let _ = tx.send(msg.clone());
                 }
             }
+            ClientMessage::Poke { target, message } => {
+                match st.poke(client_id, target, &message, std::time::Instant::now()) {
+                    Ok(poked) => st.send_to(target, &poked),
+                    Err(e) => st.send_to(client_id, &ServerMessage::Error { message: e }),
+                }
+            }
         }
     }
 }
