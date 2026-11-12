@@ -2,6 +2,23 @@
 
 > Pflichtdokumentation aller Testläufe. Neueste oben.
 
+## 2026-11-12 (30) – E4: Videoqualität und Bildrate
+
+**Messung zuerst** (neue ignorierte Tests `quality_report`, `hw_screen_stage_times`; Bilder nur im Speicher): Bildschirmübertragung lief real mit **~12 fps** statt 25. Ursachen pro Frame auf einem 2560×1440-Monitor: GDI-Aufnahme 72 ms, Skalieren 40 ms, H.264 80 ms (OpenH264 ohne Assembler gebaut – kein `nasm` vorhanden, auch nicht im Release-Workflow), davon 15 ms langsame RGB→YUV-Umrechnung.
+
+**Änderungen:**
+- NASM: lokal per winget installiert (mit Zustimmung), Release-Workflow installiert es per choco, `cargo.ps1` findet es selbst. Debug-Builds: OpenH264 ohne `-g` (mit NASM 3.x fehlten sonst die SSE-Funktionen beim Linken) und optimiert.
+- RGB/RGBA→YUV über den SIMD-Pfad (`from_rgb8_source`/`from_rgba8_source`): 15 → 1,6 ms.
+- Monitore über DXGI Desktop Duplication (xcap `video_recorder`, pro Monitor einmal erzeugt und wiederverwendet, GDI als Rückfall): 72 → ~1 ms. Ruhender Bildschirm: letztes Bild alle 0,5 s erneut (späte Zuschauer, Keyframes).
+- Skalieren mit `fast_image_resize` (SIMD, Catmull-Rom) im Aufnahme-Thread parallel zum Encoder: 40 → 14 ms; RGBA bleibt RGBA.
+- Encoder: 30 fps, Bitraten-Modus ohne Frame-Skipping (kein Ruckeln), Qualitätsgrenze QP 36 (Bildschirm) / 40 (Kamera); neue Stufe „Best“ (1440p, Kamera 1080p), „High“ 6 Mbit/s.
+
+**Ergebnis (Release, 2560×1440 → 1080p):** Aufnahme ~1 ms + Skalieren 14 ms (Thread 1) ‖ Kodieren ~21 ms (Thread 2) → 30 fps möglich (vorher ~12). Kodierte Qualität gleich/besser (PSNR 35,8 dB, keine übersprungenen Frames).
+**Tests:** Client 94 (neu: schnelles Skalieren behält Format/Seitenverhältnis, RGBA-Kodierung; Pacer 30 fps), Server 54, Integration 18, shared 18 ✅. **Live:** Fensterübertragung zwischen zwei Debug-Clients, Farben korrekt ✅; Monitorübertragung nur per Pixelstatistik geprüft (Screenshot enthielt den echten Bildschirm, nicht angesehen, gelöscht).
+**Nicht geprüft:** Kamera mit „Best“ (1080p) an echter Kamera, Bildrate bei einem Zuschauer im echten Netz, GitHub-Build mit choco-NASM (erst beim nächsten Release).
+
+---
+
 ## 2026-11-12 (29) – Streams nur auf Klick (Opt-in), Protokoll v14
 
 **Wunsch:** Wer einem Kanal beitritt, in dem jemand streamt, bekam das Video sofort (erzwungene Bandbreite). Jetzt nur auf Klick.

@@ -24,6 +24,11 @@ $BuildDir = "$env:LOCALAPPDATA\Programs\RustTalk-src"
 
 Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
 
+# NASM for OpenH264's SIMD assembly (video ~5x faster); winget installs it per user.
+foreach ($d in "$env:LOCALAPPDATA\bin\NASM", "$env:ProgramFiles\NASM") {
+    if ((Test-Path "$d\nasm.exe") -and ($env:PATH -notlike "*$d*")) { $env:PATH = "$d;$env:PATH" }
+}
+
 $retries = 1
 if ($args.Count -ge 2 -and $args[0] -eq "-Retries") {
     $retries = [int]$args[1]

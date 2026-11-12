@@ -41,6 +41,8 @@ ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "
 unicode-normalization = "0.1"
 # H.264 video (OpenH264 built from source, needs only a C++ compiler)
 openh264 = "0.9"
+# SIMD scaling of screen/camera pictures before encoding (~10x faster than image::thumbnail)
+fast_image_resize = "6.1"
 # TLS for the control connection
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

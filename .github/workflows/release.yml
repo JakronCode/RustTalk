@@ -37,6 +37,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # OpenH264's SIMD assembly needs nasm - without it video encoding is ~5x slower.
+      - name: Install NASM
+        shell: pwsh
+        run: |
+          choco install nasm -y --no-progress
+          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
       - name: Build
         run: cargo build --release -p rusttalk-client -p rusttalk-server
       - name: Package
