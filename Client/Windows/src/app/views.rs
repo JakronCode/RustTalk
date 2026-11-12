@@ -89,6 +89,9 @@ impl RustTalkApp {
                                 let _ = cmd_tx.send(Command::JoinChannel(ch_id));
                             }
                         }
+                        if kind == ChannelKind::Spawn && self.my_channel() != Some(ch_id) && ui.button(format!("{}  Back to Lobby", icons::regular::SIGN_IN)).clicked() {
+                            let _ = cmd_tx.send(Command::JoinChannel(ch_id));
+                        }
                     });
                 });
             });

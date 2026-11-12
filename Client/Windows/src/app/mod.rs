@@ -991,7 +991,18 @@ impl RustTalkApp {
                     self.clear_video_of(client_id, None);
                 }
                 let name = self.users.get(&client_id).map(|u| u.name.clone());
-                if client_id != self.my_id {
+                if client_id == self.my_id {
+                    // Our own move: chime when we enter a voice channel, the
+                    // leave sound when we go back to the lobby (no spoken name).
+                    let old = self.my_voice_channel();
+                    if self.channel_kind(channel_id) == Some(ChannelKind::Voice) {
+                        if old != Some(channel_id) {
+                            self.notify(Sound::Join);
+                        }
+                    } else if old.is_some() {
+                        self.notify(Sound::Leave);
+                    }
+                } else {
                     let mine = self.my_voice_channel();
                     let old = self.users.get(&client_id).map(|u| u.channel_id);
                     if mine.is_some() && Some(channel_id) == mine {

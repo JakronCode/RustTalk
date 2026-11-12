@@ -492,26 +492,22 @@ impl RustTalkApp {
             }
         }
 
+        // Click = open the channel (members + chat); joining voice is a
+        // deliberate double-click (or "Join" in the menu / the header button).
         if resp.clicked() && !action_hit {
-            match ch.kind {
-                // Voice channels and the lobby: click = join (back to the lobby too).
-                ChannelKind::Voice | ChannelKind::Spawn => {
-                    self.select_channel(ch.id);
-                    if !i_am_here {
-                        let _ = cmd_tx.send(Command::JoinChannel(ch.id));
-                    }
-                }
-                _ => self.select_channel(ch.id),
-            }
+            self.select_channel(ch.id);
+        }
+        if resp.double_clicked() && !action_hit && ch.kind.can_join() && !i_am_here {
+            let _ = cmd_tx.send(Command::JoinChannel(ch.id));
         }
         if draggable && resp.drag_started() {
             egui::DragAndDrop::set_payload(ui.ctx(), ChannelDrag { id: ch.id, is_category: false });
         }
         let hover_text = match ch.kind {
             ChannelKind::Voice if i_am_here => "You are here",
-            ChannelKind::Voice => "Click to join  -  drag to move",
+            ChannelKind::Voice => "Double-click to join  -  drag to move",
             ChannelKind::Spawn if i_am_here => "Lobby: everyone lands here, talking is disabled",
-            ChannelKind::Spawn => "Click to go back to the lobby (talking is disabled there)",
+            ChannelKind::Spawn => "Double-click to go back to the lobby (talking is disabled there)",
             _ => "Click to open  -  drag to move",
         };
         let resp = resp.on_hover_text_at_pointer(hover_text);
@@ -536,8 +532,9 @@ impl RustTalkApp {
         cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
     ) {
         ui.set_min_width(190.0);
-        if ch.kind == ChannelKind::Voice && self.my_channel() != Some(ch.id) {
-            if ui.button(format!("{}  Join", icons::regular::SIGN_IN)).clicked() {
+        if ch.kind.can_join() && self.my_channel() != Some(ch.id) {
+            let label = if ch.kind == ChannelKind::Spawn { "Back to Lobby" } else { "Join" };
+            if ui.button(format!("{}  {label}", icons::regular::SIGN_IN)).clicked() {
                 let _ = cmd_tx.send(Command::JoinChannel(ch.id));
                 self.select_channel(ch.id);
                 ui.close_menu();

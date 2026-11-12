@@ -2,6 +2,16 @@
 
 > Pflichtdokumentation aller Testläufe. Neueste oben.
 
+## 2026-11-12 (26) – Eigener Join-Sound, Beitreten per Doppelklick
+
+**Bug:** Beim eigenen Betreten eines Sprachkanals kam kein Sound (nur bei anderen). Jetzt: eigener Join-Sound beim Betreten eines Sprachkanals, Leave-Sound beim Zurück in die Lobby (ohne Namensansage).
+**UX:** Ein Klick auf einen Kanal öffnet ihn nur (Mitglieder + Chat); beigetreten wird per **Doppelklick**, über „Join Voice“ im Kopf oder Rechtsklick → Join. Die Lobby hat analog „Back to Lobby“ (Kopf-Button + Rechtsklick). Tooltips angepasst.
+
+**Tests:** Client 92 ✅. **Live:** Debug-Client mit `join:Lounge,join:Lobby`: `notify Join` und `notify Leave` mit Audio aktiv (temporäre Debug-Ausgabe, wieder entfernt).
+**Nicht geprüft:** Doppelklick per Maus in der echten App (nur Code; egui `double_clicked`).
+
+---
+
 ## 2026-11-12 (25) – Release-Vorbereitung v0.6.0: Lizenzen
 
 **Modell-Lizenz:** Supertonic 3 (Supertone Inc.) steht unter BigScience OpenRAIL-M: Nutzung frei, auch kommerziell, aber mit Nutzungsauflagen (Attachment A), die an Nutzer weitergegeben werden müssen. RustTalk liefert das Modell nicht mit (Download direkt von Hugging Face), lädt aber jetzt die `LICENSE` mit ins Stimmenpaket (SHA-256), zeigt in den Einstellungen den Hinweis mit Link und nennt die Auflagen im README (Abschnitt „Third-party licenses“). Unsere Nutzung (Namen vorlesen) ist unproblematisch.
