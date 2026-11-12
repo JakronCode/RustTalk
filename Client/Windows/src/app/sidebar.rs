@@ -645,6 +645,9 @@ impl RustTalkApp {
             ui.interact(r, ui.id().with(("ustat", user.id, tip)), egui::Sense::hover()).on_hover_text(tip);
             x -= 20.0;
         };
+        if me && self.screen_audio.is_some() {
+            icon_at(icons::regular::SPEAKER_HIGH, theme::GREEN, "Sharing audio");
+        }
         if user.deafened {
             icon_at(icons::regular::SPEAKER_SLASH, theme::RED, "Deafened");
         }
@@ -776,9 +779,6 @@ impl RustTalkApp {
                 }
             }
         });
-        #[cfg(target_os = "linux")]
-        ui.checkbox(&mut self.config.share_screen_audio, "Include system audio with screen")
-            .on_hover_text("Share all sound on the default system output, including when sharing one window");
         ui.add_space(2.0);
         ui.separator();
     }
@@ -996,9 +996,13 @@ fn wide_toggle(ui: &mut egui::Ui, icon: &str, label: &str, state: IconState, tip
     let btn = egui::Button::new(egui::RichText::new(text).color(fg))
         .fill(bg)
         .min_size(egui::vec2(ui.available_width(), 32.0));
-    ui.add_enabled(state != IconState::Disabled, btn)
-        .on_hover_text(tip)
-        .on_disabled_hover_text(tip)
+    // Button content follows the layout's alignment; centre it.
+    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+        ui.add_enabled(state != IconState::Disabled, btn)
+            .on_hover_text(tip)
+            .on_disabled_hover_text(tip)
+    })
+    .inner
 }
 
 /// Green "online" dot at the bottom right of the own avatar.
