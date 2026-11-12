@@ -20,6 +20,9 @@ struct DropSlot {
     index: u32,
 }
 
+const SIDEBAR_MIN: f32 = 220.0;
+const SIDEBAR_MAX: f32 = 480.0;
+
 fn row_h() -> f32 {
     theme::dense(30.0, 24.0)
 }
@@ -52,9 +55,11 @@ impl RustTalkApp {
         ctx: &egui::Context,
         cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
     ) {
-        egui::SidePanel::left("sidebar")
-            .exact_width(260.0)
-            .resizable(false)
+        let width = self.config.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+        let panel = egui::SidePanel::left("sidebar")
+            .default_width(width)
+            .width_range(SIDEBAR_MIN..=SIDEBAR_MAX)
+            .resizable(true)
             .frame(egui::Frame::default().fill(theme::SIDEBAR))
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
@@ -97,6 +102,12 @@ impl RustTalkApp {
                             .show(ui, |ui| self.ui_channel_tree(ui, cmd_tx));
                     });
             });
+        // Persist once the drag is over (not every frame while dragging).
+        let new = panel.response.rect.width().round();
+        if (new - self.config.sidebar_width).abs() >= 1.0 && !ctx.input(|i| i.pointer.any_down()) {
+            self.config.sidebar_width = new;
+            self.config.save();
+        }
     }
 
     /// Server icon + name with dropdown menu (server settings, create, ...).

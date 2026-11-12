@@ -130,6 +130,13 @@ pub struct ClientConfig {
     /// Primary (accent) color as RGB.
     #[serde(default = "default_accent")]
     pub accent_color: [u8; 3],
+    /// Width of the channel sidebar in points (drag its right edge).
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: f32,
+}
+
+fn default_sidebar_width() -> f32 {
+    260.0
 }
 
 pub const DEFAULT_ACCENT: [u8; 3] = [0x58, 0x65, 0xF2];
@@ -205,6 +212,7 @@ impl Default for ClientConfig {
             user_volumes: Default::default(),
             compact: false,
             accent_color: DEFAULT_ACCENT,
+            sidebar_width: default_sidebar_width(),
         }
     }
 }
@@ -325,6 +333,7 @@ mod tests {
             user_volumes: [("anna".to_string(), 1.5)].into_iter().collect(),
             compact: true,
             accent_color: [0xEB, 0x45, 0x95],
+            sidebar_width: 320.0,
         };
         let text = toml::to_string_pretty(&cfg).unwrap();
         let back: ClientConfig = toml::from_str(&text).unwrap();
@@ -341,6 +350,7 @@ mod tests {
         assert!(back.global_ptt);
         assert!(back.compact);
         assert_eq!(back.accent_color, [0xEB, 0x45, 0x95]);
+        assert_eq!(back.sidebar_width, 320.0);
         assert!(!back.animate_gifs);
         assert!(!back.flash_taskbar && !back.sound_leave && back.sound_join);
         assert!(!back.announce_names);
@@ -386,6 +396,7 @@ mod tests {
         assert!(cfg.user_volumes.is_empty());
         assert!(!cfg.compact);
         assert_eq!(cfg.accent_color, DEFAULT_ACCENT);
+        assert_eq!(cfg.sidebar_width, 260.0);
         assert!(cfg.server_address.ends_with(":7331"));
     }
 }
