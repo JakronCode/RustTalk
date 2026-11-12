@@ -1,6 +1,6 @@
 # RustTalk – Roadmap
 
-Checklist of planned features, by priority. Status as of 2026-11-11 (v0.6.0, protocol v12). All categories A-D done.
+Checklist of planned features, by priority. Status as of 2026-11-11 (v0.6.1, protocol v12). All categories A-D done.
 
 ## A – Quick wins (WIP spots already visible in the UI)
 
