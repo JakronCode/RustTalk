@@ -381,6 +381,7 @@ pub struct RustTalkApp {
     /// Saved server being renamed: (index, text being edited).
     renaming_bookmark: Option<(usize, String)>,
     server_nickname: String,
+    show_connect_form: bool,
     /// Not installed yet: the whole window is the install screen.
     install_screen: Option<lifecycle::InstallScreen>,
     update: lifecycle::UpdateState,
@@ -521,6 +522,7 @@ impl RustTalkApp {
             focus_password: false,
             renaming_bookmark: None,
             server_nickname,
+            show_connect_form: false,
             install_screen: (crate::install::mode() == crate::install::Mode::NotInstalled).then(lifecycle::InstallScreen::new),
             update: lifecycle::UpdateState::new(),
             toast_tx,

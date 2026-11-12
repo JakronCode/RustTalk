@@ -12,7 +12,8 @@ impl RustTalkApp {
                     ui.disable();
                 }
                 let avail = ui.available_size();
-                let card_w = 760.0f32.min(avail.x - 32.0);
+                let expanded = self.show_connect_form;
+                let card_w = (if expanded { 760.0_f32 } else { 340.0_f32 }).min(avail.x - 32.0);
                 ui.add_space(((avail.y - 530.0) / 2.0).max(16.0));
                 ui.vertical_centered(|ui| {
                     logo::paint_logo(ui, 64.0);
@@ -34,19 +35,20 @@ impl RustTalkApp {
                             ui.horizontal_top(|ui| {
                                 // --- Left: saved servers ---
                                 ui.allocate_ui_with_layout(
-                                    egui::vec2(240.0, 360.0),
+                                    egui::vec2(if expanded { 240.0 } else { card_w - 40.0 }, 360.0),
                                     egui::Layout::top_down(egui::Align::Min),
                                     |ui| self.saved_servers(ui),
                                 );
-                                ui.add_space(8.0);
-                                ui.separator();
-                                ui.add_space(8.0);
-                                // --- Right: connect form ---
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(ui.available_width(), 360.0),
-                                    egui::Layout::top_down(egui::Align::Min),
-                                    |ui| self.connect_form(ui),
-                                );
+                                if expanded {
+                                    ui.add_space(8.0);
+                                    ui.separator();
+                                    ui.add_space(8.0);
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(ui.available_width(), 360.0),
+                                        egui::Layout::top_down(egui::Align::Min),
+                                        |ui| self.connect_form(ui),
+                                    );
+                                }
                             });
                         });
                 });
@@ -107,7 +109,7 @@ impl RustTalkApp {
         egui::ScrollArea::vertical().max_height(260.0).auto_shrink([false, false]).show(ui, |ui| {
             if bookmarks.is_empty() {
                 ui.label(
-                    egui::RichText::new("No saved servers yet.\nClick = fill in  -  double click = connect")
+                    egui::RichText::new("No saved servers yet.")
                         .size(12.5)
                         .color(theme::MUTED),
                 );
@@ -133,11 +135,14 @@ impl RustTalkApp {
                     None => paint_clipped(ui, rect.left_top() + egui::vec2(46.0, 13.0), &bm.address, 14.0, theme::HEADER, text_w),
                 }
                 if resp.clicked() {
+                    self.show_connect_form = true;
+                    self.config.invite = None;
                     self.config.server_address = bm.address.clone();
                     self.config.server_password = bm.password.clone();
                     self.server_nickname = bm.nickname().unwrap_or_default().to_string();
                 }
                 if resp.double_clicked() {
+                    self.config.invite = None;
                     self.config.server_address = bm.address.clone();
                     self.config.server_password = bm.password.clone();
                     self.server_nickname = bm.nickname().unwrap_or_default().to_string();
@@ -158,7 +163,26 @@ impl RustTalkApp {
                         }
                     });
             }
+            ui.add_space(6.0);
+            if theme::ghost_button(
+                ui,
+                egui::RichText::new(format!("{}  Add / connect custom server", icons::regular::PLUS))
+                    .color(theme::MUTED),
+            ).clicked() {
+                self.show_connect_form = true;
+                self.server_nickname.clear();
+                self.config.server_address.clear();
+                self.config.server_password = None;
+                self.config.invite = None;
+                self.renaming_bookmark = None;
+            }
         });
+        if !self.show_connect_form {
+            ui.add_space(8.0);
+            if theme::ghost_button(ui, format!("{}  Settings", icons::regular::GEAR_SIX)).clicked() {
+                self.open_settings(SettingsPage::Voice);
+            }
+        }
         if let Some(i) = remove_idx {
             self.config.bookmarks.remove(i);
             self.renaming_bookmark = None;
@@ -293,6 +317,7 @@ impl RustTalkApp {
         match action {
             Action::Retry => self.start_connect(),
             Action::EditPassword => {
+                self.show_connect_form = true;
                 self.join_error = None;
                 // A stale invite would be refused before the password is checked.
                 self.config.invite = None;
@@ -312,6 +337,10 @@ impl RustTalkApp {
 
     fn connect_form(&mut self, ui: &mut egui::Ui) {
         let w = ui.available_width();
+        if theme::ghost_button(ui, format!("{}  Hide details", icons::regular::CARET_LEFT)).clicked() {
+            self.show_connect_form = false;
+        }
+        ui.add_space(4.0);
         theme::caption(ui, "Server nickname (optional)");
         ui.add_sized(
             [w, 32.0],
