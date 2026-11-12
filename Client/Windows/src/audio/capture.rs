@@ -78,9 +78,10 @@ pub fn build_stream_for(device: &cpal::Device, supported: &cpal::SupportedStream
 /// Hält einen Input-Stream offen und verwirft die Samples; der Pegel fließt
 /// über die Level-Sink.
 pub struct MicMonitor {
-    _stream: cpal::Stream,
+    stream: Option<cpal::Stream>,
     level: Arc<AtomicU32>,
     stop: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl MicMonitor {
@@ -91,7 +92,7 @@ impl MicMonitor {
         let level = Arc::new(AtomicU32::new(0));
         let stream = build_input_stream(device_name, prod, Some(level.clone()), gain)?;
         let stop = Arc::new(AtomicBool::new(false));
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("mic-monitor".to_string())
             .spawn({
                 let stop = stop.clone();
@@ -103,7 +104,7 @@ impl MicMonitor {
                 }
             })
             .context("Monitor-Thread starten")?;
-        Ok(Self { _stream: stream, level, stop })
+        Ok(Self { stream: Some(stream), level, stop, worker: Some(worker) })
     }
 
     pub fn level(&self) -> f32 {
@@ -114,6 +115,8 @@ impl MicMonitor {
 impl Drop for MicMonitor {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        self.stream = None;
+        if let Some(worker) = self.worker.take() { let _ = worker.join(); }
     }
 }
 

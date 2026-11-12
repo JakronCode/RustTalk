@@ -266,16 +266,19 @@ impl RustTalkApp {
                     self.config.input_device.as_deref(),
                     self.config.output_device.as_deref(),
                 );
+                if back.is_err() { self.audio = None; }
                 self.set_error(match back {
                     Ok(()) => {
                         format!("Could not use that device ({failed}) - kept the previous one")
                     }
-                    Err(e) => format!("Audio stopped: {e:#} - reconnect to try again"),
+                    Err(e) => format!("Audio stopped: {e:#} - rejoin voice to try again"),
                 });
             }
             // Computer audio of a screen share follows the output device.
             self.screen_audio = None;
             self.screen_audio_failed = false;
+        } else {
+            self.sync_voice_audio();
         }
         self.config.save();
     }
@@ -436,7 +439,7 @@ impl RustTalkApp {
         } else {
             hint(
                 ui,
-                "Speak to see your level. Green = above the threshold (sent).",
+                "This page opens your microphone for a local level preview outside voice channels. Green = above the voice threshold.",
             );
         }
     }
