@@ -21,7 +21,7 @@ Open `index.html` in a browser, or serve the folder with any static file server.
 ## Deploy
 
 ```bash
-RUSTTALK_WEB_HOST=root@your-server bash website/deploy.sh
+RUSTTALK_WEB_HOST=user@your-server RUSTTALK_WEB_PORT=22 bash website/deploy.sh
 ```
 
 First-time server setup (Debian/Ubuntu):
