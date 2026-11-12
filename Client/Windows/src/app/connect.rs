@@ -8,6 +8,9 @@ impl RustTalkApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(theme::DARK))
             .show(ctx, |ui| {
+                if self.join_error.is_some() {
+                    ui.disable();
+                }
                 let avail = ui.available_size();
                 let card_w = 760.0f32.min(avail.x - 32.0);
                 ui.add_space(((avail.y - 470.0) / 2.0).max(16.0));
@@ -53,13 +56,6 @@ impl RustTalkApp {
                     self.join_error = None;
                     self.set_status("Server address changed. Connect again to verify its identity.");
                 }
-                if self.join_error.is_some() {
-                    ui.add_space(12.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(((avail.x - 560.0) / 2.0).max(0.0));
-                        self.join_error_panel(ui, 530.0);
-                    });
-                }
                 if let Some(r) = self.update.available.clone() {
                     ui.add_space(12.0);
                     ui.vertical_centered(|ui| {
@@ -80,6 +76,23 @@ impl RustTalkApp {
                     });
                 }
             });
+        if self.join_error.is_some() {
+            let size = ctx.screen_rect().size();
+            let width = (size.x - 72.0).clamp(160.0, 530.0);
+            let response = egui::Modal::new(egui::Id::new("join_error_dialog"))
+                .frame(egui::Frame::default().fill(theme::BG).corner_radius(10.0))
+                .backdrop_color(egui::Color32::from_black_alpha(160))
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height((size.y - 64.0).max(80.0))
+                        .show(ui, |ui| self.join_error_panel(ui, width));
+                });
+            if response.should_close() {
+                self.join_error = None;
+                self.cert_check = None;
+                self.set_status("");
+            }
+        }
     }
 
     fn saved_servers(&mut self, ui: &mut egui::Ui) {
@@ -200,6 +213,7 @@ impl RustTalkApp {
                                 if theme::ghost_button(ui, egui::RichText::new(icons::regular::X).color(theme::MUTED)).on_hover_text("Dismiss").clicked() {
                                     self.join_error = None;
                                     self.cert_check = None;
+                                    self.set_status("");
                                 }
                             });
                         });
@@ -269,12 +283,14 @@ impl RustTalkApp {
         match action {
             Action::Retry => self.start_connect(),
             Action::EditPassword => {
+                self.join_error = None;
                 // A stale invite would be refused before the password is checked.
                 self.config.invite = None;
                 self.config.server_password = None;
                 self.focus_password = true;
             }
             Action::ShowUpdate => {
+                self.join_error = None;
                 self.check_for_updates();
                 self.open_settings(SettingsPage::About);
             }
@@ -323,7 +339,7 @@ impl RustTalkApp {
                 .fill(theme::accent())
                 .min_size(egui::vec2(w, 38.0)),
         );
-        if connect.clicked() || (!connecting && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+        if connect.clicked() || (ui.is_enabled() && !connecting && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
             if let Some(rc) = self.reconnect.as_mut() {
                 rc.next_at = None; // manual attempt replaces the scheduled one
             }
