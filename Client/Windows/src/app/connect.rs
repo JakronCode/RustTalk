@@ -58,18 +58,6 @@ impl RustTalkApp {
                     self.join_error = None;
                     self.set_status("Server address changed. Connect again to verify its identity.");
                 }
-                if let Some(r) = self.update.available.clone() {
-                    ui.add_space(12.0);
-                    ui.vertical_centered(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.add_space(((avail.x - 420.0) / 2.0).max(0.0));
-                            ui.label(egui::RichText::new(format!("{}  RustTalk {} is available", icons::regular::ARROW_CIRCLE_UP, r.version)).color(theme::GREEN));
-                            if ui.button("Show update").clicked() {
-                                self.open_settings(SettingsPage::About);
-                            }
-                        });
-                    });
-                }
                 if !self.status.is_empty() && self.join_error.is_none() {
                     ui.add_space(14.0);
                     ui.vertical_centered(|ui| {
@@ -78,6 +66,7 @@ impl RustTalkApp {
                     });
                 }
             });
+        self.update_banner_overlay(ctx);
         if self.join_error.is_some() {
             let size = ctx.screen_rect().size();
             let width = (size.x - 96.0).clamp(160.0, 640.0);

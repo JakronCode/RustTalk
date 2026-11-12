@@ -48,6 +48,7 @@ impl RustTalkApp {
             .show(ctx, |ui| {
                 let Some(ch_id) = self.selected_channel.filter(|id| self.channels.contains_key(id)) else {
                     empty_state(ui, icons::regular::CHAT_CIRCLE_DOTS, "No channel selected", "Pick a channel on the left.");
+                    self.update_banner_overlay(ctx);
                     return;
                 };
                 let kind = self.channel_kind(ch_id).unwrap_or(ChannelKind::Text);
@@ -96,6 +97,7 @@ impl RustTalkApp {
                     ui.label(egui::RichText::new(subtitle).color(theme::MUTED));
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        self.update_banner(ui);
                         if theme::icon_button(ui, icons::regular::GEAR_SIX, theme::IconState::Normal, "Channel settings")
                             .clicked()
                         {

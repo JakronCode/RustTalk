@@ -188,7 +188,7 @@ Build and test the image yourself: `make docker-build` (or `docker build -f Serv
 
 Download `rusttalk-windows.exe` from the [latest release](https://github.com/rusttalkcrew/RustTalk/releases/latest) and run it. It installs itself for your user (no admin rights): `%LOCALAPPDATA%\Programs\RustTalk`, Start menu entry (optional desktop shortcut), settings in `%APPDATA%\RustTalk`. Uninstall via Windows **Apps & features**.
 
-**Updates:** the installed app checks GitHub for a newer release on start (Settings > About > Updates) and installs it on one click (download, SHA-256 check, restart).
+**Updates:** the installed app checks GitHub for a newer release on start (Settings > About > Updates). A newer release shows an "Update" notice in the top right corner; clicking it (or Install in Settings > About) asks for confirmation, then downloads it, checks its SHA-256 checksum and restarts.
 
 Command line (for admins/scripts): `rusttalk-windows.exe --install [--desktop-shortcut] [--no-start]`, `rusttalk.exe --uninstall [--quiet] [--remove-settings]`, `rusttalk.exe --update`.
 

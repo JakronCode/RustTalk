@@ -97,6 +97,7 @@ impl RustTalkApp {
                             self.settings_page_body(ui);
                         });
                     });
+                self.ui_update_dialog(ctx, true);
             },
         );
     }

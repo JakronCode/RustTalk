@@ -28,6 +28,7 @@ mod server_settings;
 mod settings;
 mod sidebar;
 mod theme;
+mod update_ui;
 mod views;
 
 use std::collections::{HashMap, HashSet};
@@ -1429,6 +1430,7 @@ impl eframe::App for RustTalkApp {
         self.ui_gif_picker(ctx);
         self.ui_camera_dialog(ctx);
         self.ui_screen_picker(ctx);
+        self.ui_update_dialog(ctx, false);
 
         // Mic monitor for the level meter in the settings (without a connection).
         if self.show_settings && self.audio.is_none() && self.mic_monitor.is_none() {
