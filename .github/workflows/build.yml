@@ -1,0 +1,76 @@
+name: Build
+on:
+  workflow_call:
+  pull_request:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    name: ${{ matrix.os }} / ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, os: linux, arch: x86_64}
+          - {runner: ubuntu-24.04-arm, os: linux, arch: aarch64}
+          - {runner: windows-2025, os: windows, arch: x86_64}
+          - {runner: windows-11-arm, os: windows, arch: aarch64}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ${{ matrix.os }}-${{ matrix.arch }}
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake nasm pkg-config libssl-dev libasound2-dev libasound2-plugins libopus-dev libudev-dev libwayland-dev libxkbcommon-dev libgl1-mesa-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-pipewire pipewire-alsa libpipewire-0.3-dev patchelf squashfs-tools
+      - name: Windows CMake compatibility
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '"CMAKE_POLICY_VERSION_MINIMUM=3.5" >> $env:GITHUB_ENV'
+      # OpenH264's x86 SIMD assembly needs nasm - without it video encoding is ~5x slower.
+      - name: Windows NASM
+        if: runner.os == 'Windows' && matrix.arch == 'x86_64'
+        shell: pwsh
+        run: |
+          choco install nasm -y --no-progress
+          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Test
+        run: cargo test --locked --workspace -- --test-threads=1
+      - name: Build client and server
+        run: cargo build --locked --release --workspace
+      - name: Linux AppImage and server bundle
+        if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/package-linux.sh
+      - name: Windows binaries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $suffix = if ($env:BUILD_ARCH -eq 'aarch64') { '-arm64' } else { '' }
+          Copy-Item target/release/rusttalk.exe "dist/rusttalk-windows$suffix.exe"
+          Copy-Item target/release/rusttalk-server.exe "dist/rusttalk-server-windows$suffix.exe"
+          # Native speech dependencies, when supplied by ONNX Runtime.
+          Get-ChildItem target/release/*.dll -ErrorAction SilentlyContinue | Copy-Item -Destination dist
+          foreach ($file in Get-ChildItem dist/*.exe) {
+            $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($file.Name)" | Out-File -Encoding ascii "$($file.FullName).sha256"
+          }
+          & "dist/rusttalk-server-windows$suffix.exe" --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rusttalk-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error

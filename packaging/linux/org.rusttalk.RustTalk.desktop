@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=RustTalk
+Comment=Voice, video and chat
+Exec=rusttalk %u
+Icon=org.rusttalk.RustTalk
+Terminal=false
+Categories=Network;InstantMessaging;
+StartupWMClass=org.rusttalk.RustTalk
+MimeType=x-scheme-handler/rusttalk;

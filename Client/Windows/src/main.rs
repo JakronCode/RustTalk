@@ -12,14 +12,23 @@ mod app;
 mod audio;
 mod config;
 mod hotkey;
+#[cfg(windows)]
+mod install;
+#[cfg(not(windows))]
+#[path = "linux/install.rs"]
 mod install;
 mod logo;
 mod media;
 mod net;
 mod notify;
 mod update;
+#[cfg(windows)]
+mod video;
+#[cfg(not(windows))]
+#[path = "linux/video.rs"]
 mod video;
 mod video_codec;
+mod video_common;
 
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt()
@@ -33,7 +42,7 @@ fn main() -> eframe::Result<()> {
     if let Some(code) = run_cli(&args) {
         std::process::exit(code);
     }
-    if install::mode() == install::Mode::Installed {
+    if cfg!(target_os = "linux") || install::mode() == install::Mode::Installed {
         install::refresh_installed();
     }
 
@@ -44,8 +53,11 @@ fn main() -> eframe::Result<()> {
         "RustTalk".to_string()
     };
     let options = eframe::NativeOptions {
+        // Wayland may stop frame callbacks for hidden windows; blocking swaps stall desktop replies.
+        vsync: !cfg!(target_os = "linux"),
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title(title)
+            .with_app_id("org.rusttalk.RustTalk")
             .with_icon(logo::window_icon())
             .with_inner_size([1100.0, 700.0])
             .with_min_inner_size([900.0, 560.0]),
@@ -68,6 +80,17 @@ fn run_cli(args: &[String]) -> Option<i32> {
         }
         1
     };
+    if has("--version") {
+        println!("RustTalk {} {}-{}", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
+        return Some(0);
+    }
+    #[cfg(target_os = "linux")]
+    if has("--check-runtime") {
+        return Some(match video::check_runtime() {
+            Ok(()) => { println!("RustTalk capture runtime ready"); 0 }
+            Err(error) => fail(true, format!("Capture runtime unavailable: {error:#}")),
+        });
+    }
     if has("--install") {
         return Some(match install::install(has("--desktop-shortcut")) {
             Ok(exe) => {

@@ -1,6 +1,6 @@
 [package]
 name = "rusttalk-client"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 
 [[bin]]
@@ -16,27 +16,13 @@ cpal = "0.15"
 # Medien: Bilder, Kamera, Bildschirm, GIFs
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "ico"] }
 rfd = "0.15"
-# input-msmf = Windows-Kamera-Backend (Media Foundation). Ohne dieses Feature
-# hat nokhwa auf Windows KEIN Backend und jede Kamera schlaegt fehl.
-nokhwa = { version = "0.10", features = ["input-msmf"] }
-# Bildschirm + einzelne Fenster (Auswahl-Dialog mit Vorschaubildern)
-xcap = "0.9"
 ureq = { version = "2", features = ["json"] }
 serde_json = "1"
-# Global push-to-talk: polls key/mouse state (no hook, keys still reach other apps)
-device_query = "4"
-# Windows toasts (pop-ups), install (registry, Start menu link), update check (SHA-256)
-tauri-winrt-notification = "0.8"
-# Spoken names for join/leave (Windows speech voices)
-windows = { version = "0.62", features = ["Media_Core", "Media_SpeechSynthesis", "Storage_Streams", "Foundation_Collections", "System_UserProfile"] }
-winreg = "0.55"
-mslnk = "0.1"
 sha2 = "0.10"
 # Identity secret
 getrandom = "0.3"
 # Echo cancellation (pure Rust port of WebRTC AEC3)
 aec3 = "0.4"
-# Natural voices: ONNX Runtime (prebuilt, linked statically) runs the speech model
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-native", "api-31"] }
 unicode-normalization = "0.1"
 # H.264 video (OpenH264 built from source, needs only a C++ compiler)
@@ -46,11 +32,33 @@ fast_image_resize = "6.1"
 # TLS for the control connection
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-audiopus = "0.2"
+audiopus = "=0.3.0-rc.0"
 ringbuf = "0.4"
-tokio = { version = "1", features = ["net", "time", "io-util", "sync", "rt", "macros"] }
+tokio = { version = "1", features = ["net", "time", "io-util", "sync", "rt", "macros", "process"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Windows-only capture and desktop integration are omitted from the Linux client.
+[target.'cfg(windows)'.dependencies]
+nokhwa = { version = "0.10", features = ["input-msmf"] }
+xcap = "0.9"
+device_query = "4"
+tauri-winrt-notification = "0.8"
+windows = { version = "0.62", features = ["Media_Core", "Media_SpeechSynthesis", "Storage_Streams", "Foundation_Collections", "System_UserProfile"] }
+winreg = "0.55"
+mslnk = "0.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.11", default-features = false, features = ["async-std"] }
+tempfile = "3"
+futures-util = "0.3"
+notify-rust = "4"
+gstreamer = "0.24"
+gstreamer-app = "0.24"
+gstreamer-video = "0.24"
+
+[dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }

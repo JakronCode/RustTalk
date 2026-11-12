@@ -220,20 +220,15 @@ async fn run(args: &Args) -> Result<()> {
     let mut senders: HashSet<u64> = HashSet::new();
     let mut poke_pending = args.poke;
 
+    // Keep partial TCP frames alive when audio ticks or UDP packets win select.
+    let incoming = receive_events(&mut reader, |message| println!("EVENT {message:?}"));
+    tokio::pin!(incoming);
     loop {
         tokio::select! {
-            msg = read_frame::<_, ServerMessage>(&mut reader) => {
-                match msg {
-                    Ok(Some(m)) => println!("EVENT {m:?}"),
-                    Ok(None) => {
-                        println!("DISCONNECTED");
-                        break;
-                    }
-                    Err(e) => {
-                        println!("DISCONNECTED reason={e}");
-                        break;
-                    }
-                }
+            result = &mut incoming => {
+                result.context("Control connection failed")?;
+                println!("DISCONNECTED");
+                break;
             }
             pkt = udp.recv(&mut udp_buf) => {
                 if let Ok(n) = pkt {
@@ -280,3 +275,43 @@ async fn run(args: &Args) -> Result<()> {
     Ok(())
 }
 // wdac-dice: 4
+
+async fn receive_events(
+    reader: &mut (impl tokio::io::AsyncRead + Unpin),
+    mut on_event: impl FnMut(ServerMessage),
+) -> std::io::Result<()> {
+    while let Some(message) = read_frame(reader).await? {
+        on_event(message);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn partial_frames_survive_other_select_branches() {
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        let message = ServerMessage::Notice { message: "complete frame".into() };
+        let mut frame = Vec::new();
+        write_frame(&mut frame, &message).await.unwrap();
+        let mut received = Vec::new();
+        {
+            let incoming = receive_events(&mut reader, |m| received.push(m));
+            tokio::pin!(incoming);
+            // Interrupt after part of the length, then after part of the body.
+            for bytes in [&frame[..2], &frame[2..6]] {
+                writer.write_all(bytes).await.unwrap();
+                assert!(tokio::time::timeout(Duration::from_millis(5), &mut incoming).await.is_err());
+            }
+            writer.write_all(&frame[6..]).await.unwrap();
+            write_frame(&mut writer, &message).await.unwrap();
+            writer.shutdown().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(1), incoming).await.unwrap().unwrap();
+        }
+        assert_eq!(received.len(), 2);
+        assert!(received.iter().all(|m| matches!(m, ServerMessage::Notice { message } if message == "complete frame")));
+    }
+}

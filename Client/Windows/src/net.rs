@@ -410,9 +410,13 @@ mod tests {
         }
     }
 
-    /// Test certificate (DER cert, PKCS#8 key) - the client crate has no rcgen,
-    /// so a fixed one generated once for these tests is embedded.
+    /// Self-signed test certificate (DER cert, PKCS#8 key), generated once per test run.
     fn rcgen_free_cert() -> (Vec<u8>, Vec<u8>) {
-        (include_bytes!("../testdata/tls-cert.der").to_vec(), include_bytes!("../testdata/tls-key.der").to_vec())
+        static CERT: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+        CERT.get_or_init(|| {
+            let ck = rcgen::generate_simple_self_signed(vec![secure::TLS_SERVER_NAME.to_string()]).unwrap();
+            (ck.cert.der().to_vec(), ck.signing_key.serialize_der())
+        })
+        .clone()
     }
 }

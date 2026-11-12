@@ -12,3 +12,11 @@ client_config.toml
 .vscode/
 .idea/
 Thumbs.db
+
+# Release packages
+dist/
+
+# TLS material (generated at runtime/test time, never commit)
+*.der
+*.pem
+*.key

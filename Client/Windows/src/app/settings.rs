@@ -85,7 +85,7 @@ impl RustTalkApp {
             |ctx, _class| {
                 if ctx.input(|i| i.viewport().close_requested()) {
                     self.show_settings = false;
-                    self.recording_key = false;
+                    self.recording_key = None;
                     self.config.save();
                 }
                 self.capture_keybind(ctx);
@@ -103,7 +103,7 @@ impl RustTalkApp {
                                 let close = ui
                                     .add(egui::Button::new(egui::RichText::new(icons::regular::X).size(18.0)).corner_radius(16.0).min_size(egui::vec2(32.0, 32.0)))
                                     .on_hover_text("Close (Esc)");
-                                if close.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape) && !self.recording_key) {
+                                if close.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape) && self.recording_key.is_none()) {
                                     self.show_settings = false;
                                     self.config.save();
                                 }
@@ -151,7 +151,7 @@ impl RustTalkApp {
                 ui.painter().text(rect.left_center() + egui::vec2(34.0, 0.0), egui::Align2::LEFT_CENTER, page.label(), egui::FontId::proportional(14.0), fg);
                 if resp.clicked() {
                     self.settings_page = page;
-                    self.recording_key = false;
+                    self.recording_key = None;
                 }
             }
             ui.add_space(8.0);
@@ -336,9 +336,7 @@ impl RustTalkApp {
                     }
                 });
             } else {
-                setting_row(ui, "Push-to-talk key", Some("Only while the RustTalk window is focused"), false, |ui| {
-                    self.keybind_button(ui);
-                });
+                self.ptt_settings(ui);
             }
             ui.add_space(4.0);
             ui.label(egui::RichText::new("Mic test").color(theme::HEADER));
@@ -433,7 +431,7 @@ impl RustTalkApp {
             });
             ui.label(egui::RichText::new("Applies the next time you start your camera or screen share.").size(12.0).color(theme::MUTED));
             ui.separator();
-            setting_row(ui, "Share audio with screen", Some("Send the computer sound while sharing (your RustTalk voices are filtered out)"), false, |ui| {
+            setting_row(ui, "Share audio with screen", Some("Send the computer sound while sharing (Windows only)"), !cfg!(windows), |ui| {
                 toggle(ui, &mut self.config.share_screen_audio);
             });
             ui.separator();
@@ -446,37 +444,57 @@ impl RustTalkApp {
     fn page_keybinds(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
             caption(ui, "Voice");
-            let ptt_desc = if self.config.global_ptt { "Hold to transmit (works in the background)" } else { "Hold to transmit (window must be focused)" };
-            setting_row(ui, "Push to talk", Some(ptt_desc), false, |ui| {
-                self.keybind_button(ui);
-            });
-            for (label, desc) in [
-                ("Toggle mute", "Mute / unmute your microphone"),
-                ("Toggle deafen", "Mute everything you hear"),
-                ("Toggle camera", "Turn your camera on or off"),
-            ] {
+            self.ptt_settings(ui);
+            for action in [hotkey::Action::Mute, hotkey::Action::Deafen] {
                 ui.separator();
-                setting_row(ui, label, Some(desc), true, |ui| {
-                    ui.add(egui::Button::new("Not set").min_size(egui::vec2(120.0, 28.0)));
+                setting_row(ui, action.label(), Some("Global shortcut — press once to toggle"), false, |ui| {
+                    self.keybind_button(ui, action);
+                    if self.binding_name(action).is_some() && ui.small_button("Clear").clicked() {
+                        match action {
+                            hotkey::Action::Mute => self.config.mute_key = None,
+                            hotkey::Action::Deafen => self.config.deafen_key = None,
+                            _ => {},
+                        }
+                        self.recording_key = None;
+                        self.config.save();
+                        self.global_ptt.lock().unwrap().set([None; 3]);
+                        self.control.ptt_pressed.store(false, Ordering::Relaxed);
+                    }
                 });
             }
-        });
-        card(ui, |ui| {
-            caption(ui, "Global hotkeys");
-            setting_row(ui, "Push to talk in the background", Some("Also works while another app is focused (e.g. in a game). The key still reaches that app."), false, |ui| {
-                if toggle(ui, &mut self.config.global_ptt).changed() {
-                    self.config.save();
-                }
+            #[cfg(target_os = "linux")]
+            if !self.config.global_ptt && (self.config.mute_key.is_some() || self.config.deafen_key.is_some()) {
+                let status = if self.is_connected() { hotkey::status() } else { "Connect to a server to activate global shortcuts.".to_string() };
+                if !status.is_empty() { ui.label(status); }
+            }
+            ui.separator();
+            setting_row(ui, "Toggle camera", Some("Turn your camera on or off"), true, |ui| {
+                ui.add(egui::Button::new("Not set").min_size(egui::vec2(120.0, 28.0)));
             });
-            ui.label(
-                egui::RichText::new(format!(
-                    "{}  Tip: side mouse buttons (Mouse4 / Mouse5) make good push-to-talk keys - click the key button and press one.",
-                    icons::regular::INFO
-                ))
-                .size(12.0)
-                .color(theme::MUTED),
-            );
         });
+    }
+
+    // Keep both settings pages consistent: Wayland bindings belong to the desktop.
+    fn ptt_settings(&mut self, ui: &mut egui::Ui) {
+        setting_row(ui, "Push to talk in the background", Some("Hold to talk even while another app is focused"), false, |ui| {
+            if toggle(ui, &mut self.config.global_ptt).changed() {
+                self.config.save();
+            }
+        });
+        let description = if self.config.global_ptt { "Hold to talk from any app" } else { "Only while the RustTalk window is focused" };
+        setting_row(ui, "Push-to-talk key", Some(description), false, |ui| {
+            self.keybind_button(ui, hotkey::Action::PushToTalk);
+        });
+        #[cfg(target_os = "linux")]
+        if self.config.global_ptt {
+            if self.is_connected() {
+                let status = hotkey::status();
+                if !status.is_empty() { ui.label(status); }
+            } else {
+                ui.label("Connect to a server to activate this global shortcut.");
+            }
+        }
+        if let Some(error) = &self.keybind_error { ui.colored_label(theme::RED, error); }
     }
 
     fn page_notifications(&mut self, ui: &mut egui::Ui) {
@@ -486,7 +504,7 @@ impl RustTalkApp {
                 toggle(ui, &mut self.config.flash_taskbar);
             });
             ui.separator();
-            setting_row(ui, "Desktop notifications", Some("Windows pop-up for new messages while RustTalk is in the background (click opens the channel)"), false, |ui| {
+            setting_row(ui, "Desktop notifications", Some("Desktop pop-up for new messages while RustTalk is in the background (click opens the channel)"), false, |ui| {
                 toggle(ui, &mut self.config.desktop_notifications);
             });
             ui.separator();
@@ -528,25 +546,29 @@ impl RustTalkApp {
             let voices = crate::audio::speech::voices();
             let pack = self.voice_pack.state();
             let pack_ready = pack == PackState::Installed;
-            let natural = self.config.announce_voice.as_deref().is_some_and(|v| voice_pack::neural_id(v).is_some());
+            let natural = self.config.announce_voice.as_deref().is_some_and(|v| voice_pack::neural_id(v).is_some())
+                || (!cfg!(windows) && self.config.announce_voice.is_none());
             ui.separator();
             ui.add_enabled_ui(self.config.announce_names, |ui| {
-                setting_row(ui, "Voice", Some("Natural voices sound like a person; Windows voices are the ones installed in Windows"), false, |ui| {
+                setting_row(ui, "Voice", Some("Natural voices work offline after a one-time download"), false, |ui| {
                     let current = match &self.config.announce_voice {
                         Some(v) if natural && !pack_ready => format!("{} (not installed)", voice_pack::label(v)),
                         Some(v) => voice_pack::label(v),
+                        None if !cfg!(windows) && !pack_ready => "Download natural voices below".to_string(),
+                        None if !cfg!(windows) => voice_pack::label(voice_pack::DEFAULT_VOICE),
                         None if voices.is_empty() => "No Windows voice installed".to_string(),
                         None => "Windows default".to_string(),
                     };
                     let before = self.config.announce_voice.clone();
                     egui::ComboBox::from_id_salt("announce_voice").selected_text(current).height(360.0).show_ui(ui, |ui| {
-                        if pack_ready {
+                        if pack_ready || !cfg!(windows) {
                             for (id, label) in voice_pack::VOICES {
                                 ui.selectable_value(&mut self.config.announce_voice, Some(format!("{}{id}", voice_pack::PREFIX)), label);
                             }
                             ui.separator();
                         }
-                        ui.selectable_value(&mut self.config.announce_voice, None, "Windows default");
+                        ui.selectable_value(&mut self.config.announce_voice, None,
+                            if cfg!(windows) { "Windows default" } else { "Natural default" });
                         for v in voices {
                             ui.selectable_value(&mut self.config.announce_voice, Some(v.name.clone()), format!("{} ({})", v.name, v.language));
                         }
@@ -581,7 +603,11 @@ impl RustTalkApp {
                 PackState::Missing => format!("10 voices that sound like a person, speak English and German, and work offline. One-time download of {size_mb} MB."),
                 PackState::Downloading { done, total } => format!("Downloading... {} of {} MB", done / 1_000_000, total / 1_000_000),
                 PackState::Failed(e) => format!("Download failed: {e}"),
-                PackState::Installed => format!("Installed ({size_mb} MB). Removing them switches back to the Windows voice."),
+                PackState::Installed => if cfg!(windows) {
+                    format!("Installed ({size_mb} MB). Removing them switches back to the Windows voice.")
+                } else {
+                    format!("Installed ({size_mb} MB). Removing them disables spoken names.")
+                },
             };
             let mut download = false;
             let mut remove = false;
@@ -600,6 +626,7 @@ impl RustTalkApp {
                 ui.label(egui::RichText::new("- no impersonating people, no harassment, nothing unlawful.").small().weak());
             });
             ui.separator();
+            #[cfg(windows)]
             setting_row(ui, "Download natural voices automatically", Some("After installing, RustTalk fetches them once in the background and switches to a natural voice"), false, |ui| {
                 if toggle(ui, &mut self.config.auto_download_voices).changed() {
                     self.config.save();
@@ -620,7 +647,9 @@ impl RustTalkApp {
                 self.prepare_all_names();
             }
             if preview.is_some() || preview_name {
-                if self.audio.is_none() {
+                if preview_name && !cfg!(windows) && !pack_ready {
+                    self.set_status("Download natural voices below to preview spoken names");
+                } else if self.audio.is_none() {
                     self.set_status("Connect to a server to preview sounds");
                 } else if let Some(sound) = preview {
                     crate::audio::sfx::play(&self.sfx, sound);
@@ -633,6 +662,7 @@ impl RustTalkApp {
                     self.announcer.announce(&self.config.username, true, self.config.announce_voice.as_deref(), &self.config.announce_language);
                 }
             }
+
         });
     }
 
@@ -731,44 +761,63 @@ impl RustTalkApp {
 
     // ----- keybind capture -------------------------------------------------
 
-    fn keybind_button(&mut self, ui: &mut egui::Ui) {
-        let label = if self.recording_key {
-            egui::RichText::new("Press a key...").color(theme::YELLOW)
-        } else {
-            egui::RichText::new(format!("{}  {}", icons::regular::KEYBOARD, self.config.ptt_key)).color(theme::HEADER)
-        };
-        let resp = ui
-            .add(egui::Button::new(label).min_size(egui::vec2(140.0, 28.0)))
-            .on_hover_text("Click, then press the key or side mouse button you want to use (Esc cancels)");
-        if resp.clicked() {
-            self.recording_key = !self.recording_key;
+    fn binding_name(&self, action: hotkey::Action) -> Option<&str> {
+        match action {
+            hotkey::Action::PushToTalk => Some(&self.config.ptt_key),
+            hotkey::Action::Mute => self.config.mute_key.as_deref(),
+            hotkey::Action::Deafen => self.config.deafen_key.as_deref(),
         }
     }
 
-    /// While recording: take the next key press as push-to-talk key.
-    fn capture_keybind(&mut self, ctx: &egui::Context) {
-        if !self.recording_key {
-            return;
-        }
-        // Next key press or side mouse button (Esc cancels).
-        let pressed: Option<Option<String>> = ctx.input(|i| {
-            i.events.iter().find_map(|e| match e {
-                egui::Event::Key { key: egui::Key::Escape, pressed: true, .. } => Some(None),
-                egui::Event::Key { key, pressed: true, .. } => Some(Some(key.name().to_string())),
-                egui::Event::PointerButton { button, pressed: true, .. } => {
-                    crate::hotkey::mouse_name(*button).map(|n| Some(n.to_string()))
-                }
-                _ => None,
-            })
-        });
-        if let Some(choice) = pressed {
-            if let Some(name) = choice {
-                self.config.ptt_key = name;
-                self.config.save();
-            }
-            self.recording_key = false;
+    fn keybind_button(&mut self, ui: &mut egui::Ui, action: hotkey::Action) {
+        let label = if self.recording_key == Some(action) {
+            egui::RichText::new("Press a key...").color(theme::YELLOW)
+        } else {
+            egui::RichText::new(format!("{}  {}", icons::regular::KEYBOARD, self.binding_name(action).unwrap_or("Not set"))).color(theme::HEADER)
+        };
+        let resp = ui.add(egui::Button::new(label).min_size(egui::vec2(140.0, 28.0)))
+            .on_hover_text("Click, then press a key or side mouse button with optional modifiers (Esc cancels)");
+        if resp.clicked() {
+            self.recording_key = if self.recording_key == Some(action) { None } else { Some(action) };
+            self.keybind_error = None;
+            self.global_ptt.lock().unwrap().set([None; 3]);
+            self.control.ptt_pressed.store(false, Ordering::Relaxed);
         }
     }
+
+    fn capture_keybind(&mut self, ctx: &egui::Context) {
+        let Some(action) = self.recording_key else { return; };
+        let pressed: Option<Option<String>> = ctx.input(|i| {
+            i.events.iter().find_map(hotkey::recorded_binding)
+        });
+        if let Some(choice) = pressed {
+            self.recording_key = None;
+            if let Some(name) = choice {
+                let binding = hotkey::parse_binding(&name);
+                #[cfg(windows)]
+                if matches!(binding.map(|b| b.button), Some(hotkey::Button::Key(key)) if hotkey::keycode_for(key).is_none()) {
+                    self.keybind_error = Some(format!("{name} is not supported as a Windows global shortcut"));
+                    return;
+                }
+                if let Some(other) = hotkey::Action::ALL.into_iter().find(|other| *other != action
+                    && self.binding_name(*other).and_then(hotkey::parse_binding).is_some_and(|key| Some(key) == binding)) {
+                    self.keybind_error = Some(format!("{name} is already assigned to {}", other.label()));
+                    return;
+                }
+                match action {
+                    hotkey::Action::PushToTalk => {
+                        self.config.ptt_key = name;
+                        #[cfg(target_os = "linux")]
+                        { self.config.global_ptt = true; }
+                    }
+                    hotkey::Action::Mute => self.config.mute_key = Some(name),
+                    hotkey::Action::Deafen => self.config.deafen_key = Some(name),
+                }
+                self.config.save();
+            }
+        }
+    }
+
 }
 
 fn device_combo(ui: &mut egui::Ui, id: &str, selected: &mut Option<String>, devices: &[String]) {

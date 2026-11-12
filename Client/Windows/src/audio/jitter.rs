@@ -105,6 +105,7 @@ impl UserAudio {
             return false;
         };
 
+        if audiopus::packet::Packet::try_from(&payload[..]).is_err() { return true; }
         let mut frame = [0f32; FRAME_SAMPLES];
         if let Some(exp) = self.expected_seq {
             let gap = seq.wrapping_sub(exp);
@@ -117,9 +118,9 @@ impl UserAudio {
                 for k in 0..fill {
                     let use_fec = k + 1 == fill;
                     let res = if use_fec {
-                        self.decoder.decode_float(Some(&payload[..]), &mut frame[..], true)
+                        self.decoder.decode_float(Some((&payload[..]).try_into().expect("validated packet")), (&mut frame[..]).try_into().expect("fixed frame size"), true)
                     } else {
-                        self.decoder.decode_float(None::<&[u8]>, &mut frame[..], false)
+                        self.decoder.decode_float(None, (&mut frame[..]).try_into().expect("fixed frame size"), false)
                     };
                     if let Ok(n) = res {
                         self.pcm.extend(&frame[..n.min(FRAME_SAMPLES)]);
@@ -127,7 +128,7 @@ impl UserAudio {
                 }
             }
         }
-        match self.decoder.decode_float(Some(&payload[..]), &mut frame[..], false) {
+        match self.decoder.decode_float(Some((&payload[..]).try_into().expect("validated packet")), (&mut frame[..]).try_into().expect("fixed frame size"), false) {
             Ok(n) => self.pcm.extend(&frame[..n.min(FRAME_SAMPLES)]),
             Err(e) => tracing::warn!("Opus-Decode fehlgeschlagen: {e}"),
         }
@@ -267,14 +268,14 @@ mod tests {
                 }
                 if i == lost + 1 && mode != 0 {
                     let res = if mode == 1 {
-                        dec.decode_float(Some(&p[..]), &mut fr[..], true)
+                        dec.decode_float(Some((&p[..]).try_into().unwrap()), (&mut fr[..]).try_into().unwrap(), true)
                     } else {
-                        dec.decode_float(None::<&[u8]>, &mut fr[..], false)
+                        dec.decode_float(None, (&mut fr[..]).try_into().unwrap(), false)
                     };
                     let n = res.unwrap();
                     pcm.extend(&fr[..n]);
                 }
-                let n = dec.decode_float(Some(&p[..]), &mut fr[..], false).unwrap();
+                let n = dec.decode_float(Some((&p[..]).try_into().unwrap()), (&mut fr[..]).try_into().unwrap(), false).unwrap();
                 pcm.extend(&fr[..n]);
             }
             pcm

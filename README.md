@@ -111,9 +111,70 @@ Download `rusttalk-windows.exe` from the [latest release](https://github.com/Jak
 
 Command line (for admins/scripts): `rusttalk-windows.exe --install [--desktop-shortcut] [--no-start]`, `rusttalk.exe --uninstall [--quiet] [--remove-settings]`, `rusttalk.exe --update`.
 
+### Client (Linux) – minimal build
+
+Build and run from the repository root:
+
+```sh
+cargo build --release --locked -p rusttalk-client
+./target/release/rusttalk
+```
+
+Use a release build for live video: debug builds leave CPU-heavy frame resizing
+and pixel conversion unoptimized.
+
+Enter the server address and username, connect, then join a voice channel
+(the lobby has no voice). Chat, microphone/speaker audio, voice activation,
+and push-to-talk while the window is focused are available. Webcam preview
+and sharing use V4L2. The Screen button opens the native desktop portal picker;
+the selected monitor or window is captured through PipeWire. Camera and screen
+can be shared together. Background push-to-talk uses the Wayland GlobalShortcuts
+portal; enable it in Settings > Keybinds. Desktop notifications include a channel
+open action. Screen audio is separate work and is not included here.
+
+Settings > Keybinds also provides global **Toggle mute** and **Toggle deafen**
+shortcuts on Windows and Wayland. Both start unassigned. Click a selector and
+press a key or side mouse button, optionally holding Ctrl, Alt, or Shift (for
+example, Ctrl+F8); Clear removes it. Modifier combinations are matched exactly. Each press toggles once, and
+shortcuts are suspended while recording a key or disconnected. Deafen keeps the
+microphone blocked until undeafened and restores the previous mute state.
+
+F8 is the default push-to-talk key. The selector in Voice & Audio and Keybinds
+sets the same saved binding. Selecting a key on Linux enables background PTT.
+On Hyprland with Lua configuration, RustTalk assigns that key through a runtime
+binding and removes it when disconnected or closed. It restores its binding after
+a desktop configuration reload and refuses keys already assigned to other desktop
+actions. No fixed RustTalk keybinding is needed in the Hyprland config.
+
+Other Wayland desktops use the portal's shortcut confirmation UI and may choose a
+different trigger. Settings shows the desktop-reported binding or any portal error.
+A GlobalShortcuts portal backend is required; X11 global polling is not supported.
+
+Release AppImages support Settings > Updates > Install update & restart. The
+updater chooses the matching architecture, requires SHA-256 verification, then
+atomically replaces the writable AppImage file. Settings and voice models stay
+outside the image. Source builds remain manual updates.
+
+Spoken join/leave names are available via Settings > Notifications > Sounds.
+Download the natural voices once (~410 MB), enable "Say names", and choose a
+voice and English or German. Synthesis then runs locally, offline; no system
+speech service is required.
+
+Settings are saved to `$XDG_CONFIG_HOME/RustTalk/client_config.toml`, or
+`~/.config/RustTalk/client_config.toml` by default. Native build requirements
+include a C/C++ compiler, CMake, pkg-config, ALSA and Opus development libraries,
+the display libraries used by eframe, and GStreamer core/app/video development
+libraries. Capture needs the GStreamer PipeWire, V4L2, video conversion and camera
+decoder plugins, plus a running `xdg-desktop-portal` backend for the compositor.
+On Arch, install `gstreamer`, `gst-plugins-base`, `gst-plugins-good`,
+`gst-plugin-pipewire`, and the appropriate portal backend. Tested with GStreamer
+1.28 and PipeWire 1.6. Older PipeWire sources use portal session closure detection.
+On Arch, headers come with the library packages. The Windows client remains in `Client/Windows`; its shared
+UI and networking code are also used by Linux.
+
 ### Client (Windows) – build from source
 
-Requirements: Rust (MSVC toolchain incl. C++ build tools) and **NASM** for OpenH264's SIMD assembly (`winget install NASM.NASM`; without it video encoding still works but is ~5x slower - `cargo.ps1` finds a winget install by itself). Builds started from a cargo `target` folder (and debug builds) run **portable** – no install screen, settings in the working directory.
+Requirements: Rust (MSVC toolchain incl. C++ build tools), **CMake** (for Opus; the one in Visual Studio / Build Tools is enough, `cargo.ps1` finds it) and **NASM** for OpenH264's SIMD assembly (`winget install NASM.NASM`; without it video encoding still works but is ~5x slower - `cargo.ps1` finds a winget install by itself). Builds started from a cargo `target` folder (and debug builds) run **portable** – no install screen, settings in the working directory.
 
 > ⚠️ **WDAC note (this development machine):** WDAC blocks cargo build scripts under `Documents` (os error 4551). Therefore **always build/test via the wrapper**, which mirrors the workspace to `%LOCALAPPDATA%\Programs\RustTalk-src`:
 
@@ -137,7 +198,31 @@ Bump the version in `Client/Windows/Cargo.toml`, `Server/Cargo.toml` and `shared
 git tag v0.4.0 && git push origin v0.4.0
 ```
 
-The [Release workflow](.github/workflows/release.yml) checks that the tag matches the versions and attaches `rusttalk-windows.exe` (+ `.sha256`, needed by the updater), the Linux server package and the bare server binaries `rusttalk-server-linux-x86_64` / `rusttalk-server-windows.exe` (+ `.sha256`, for `rusttalk-server update`) to the GitHub release.
+The [build workflow](.github/workflows/build.yml) tests and builds both client and
+server on native Windows x64, Windows ARM64, Linux x64, and Linux ARM64 runners.
+Pull requests and main/master pushes run the same build used by releases.
+Integration tests run serially because their server fixtures share TLS files.
+The [release workflow](.github/workflows/release.yml) verifies package versions
+and publishes only after the entire matrix succeeds.
+
+Linux clients are `rusttalk-linux-x86_64.AppImage` and
+`rusttalk-linux-aarch64.AppImage`, with checksums. Built on Ubuntu 24.04, they bundle
+capture plugins and libraries, but require a compatible host (glibc 2.39 or newer),
+Wayland, PipeWire, a desktop portal backend, and host GPU drivers. Packaging runs
+`--check-runtime` inside the image to verify the capture elements load, then tests
+bad-checksum rejection, self-replacement, and relaunch against a local release server.
+
+Windows clients are `rusttalk-windows.exe` (x64; existing updater name retained)
+and `rusttalk-windows-arm64.exe`. Bare servers use
+`rusttalk-server-linux-{x86_64,aarch64}`, `rusttalk-server-windows.exe`, and
+`rusttalk-server-windows-arm64.exe`, each with `.sha256`. Linux server tarballs
+also include configuration and deployment scripts. `rusttalk-server update`
+selects the matching OS and architecture.
+
+To package a locally built Linux release, run `bash scripts/package-linux.sh`.
+Artifacts go into `dist/`. Packaging tools use versioned releases and verified
+GitHub asset digests; the AppImage runtime is pinned too. Images built on newer
+local distributions inherit that distribution's minimum glibc requirement.
 
 ### Tests
 
