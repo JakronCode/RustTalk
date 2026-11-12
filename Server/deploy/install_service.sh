@@ -20,4 +20,4 @@ systemctl daemon-reload
 systemctl enable --now rusttalk-server
 systemctl --no-pager --full status rusttalk-server | head -12 || true
 
-echo "Fertig. Server lauscht auf 0.0.0.0:7331 (TCP+UDP)."
+echo "Done. Server listens on 0.0.0.0:7331 (TCP+UDP)."

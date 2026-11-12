@@ -159,13 +159,13 @@ impl State {
         let spawn_entries: Vec<_> =
             cfg.channels.iter().filter(|c| c.kind == ChannelKindConfig::Spawn).collect();
         if spawn_entries.len() > 1 {
-            anyhow::bail!("Config-Fehler: mehr als ein Spawn-Channel definiert");
+            anyhow::bail!("Config error: more than one spawn channel defined");
         }
 
         let db = if cfg.persist_state {
             Some(
                 Db::open(&cfg.db_path)
-                    .map_err(|e| anyhow::anyhow!("Persistenz ({}): {e:#}", cfg.db_path))?,
+                    .map_err(|e| anyhow::anyhow!("Persistence ({}): {e:#}", cfg.db_path))?,
             )
         } else {
             None
@@ -253,7 +253,7 @@ impl State {
                 state.spawn_log.push_back(entry);
             }
             tracing::info!(
-                "Persistenz aktiv: {} ({} Channels, {} Log-Eintraege geladen)",
+                "Persistence active: {} ({} channels, {} log entries loaded)",
                 cfg.db_path,
                 state.channels.len(),
                 state.spawn_log.len()
@@ -286,7 +286,7 @@ impl State {
         {
             let parent = match ch.category.as_deref() {
                 Some(name) => Some(*category_ids.get(name).ok_or_else(|| {
-                    anyhow::anyhow!("Config-Fehler: unbekannte Kategorie '{name}'")
+                    anyhow::anyhow!("Config error: unknown category '{name}'")
                 })?),
                 None => None,
             };
@@ -334,7 +334,7 @@ impl State {
         self.gif_cache.clear();
         if let Some(db) = &self.db {
             if let Err(e) = db.save_gif_key(self.gif_key.as_deref()) {
-                tracing::warn!("GIPHY-Key speichern fehlgeschlagen: {e}");
+                tracing::warn!("Saving the GIPHY key failed: {e}");
             }
         }
     }
@@ -408,7 +408,7 @@ impl State {
         };
         if let Some(db) = &self.db {
             if let Err(e) = db.save_settings(&self.settings) {
-                tracing::warn!("Einstellungen speichern fehlgeschlagen: {e}");
+                tracing::warn!("Saving settings failed: {e}");
             }
         }
         Ok(self.settings.clone())
@@ -644,7 +644,7 @@ impl State {
             for id in &touched {
                 if let Some(c) = self.channels.get(id) {
                     if let Err(e) = db.upsert_channel(c.id, &c.name, c.kind, c.parent, c.position) {
-                        tracing::warn!("Channel-Reihenfolge speichern fehlgeschlagen: {e}");
+                        tracing::warn!("Saving channel order failed: {e}");
                     }
                 }
             }
@@ -684,7 +684,7 @@ impl State {
         }
         if let Some(db) = &self.db {
             if let Err(e) = db.log_event(&entry) {
-                tracing::warn!("Event-Persistenz fehlgeschlagen: {e}");
+                tracing::warn!("Saving event failed: {e}");
             }
         }
         self.spawn_log.push_back(entry.clone());
@@ -704,7 +704,7 @@ impl State {
         if let Some(db) = &self.db {
             match db.add_message(channel_id, from_name, text, timestamp, image, reply_to) {
                 Ok(id) => return id,
-                Err(e) => tracing::warn!("Chat-Persistenz fehlgeschlagen: {e}"),
+                Err(e) => tracing::warn!("Saving chat message failed: {e}"),
             }
         }
         let id = self.next_message_id;
@@ -854,7 +854,7 @@ impl State {
                 .and_then(|_| db.save_blob("mod_invites", &m.invites(now)))
                 .and_then(|_| db.save_blob("mod_audit", &m.audit().into_iter().rev().collect::<Vec<_>>()));
             if let Err(e) = res {
-                tracing::warn!("Moderation speichern fehlgeschlagen: {e}");
+                tracing::warn!("Saving moderation data failed: {e}");
             }
         }
     }
@@ -1129,7 +1129,7 @@ impl State {
         let info = self.channel_info(id).expect("frisch erstellter Channel");
         if let Some(db) = &self.db {
             if let Err(e) = db.upsert_channel(info.id, &info.name, info.kind, info.parent, info.position) {
-                tracing::warn!("Channel-Persistenz fehlgeschlagen: {e}");
+                tracing::warn!("Saving channel failed: {e}");
             }
         }
         Ok(info)
@@ -1175,7 +1175,7 @@ impl State {
         self.end_sharing(&moved);
         if let Some(db) = &self.db {
             if let Err(e) = db.delete_channel(id) {
-                tracing::warn!("Channel-Loesch-Persistenz fehlgeschlagen: {e}");
+                tracing::warn!("Saving channel deletion failed: {e}");
             }
         }
         Ok(moved)
@@ -1193,7 +1193,7 @@ impl State {
                 channel.parent,
                 channel.position,
             ) {
-                tracing::warn!("Channel-Rename-Persistenz fehlgeschlagen: {e}");
+                tracing::warn!("Saving channel rename failed: {e}");
             }
         }
         Ok(())

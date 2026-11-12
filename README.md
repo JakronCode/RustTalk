@@ -74,6 +74,16 @@ Details (German): [Konzept.md](Konzept.md) · test log: [test.md](test.md) · ro
 
 ## Setup
 
+### Development quick start (Linux/macOS)
+
+```bash
+make            # list all targets
+make setup      # check build tools, fetch crates
+make setup-server && make server   # local dev server on 127.0.0.1:7331, data in .dev/server
+make client     # client with its own config in .dev/client
+make test       # all tests, serial like CI
+```
+
 ### Server (Debian/Linux)
 
 Requirements: Rust (1.85+), systemd.
