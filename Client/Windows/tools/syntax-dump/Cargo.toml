@@ -1,0 +1,12 @@
+# Offline generator for assets/syntaxes.packdump (not part of the workspace or the client binary).
+# Run: cargo run --locked --manifest-path Client/Windows/tools/syntax-dump/Cargo.toml
+[package]
+name = "syntax-dump"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+syntect = { version = "=5.3.0", default-features = false, features = ["parsing", "regex-fancy", "default-syntaxes", "yaml-load", "dump-create"] }

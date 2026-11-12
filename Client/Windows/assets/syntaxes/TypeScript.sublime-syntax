@@ -1,0 +1,11 @@
+%YAML 1.2
+---
+# Local lightweight TypeScript extension of the bundled JavaScript grammar.
+name: TypeScript
+file_extensions: [ts, tsx]
+scope: source.ts
+contexts:
+  main:
+    - match: '\b(interface|type|namespace|declare|implements|readonly|keyof|infer|never|unknown|any|number|string|boolean)\b'
+      scope: storage.type.ts
+    - include: scope:source.js
