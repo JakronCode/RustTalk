@@ -35,6 +35,13 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: '"CMAKE_POLICY_VERSION_MINIMUM=3.5" >> $env:GITHUB_ENV'
+      # OpenH264's x86 SIMD assembly needs nasm - without it video encoding is ~5x slower.
+      - name: Windows NASM
+        if: runner.os == 'Windows' && matrix.arch == 'x86_64'
+        shell: pwsh
+        run: |
+          choco install nasm -y --no-progress
+          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
       - name: Test
         run: cargo test --locked --workspace -- --test-threads=1
       - name: Build client and server

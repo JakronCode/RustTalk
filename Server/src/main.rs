@@ -7,6 +7,7 @@
 mod config;
 mod db;
 mod gif;
+mod link;
 mod moderation;
 mod state;
 mod tls;

@@ -11,6 +11,7 @@ pub mod capture;
 pub mod dsp;
 pub mod encoder;
 pub mod jitter;
+pub mod link;
 pub mod neural;
 pub mod playback;
 pub mod resample;
@@ -28,7 +29,8 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use ringbuf::traits::Split;
 use ringbuf::HeapRb;
-use rusttalk_shared::audio_packet::{decode, SAMPLE_RATE};
+use rusttalk_shared::audio_packet::{decode, seal_packet, AudioHeader, Control, FLAG_CONTROL, SAMPLE_RATE};
+use rusttalk_shared::secure::DIR_TO_SERVER;
 
 use self::jitter::UserAudio;
 
@@ -58,6 +60,8 @@ pub struct AudioControl {
     mic_level: Arc<AtomicU32>,
     /// Wir senden gerade (Gate offen) – fuer den Selbst-Sprech-Indikator.
     pub transmitting: AtomicBool,
+    /// Ping and packet-loss stats for the connection panel.
+    pub link: Arc<link::LinkStats>,
 }
 
 impl AudioControl {
@@ -75,6 +79,7 @@ impl AudioControl {
             input_volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             mic_level: Arc::new(AtomicU32::new(0)),
             transmitting: AtomicBool::new(false),
+            link: Arc::new(link::LinkStats::default()),
         }
     }
 
@@ -193,6 +198,10 @@ impl AudioEngine {
             sfx: sfx.clone(),
         };
         let stop = Arc::new(AtomicBool::new(false));
+        // Any early return below stops the threads already spawned.
+        let mut guard = StopGuard(Some(stop.clone()));
+        // Bound now, not in the thread: a late-starting thread must not adopt a newer session.
+        let session = control.link.session();
         let share_udp = udp.try_clone().context("UDP-Socket klonen")?;
         let render_tap: screen_audio::RenderTap = Arc::new(Mutex::new(None));
         let mixer: SharedMixer = Arc::new(Mutex::new(HashMap::new()));
@@ -207,7 +216,8 @@ impl AudioEngine {
                 let talking = talking.clone();
                 let stop = stop.clone();
                 let cipher = cipher.clone();
-                move || recv_loop(recv_udp, mixer, talking, stop, cipher)
+                let link = control.link.clone();
+                move || recv_loop(recv_udp, token, mixer, talking, stop, cipher, link, session)
             })
             .context("Empfangsthread starten")?;
 
@@ -234,6 +244,7 @@ impl AudioEngine {
         let output = playback::build_output_stream(output_device, mixer, control, local_muted, user_volumes, sfx, render_prod, render_tap.clone())
             .context("Audio-Ausgabe konnte nicht gestartet werden")?;
 
+        guard.0 = None;
         Ok(Self { _input: input, _output: output, stop, udp: share_udp, token, cipher, render_tap, shared })
     }
 
@@ -253,7 +264,7 @@ impl AudioEngine {
     /// Starts sending the computer audio (screen share with sound).
     pub fn start_screen_audio(&self, output_device: Option<&str>) -> Result<screen_audio::ScreenAudio> {
         let udp = self.udp.try_clone().context("UDP-Socket klonen")?;
-        screen_audio::ScreenAudio::start(udp, self.token, self.cipher.clone(), output_device, self.render_tap.clone())
+        screen_audio::ScreenAudio::start(udp, self.token, self.cipher.clone(), self.shared.control.link.clone(), output_device, self.render_tap.clone())
     }
 
     pub fn stop(&self) {
@@ -267,10 +278,49 @@ impl Drop for AudioEngine {
     }
 }
 
-/// Empfangsschleife: UDP-Pakete in die Jitter-Buffer der Sprecher einsortieren.
-fn recv_loop(udp: UdpSocket, mixer: SharedMixer, talking: TalkingMap, stop: Arc<AtomicBool>, cipher: Arc<rusttalk_shared::secure::PacketCipher>) {
+/// Sets the stop flag when dropped while still armed.
+struct StopGuard(Option<Arc<AtomicBool>>);
+
+impl Drop for StopGuard {
+    fn drop(&mut self) {
+        if let Some(stop) = &self.0 {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Sends an encrypted ping every [`link::PING_INTERVAL`].
+fn send_ping(udp: &UdpSocket, token: u64, cipher: &rusttalk_shared::secure::PacketCipher, link: &link::LinkStats, pinger: &mut link::Pinger) {
+    let now = Instant::now();
+    if !pinger.due(now) {
+        return;
+    }
+    let id = link.next_ping_id();
+    let mut header = AudioHeader::new(token, id, 0);
+    header.flags = FLAG_CONTROL;
+    // Snapshot before sending: audio sent after the ping is not in the server's count yet.
+    pinger.sent(id, now, link.audio_sent.load(Ordering::Relaxed));
+    let _ = udp.send(&seal_packet(&header, cipher, DIR_TO_SERVER, &Control::Ping.encode()));
+}
+
+/// Empfangsschleife: UDP-Pakete in die Jitter-Buffer der Sprecher einsortieren;
+/// sends the pings and evaluates the pongs.
+#[allow(clippy::too_many_arguments)]
+fn recv_loop(
+    udp: UdpSocket,
+    token: u64,
+    mixer: SharedMixer,
+    talking: TalkingMap,
+    stop: Arc<AtomicBool>,
+    cipher: Arc<rusttalk_shared::secure::PacketCipher>,
+    link: Arc<link::LinkStats>,
+    session: u64,
+) {
     let mut buf = [0u8; rusttalk_shared::audio_packet::MAX_PACKET_LEN];
-    while !stop.load(Ordering::Relaxed) {
+    let mut pinger = link::Pinger::default();
+    // Also ends when a newer session starts, even if nothing arrives (no orphaned pinger).
+    while !stop.load(Ordering::Relaxed) && link.session() == session {
+        send_ping(&udp, token, &cipher, &link, &mut pinger);
         match udp.recv(&mut buf) {
             Ok(n) => {
                 let Some((header, _)) = decode(&buf[..n]) else { continue };
@@ -278,10 +328,25 @@ fn recv_loop(udp: UdpSocket, mixer: SharedMixer, talking: TalkingMap, stop: Arc<
                 let Some(payload) = rusttalk_shared::audio_packet::open_packet(&header, &buf[..n], &cipher, rusttalk_shared::secure::DIR_TO_CLIENT) else {
                     continue;
                 };
+                match link.accept(session, header.counter) {
+                    None => break, // a newer session took over
+                    Some(false) => continue, // replayed
+                    Some(true) => {}
+                }
+                if header.flags & FLAG_CONTROL != 0 {
+                    if let (0, Some(Control::Pong { audio_received, audio_relayed })) = (header.token, Control::decode(&payload)) {
+                        let received = link.audio_received.load(Ordering::Relaxed);
+                        if let Some(sample) = pinger.pong(header.sequence, Instant::now(), audio_received, audio_relayed, received) {
+                            link.record(session, sample);
+                        }
+                    }
+                    continue;
+                }
                 let payload = payload.as_slice();
                 if payload.is_empty() {
                     continue; // Registrierungs-Ping o. ae.
                 }
+                link.audio_received.fetch_add(1, Ordering::Relaxed);
                 let speaker = header.token; // Relay: Token-Feld = client_id des Sprechers
                 let screen = header.flags & rusttalk_shared::audio_packet::FLAG_SCREEN_AUDIO != 0;
                 let key = mixer_key(speaker, screen);
@@ -335,5 +400,55 @@ mod shortcut_audio_tests {
         control.self_deafened.store(false, Ordering::Relaxed);
         control.self_muted.store(true, Ordering::Relaxed);
         assert!(!control.should_transmit(true));
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    /// Runs `recv_loop` on a socket that never gets an answer; returns its join handle.
+    fn spawn_recv(link: Arc<link::LinkStats>, session: u64) -> std::thread::JoinHandle<()> {
+        let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+        udp.connect(peer.local_addr().unwrap()).unwrap();
+        udp.set_read_timeout(Some(std::time::Duration::from_millis(50))).unwrap();
+        let cipher = Arc::new(rusttalk_shared::secure::PacketCipher::new(&[7u8; 32]).unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        std::thread::spawn(move || {
+            let _peer = peer;
+            recv_loop(udp, 1, Arc::default(), Arc::default(), stop, cipher, link, session)
+        })
+    }
+
+    fn joins_soon(h: std::thread::JoinHandle<()>) -> bool {
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        while !h.is_finished() {
+            if Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        h.join().is_ok()
+    }
+
+    #[test]
+    fn receiver_stops_on_new_session_without_traffic() {
+        let link = Arc::new(link::LinkStats::default());
+        let h = spawn_recv(link.clone(), link.session());
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!h.is_finished(), "runs while its session is current");
+        link.reset();
+        assert!(joins_soon(h), "no orphaned pinger after a new session");
+    }
+
+    #[test]
+    fn late_starting_receiver_keeps_its_old_session() {
+        let link = Arc::new(link::LinkStats::default());
+        let bound = link.session(); // bound at engine start
+        link.reset(); // reconnect before the thread got scheduled
+        let h = spawn_recv(link.clone(), bound);
+        assert!(joins_soon(h), "must not adopt the newer session");
+        assert_eq!(link.accept(link.session(), 1), Some(true), "new window untouched");
     }
 }

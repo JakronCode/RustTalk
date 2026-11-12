@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 pub use crate::video_common::{CameraDevice, ShareEntry, ShareSource, VideoCapture, VideoOut, VideoQuality};
 use crate::video_common::{spawn_encoder, EncodeJob, Pacer, FRAME_INTERVAL, THUMB_W, THUMB_H};
+use crate::video_codec::fit_even_fast;
 
 // ---------------------------------------------------------------------------
 // Kamera
@@ -37,16 +38,17 @@ pub fn list_cameras() -> Result<Vec<CameraDevice>> {
         .collect())
 }
 
-/// Kamera oeffnen. Erst 720p/480p MJPEG mit 30 fps anfragen –
+/// Kamera oeffnen. Erst die Wunschaufloesung / 480p MJPEG mit 30 fps anfragen –
 /// `AbsoluteHighestFrameRate` landet sonst gern bei Formaten, die nokhwa
 /// nicht dekodieren kann oder die viel zu gross sind.
-fn open_camera(index: u32) -> Result<nokhwa::Camera> {
+fn open_camera(index: u32, (want_w, want_h): (u32, u32)) -> Result<nokhwa::Camera> {
     use nokhwa::pixel_format::RgbFormat;
     use nokhwa::utils::{
         CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType,
     };
 
     let attempts = [
+        RequestedFormatType::Closest(CameraFormat::new_from(want_w, want_h, FrameFormat::MJPEG, 30)),
         RequestedFormatType::Closest(CameraFormat::new_from(1280, 720, FrameFormat::MJPEG, 30)),
         RequestedFormatType::Closest(CameraFormat::new_from(640, 480, FrameFormat::MJPEG, 30)),
         RequestedFormatType::Closest(CameraFormat::new_from(640, 480, FrameFormat::YUYV, 30)),
@@ -113,7 +115,7 @@ where
             move || {
                 use nokhwa::pixel_format::RgbFormat;
 
-                let mut camera = match open_camera(index) {
+                let mut camera = match open_camera(index, quality.camera_request()) {
                     Ok(c) => c,
                     Err(e) => {
                         on_error(format!("Camera error: {e:#}"));
@@ -239,6 +241,49 @@ enum Target {
     Window(xcap::Window),
 }
 
+/// DXGI Desktop Duplication of one monitor (~1-5 ms per frame instead of
+/// ~70 ms with GDI). Created once per monitor and reused: Windows allows one
+/// duplication per output and process, and xcap's capture thread never ends
+/// (`stop` only pauses it). Delivers RGBA frames when the screen changes.
+struct MonitorStream {
+    recorder: xcap::VideoRecorder,
+    frames: std::sync::Mutex<std::sync::mpsc::Receiver<xcap::Frame>>,
+}
+
+type StreamCache = std::sync::Mutex<std::collections::HashMap<u32, Arc<MonitorStream>>>;
+
+fn stream_cache() -> &'static StreamCache {
+    static STREAMS: std::sync::OnceLock<StreamCache> = std::sync::OnceLock::new();
+    STREAMS.get_or_init(Default::default)
+}
+
+fn monitor_stream(mon: &xcap::Monitor) -> Option<Arc<MonitorStream>> {
+    let id = mon.id().ok()?;
+    let mut map = stream_cache().lock().ok()?;
+    if let Some(s) = map.get(&id) {
+        return Some(s.clone());
+    }
+    match mon.video_recorder() {
+        Ok((recorder, frames)) => {
+            let s = Arc::new(MonitorStream { recorder, frames: std::sync::Mutex::new(frames) });
+            map.insert(id, s.clone());
+            Some(s)
+        }
+        Err(e) => {
+            tracing::warn!("Desktop Duplication not available ({e}), using GDI capture");
+            None
+        }
+    }
+}
+
+/// Forget a broken duplication (resolution change, secure desktop...): its
+/// thread has ended, the next share creates a new one.
+fn drop_monitor_stream(mon: &xcap::Monitor) {
+    if let (Ok(id), Ok(mut map)) = (mon.id(), stream_cache().lock()) {
+        map.remove(&id);
+    }
+}
+
 fn find_target(source: ShareSource) -> Result<Target> {
     match source {
         ShareSource::Monitor(id) => xcap::Monitor::all()
@@ -288,7 +333,63 @@ where
                 };
                 let mut failures = 0u32;
                 let mut pacer = Pacer::new();
+                let fit = quality.screen();
+                // Monitors: frames from the duplication when the screen changes;
+                // the last one again every ~0.5 s while nothing moves (late
+                // viewers and keyframe requests need a picture to encode).
+                let stream = match &target {
+                    Target::Monitor(m) => monitor_stream(m),
+                    Target::Window(_) => None,
+                };
+                if let Some(s) = &stream {
+                    if s.recorder.start().is_err() {
+                        tracing::warn!("Desktop Duplication did not start, using GDI capture");
+                    }
+                }
+                let mut last: Option<(image::RgbaImage, Instant)> = None;
+                let mut stream_ok = stream.is_some();
                 while !stop.load(Ordering::Relaxed) {
+                    if stream_ok {
+                        let s = stream.as_ref().expect("checked");
+                        let got = s.frames.lock().map(|rx| rx.recv_timeout(Duration::from_millis(100)));
+                        let img = match got {
+                            Ok(Ok(f)) => image::RgbaImage::from_raw(f.width, f.height, f.raw),
+                            Ok(Err(std::sync::mpsc::RecvTimeoutError::Timeout)) => None,
+                            _ => {
+                                // Duplication lost (e.g. resolution change): fall back to GDI.
+                                tracing::warn!("Desktop Duplication ended, using GDI capture");
+                                stream_ok = false;
+                                if let Target::Monitor(m) = &target {
+                                    drop_monitor_stream(m);
+                                }
+                                continue;
+                            }
+                        };
+                        let now = Instant::now();
+                        let img = match img {
+                            Some(img) => {
+                                last = Some((img.clone(), now));
+                                if !pacer.ready_at(now) {
+                                    continue; // faster than 30 fps (e.g. 144 Hz screen)
+                                }
+                                img
+                            }
+                            None => match &mut last {
+                                Some((img, at)) if now.duration_since(*at) >= Duration::from_millis(500) => {
+                                    *at = now;
+                                    img.clone()
+                                }
+                                _ => continue,
+                            },
+                        };
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        // Scale here, in parallel to the encoder thread (it only encodes then).
+                        let img = fit_even_fast(image::DynamicImage::ImageRgba8(img), fit.max_w, fit.max_h);
+                        let _ = jobs.try_send(EncodeJob { img });
+                        continue;
+                    }
                     std::thread::sleep(pacer.wait());
                     pacer.ready_at(Instant::now());
                     let shot = match &target {
@@ -308,7 +409,8 @@ where
                                 break;
                             }
                             // Encoder busy -> drop the picture.
-                            let _ = jobs.try_send(EncodeJob { img: image::DynamicImage::ImageRgba8(img) });
+                            let img = fit_even_fast(image::DynamicImage::ImageRgba8(img), fit.max_w, fit.max_h);
+                            let _ = jobs.try_send(EncodeJob { img });
                         }
                         Err(e) => {
                             failures += 1;
@@ -320,6 +422,10 @@ where
                             }
                         }
                     }
+                }
+                // Pause the duplication (it is reused by the next share).
+                if let Some(s) = &stream {
+                    let _ = s.recorder.stop();
                 }
             }
         })
@@ -356,6 +462,45 @@ mod tests {
         let out = rx.recv_timeout(Duration::from_secs(10)).expect("Kamera-Frame");
         assert!(out.frame.is_none() && out.preview.is_some(), "startet im Vorschau-Modus");
         drop(cap);
+    }
+
+    /// Where the time goes per screen frame: capture (GDI vs. Desktop
+    /// Duplication), scaling, encoding. Pictures stay in memory.
+    #[test]
+    #[ignore]
+    fn hw_screen_stage_times() {
+        let mon = xcap::Monitor::all().unwrap().into_iter().next().expect("a screen");
+        let ms = |d: Duration, n: u32| d.as_secs_f64() * 1000.0 / n.max(1) as f64;
+        let t = Instant::now();
+        for _ in 0..5 {
+            mon.capture_image().unwrap();
+        }
+        println!("GDI capture: {:.1} ms/frame", ms(t.elapsed(), 5));
+        let stream = monitor_stream(&mon).expect("Desktop Duplication");
+        stream.recorder.start().unwrap();
+        let mut enc = crate::video_codec::H264Encoder::with_tuning(6_000_000, true, crate::video_codec::Tuning::stream(true));
+        let (mut wait, mut fit, mut code, mut n) = (Duration::ZERO, Duration::ZERO, Duration::ZERO, 0u32);
+        let mut size = (0, 0);
+        let end = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < end && n < 30 {
+            let t = Instant::now();
+            let Ok(f) = stream.frames.lock().unwrap().recv_timeout(Duration::from_millis(500)) else { continue };
+            wait += t.elapsed();
+            size = (f.width, f.height);
+            let img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_raw(f.width, f.height, f.raw).unwrap());
+            let t = Instant::now();
+            let pic = fit_even_fast(img, 1920, 1080);
+            fit += t.elapsed();
+            let t = Instant::now();
+            enc.encode_image(&pic).unwrap();
+            code += t.elapsed();
+            n += 1;
+        }
+        stream.recorder.stop().unwrap();
+        println!(
+            "monitor {}x{}: {n} duplication frames (only when the screen changes), wait {:.1} ms, scale {:.1} ms, encode {:.1} ms per frame",
+            size.0, size.1, ms(wait, n), ms(fit, n), ms(code, n)
+        );
     }
 
     /// Bildrate und Datenrate beim Teilen des Hauptmonitors (Release-Build aussagekraeftig).
