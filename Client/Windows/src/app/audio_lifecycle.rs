@@ -82,9 +82,12 @@ impl RustTalkApp {
     pub(super) fn stop_shared_audio(&mut self) {
         self.screen_audio = None;
         self.audio_only = false;
+        self.audio_picker = None;
+        self.shared_audio_source = Default::default();
         self.screen_audio_failed = true;
     }
 
+    #[cfg(test)]
     pub(super) fn toggle_audio_only(&mut self) {
         if self.audio_only {
             self.stop_shared_audio();
@@ -124,7 +127,12 @@ impl RustTalkApp {
                 .audio
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("Voice audio is unavailable"))
-                .and_then(|engine| engine.start_screen_audio(self.config.output_device.as_deref()));
+                .and_then(|engine| {
+                    engine.start_shared_audio(
+                        self.config.output_device.as_deref(),
+                        &self.shared_audio_source,
+                    )
+                });
             match result {
                 Ok(audio) => self.screen_audio = Some(audio),
                 Err(e) => {
@@ -245,6 +253,30 @@ mod tests {
         assert!(!wants_shared_audio(false, false, true));
         assert!(!wants_shared_audio(false, true, false));
         assert!(wants_shared_audio(true, false, false));
+    }
+
+    #[test]
+    fn audio_picker_needs_voice_and_explicit_share_action() {
+        use crate::audio::share_source::AudioShareSource;
+        let devices = Devices::new();
+        let mut app = app();
+        let _commands = connect(&mut app);
+        app.open_audio_picker();
+        app.start_audio_selection(AudioShareSource::System);
+        assert!(app.audio_picker.is_none());
+        assert_eq!(devices.0.borrow().systems, 0);
+        move_to(&mut app, 2);
+        app.open_audio_picker();
+        assert!(app.audio_picker.is_some());
+        app.sync_shared_audio();
+        assert_eq!(devices.0.borrow().systems, 0);
+        app.start_audio_selection(AudioShareSource::System);
+        assert_eq!(devices.0.borrow().systems, 1);
+        assert!(app.audio_picker.is_none());
+        app.open_audio_picker();
+        move_to(&mut app, 1);
+        assert!(app.audio_picker.is_none());
+        assert_eq!(devices.0.borrow().systems, 0);
     }
 
     #[test]

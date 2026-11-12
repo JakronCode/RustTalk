@@ -35,7 +35,7 @@ const SILENCE_HANGOVER: u32 = 25; // 0.5 s
 /// Running "share audio"; dropping it stops everything.
 pub struct ScreenAudio {
     _stream: Option<super::DeviceStream>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(windows, target_os = "linux"))]
     capture_worker: Option<std::thread::JoinHandle<()>>,
     worker: Option<std::thread::JoinHandle<()>>,
     stop: Arc<AtomicBool>,
@@ -47,7 +47,7 @@ impl Drop for ScreenAudio {
         self.stop.store(true, Ordering::Relaxed);
         *self.tap.lock().unwrap() = None;
         if let Some(worker) = self.worker.take() { let _ = worker.join(); }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(windows, target_os = "linux"))]
         if let Some(worker) = self.capture_worker.take() { let _ = worker.join(); }
     }
 }
@@ -62,10 +62,16 @@ impl ScreenAudio {
         self.stop.load(Ordering::Relaxed)
     }
 
+    #[cfg(test)]
     pub fn start(udp: UdpSocket, token: u64, cipher: Arc<PacketCipher>, link: Arc<super::link::LinkStats>, output_device: Option<&str>, tap: RenderTap) -> Result<Self> {
+        Self::start_source(udp, token, cipher, link, output_device, tap, &super::share_source::AudioShareSource::System)
+    }
+
+    pub fn start_source(udp: UdpSocket, token: u64, cipher: Arc<PacketCipher>, link: Arc<super::link::LinkStats>, output_device: Option<&str>, tap: RenderTap, source: &super::share_source::AudioShareSource) -> Result<Self> {
+        use super::share_source::AudioShareSource;
         #[cfg(test)]
         if let Some(stream) = super::test_devices::open(super::test_devices::Kind::System, output_device) {
-            return Ok(Self { _stream: Some(stream?), #[cfg(target_os = "linux")] capture_worker: None, worker: None, stop: Arc::new(AtomicBool::new(false)), tap });
+            return Ok(Self { _stream: Some(stream?), #[cfg(any(windows, target_os = "linux"))] capture_worker: None, worker: None, stop: Arc::new(AtomicBool::new(false)), tap });
         }
         #[cfg(not(windows))]
         let _ = output_device; // Linux captures the system default output, not a CPAL device.
@@ -73,7 +79,12 @@ impl ScreenAudio {
         let stop = Arc::new(AtomicBool::new(false));
         let (prod, cons) = HeapRb::<f32>::new(SAMPLE_RATE as usize * 2).split();
         #[cfg(windows)]
-        let stream = {
+        let mut capture_worker = None;
+        #[cfg(windows)]
+        let stream = if let AudioShareSource::Application(application) = source {
+            capture_worker = Some(super::windows_audio::start(application.clone(), prod, stop.clone())?);
+            None
+        } else {
             let device = super::playback::pick_output_device(output_device)?;
             let supported = device.default_output_config().context("Output device has no format")?;
             let stream = super::capture::build_stream_for(&device, &supported, prod, stop.clone())
@@ -85,7 +96,10 @@ impl ScreenAudio {
         #[cfg(not(windows))]
         let stream = None;
         #[cfg(target_os = "linux")]
-        let capture_worker = Some(super::system_audio::start(prod, stop.clone())?);
+        let capture_worker = Some(super::system_audio::start(prod, stop.clone(), match source {
+            AudioShareSource::System => None,
+            AudioShareSource::Application(application) => Some(application.clone()),
+        })?);
 
         let (render_prod, render_cons) = HeapRb::<f32>::new(SAMPLE_RATE as usize).split();
         let worker = std::thread::Builder::new()
@@ -99,13 +113,13 @@ impl ScreenAudio {
             Ok(worker) => worker,
             Err(e) => {
                 stop.store(true, Ordering::Relaxed);
-                #[cfg(target_os = "linux")]
+                #[cfg(any(windows, target_os = "linux"))]
                 if let Some(worker) = capture_worker { let _ = worker.join(); }
                 return Err(e);
             }
         };
         *tap.lock().unwrap() = Some(render_prod);
-        Ok(Self { _stream: stream, #[cfg(target_os = "linux")] capture_worker, worker: Some(worker), stop, tap })
+        Ok(Self { _stream: stream, #[cfg(any(windows, target_os = "linux"))] capture_worker, worker: Some(worker), stop, tap })
     }
 }
 
@@ -206,7 +220,7 @@ mod tests {
             let stop = stop.clone();
             move || encode_loop(cons, render_cons, sender, 42, cipher, Arc::new(super::super::link::LinkStats::default()), stop)
         });
-        let audio = ScreenAudio { _stream: Some(stream), #[cfg(target_os = "linux")] capture_worker: None, worker: Some(worker), stop: stop.clone(), tap: tap.clone() };
+        let audio = ScreenAudio { _stream: Some(stream), #[cfg(any(windows, target_os = "linux"))] capture_worker: None, worker: Some(worker), stop: stop.clone(), tap: tap.clone() };
         let mut buf = [0; 1500];
         let n = receiver.recv(&mut buf).unwrap();
         let (header, _) = decode(&buf[..n]).unwrap();

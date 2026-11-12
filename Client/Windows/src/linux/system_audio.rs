@@ -14,6 +14,112 @@ use pulse::stream::{FlagSet, PeekResult, State as StreamState, Stream};
 use ringbuf::traits::Producer;
 use ringbuf::HeapProd;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApplicationSource {
+    cookie: u32,
+    index: u32,
+    client: u32,
+    process: Option<String>,
+    name: String,
+}
+
+fn connect(stop: &AtomicBool, server: Option<&str>) -> Result<(Mainloop, PulseContext)> {
+    let mut mainloop = Mainloop::new().context("Could not create audio mainloop")?;
+    let mut context = PulseContext::new(&mainloop, "RustTalk system audio")
+        .context("Could not create PulseAudio context")?;
+    context.connect(server, pulse::context::FlagSet::NOAUTOSPAWN, None)?;
+    let deadline = Instant::now() + TIMEOUT;
+    while context.get_state() != ContextState::Ready {
+        anyhow::ensure!(
+            !matches!(
+                context.get_state(),
+                ContextState::Failed | ContextState::Terminated
+            ),
+            "PulseAudio / pipewire-pulse unavailable"
+        );
+        tick(&mut mainloop, stop, deadline)?;
+    }
+    Ok((mainloop, context))
+}
+
+fn wait<T: ?Sized>(
+    operation: &mut pulse::operation::Operation<T>,
+    context: &PulseContext,
+    mainloop: &mut Mainloop,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let deadline = Instant::now() + TIMEOUT;
+    while operation.get_state() == pulse::operation::State::Running {
+        if let Err(e) = tick(mainloop, stop, deadline) {
+            operation.cancel();
+            return Err(e);
+        }
+    }
+    discovery_ready(context.get_state(), stop)
+}
+
+fn cookie(context: &PulseContext, mainloop: &mut Mainloop, stop: &AtomicBool) -> Result<u32> {
+    discovery_ready(context.get_state(), stop)?;
+    let cookie = Rc::new(RefCell::new(None));
+    let found = cookie.clone();
+    let mut operation = context
+        .introspect()
+        .get_server_info(move |info| *found.borrow_mut() = Some(info.cookie));
+    wait(&mut operation, context, mainloop, stop)?;
+    let result = cookie
+        .borrow_mut()
+        .take()
+        .context("Audio server identity unavailable");
+    result
+}
+
+pub fn applications(stop: &AtomicBool) -> Result<Vec<super::share_source::AudioApplication>> {
+    let (mut mainloop, context) = connect(stop, None)?;
+    let cookie = cookie(&context, &mut mainloop, stop)?;
+    let applications = Rc::new(RefCell::new(Vec::new()));
+    let found = applications.clone();
+    discovery_ready(context.get_state(), stop)?;
+    let mut operation = context
+        .introspect()
+        .get_sink_input_info_list(move |result| {
+            if let ListResult::Item(info) = result {
+                let mut applications = found.borrow_mut();
+                let process = info.proplist.get_str("application.process.id");
+                let Some(client) = info.client else { return };
+                if applications.len() >= 128
+                    || info.corked
+                    || process.as_deref().and_then(|p| p.parse::<u32>().ok())
+                        == Some(std::process::id())
+                {
+                    return;
+                }
+                let app = info
+                    .proplist
+                    .get_str("application.name")
+                    .unwrap_or_else(|| "Application".into());
+                let name = info.name.as_deref().unwrap_or("Audio").to_string();
+                if name.len() > 1024 || process.as_ref().is_some_and(|p| p.len() > 64) {
+                    return;
+                }
+                let app: String = app.chars().take(128).collect();
+                applications.push(super::share_source::AudioApplication {
+                    name: format!("{} — {}", app, name).chars().take(256).collect(),
+                    source: ApplicationSource {
+                        cookie,
+                        index: info.index,
+                        client,
+                        process,
+                        name,
+                    },
+                });
+            }
+        });
+    wait(&mut operation, &context, &mut mainloop, stop)?;
+    let mut apps = std::mem::take(&mut *applications.borrow_mut());
+    apps.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(apps)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(5);
 const RECORD_FLAGS: FlagSet =
     FlagSet::from_bits_retain(FlagSet::DONT_MOVE.bits() | FlagSet::ADJUST_LATENCY.bits());
@@ -57,38 +163,64 @@ fn copy_samples(data: &[u8], producer: &mut HeapProd<f32>) -> Result<()> {
     Ok(())
 }
 
-fn capture(producer: &mut HeapProd<f32>, stop: &AtomicBool, server: Option<&str>) -> Result<()> {
-    let mut mainloop = Mainloop::new().context("Could not create audio mainloop")?;
-    let mut context = PulseContext::new(&mainloop, "RustTalk system audio")
-        .context("Could not create PulseAudio context")?;
-    context.connect(server, pulse::context::FlagSet::NOAUTOSPAWN, None)?;
+fn capture(
+    producer: &mut HeapProd<f32>,
+    stop: &AtomicBool,
+    server: Option<&str>,
+    application: Option<&ApplicationSource>,
+) -> Result<()> {
+    let (mut mainloop, mut context) = connect(stop, server)?;
     let deadline = Instant::now() + TIMEOUT;
-    while context.get_state() != ContextState::Ready {
+    let mut selected_sink = None;
+    if let Some(application) = application {
         anyhow::ensure!(
-            !matches!(
-                context.get_state(),
-                ContextState::Failed | ContextState::Terminated
-            ),
-            "PulseAudio / pipewire-pulse unavailable"
+            cookie(&context, &mut mainloop, stop)? == application.cookie,
+            "Audio server changed; select the application again"
         );
-        tick(&mut mainloop, stop, deadline)?;
+        let sink = Rc::new(RefCell::new(None));
+        let found = sink.clone();
+        let selected = application.clone();
+        discovery_ready(context.get_state(), stop)?;
+        let mut operation =
+            context
+                .introspect()
+                .get_sink_input_info(application.index, move |result| {
+                    if let ListResult::Item(info) = result {
+                        if info.client == Some(selected.client)
+                            && info.proplist.get_str("application.process.id") == selected.process
+                            && info.name.as_deref().unwrap_or("Audio") == selected.name
+                        {
+                            *found.borrow_mut() = Some(info.sink);
+                        }
+                    }
+                });
+        wait(&mut operation, &context, &mut mainloop, stop)?;
+        selected_sink = Some(
+            sink.borrow_mut()
+                .take()
+                .context("Selected application stopped; refresh sources")?,
+        );
     }
     discovery_ready(context.get_state(), stop)?;
     // Resolve the actual sink's monitor, never the default microphone or a symbolic source.
     // shortcut: binding 2.30.1 leaks cancelled discovery callbacks; remove when Operation::from_raw is fixed upstream.
     let monitor = Rc::new(RefCell::new(None));
     let found = monitor.clone();
-    let mut operation =
+    let callback = move |result: ListResult<&pulse::context::introspect::SinkInfo>| {
+        if let ListResult::Item(info) = result {
+            *found.borrow_mut() = info
+                .monitor_source_name
+                .as_ref()
+                .map(|n| (info.index, n.to_string()));
+        }
+    };
+    let mut operation = if let Some(sink) = selected_sink {
+        context.introspect().get_sink_info_by_index(sink, callback)
+    } else {
         context
             .introspect()
-            .get_sink_info_by_name("@DEFAULT_SINK@", move |result| {
-                if let ListResult::Item(info) = result {
-                    *found.borrow_mut() = info
-                        .monitor_source_name
-                        .as_ref()
-                        .map(|n| (info.index, n.to_string()));
-                }
-            });
+            .get_sink_info_by_name("@DEFAULT_SINK@", callback)
+    };
     while operation.get_state() == pulse::operation::State::Running {
         if let Err(e) = tick(&mut mainloop, stop, deadline) {
             operation.cancel();
@@ -134,6 +266,9 @@ fn capture(producer: &mut HeapProd<f32>, stop: &AtomicBool, server: Option<&str>
         fragsize: 3_840,
         ..Default::default()
     };
+    if let Some(application) = application {
+        stream.set_monitor_stream(application.index)?;
+    }
     stream.connect_record(Some(&monitor_name), Some(&attr), RECORD_FLAGS)?;
     while stream.get_state() != StreamState::Ready {
         anyhow::ensure!(
@@ -178,12 +313,13 @@ fn capture(producer: &mut HeapProd<f32>, stop: &AtomicBool, server: Option<&str>
 pub fn start(
     mut producer: HeapProd<f32>,
     stop: Arc<AtomicBool>,
+    application: Option<ApplicationSource>,
 ) -> Result<std::thread::JoinHandle<()>> {
     Ok(std::thread::Builder::new()
         .name("system-audio-capture".into())
         .spawn(move || {
             let _stop_on_exit = StopOnExit(stop.clone());
-            if capture(&mut producer, &stop, None).is_err() {
+            if capture(&mut producer, &stop, None, application.as_ref()).is_err() {
                 tracing::warn!("System audio capture stopped");
             }
         })?)
@@ -243,7 +379,7 @@ mod tests {
         let (mut prod, _cons) = HeapRb::<f32>::new(48_000).split();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
-        let worker = std::thread::spawn(move || capture(&mut prod, &worker_stop, None));
+        let worker = std::thread::spawn(move || capture(&mut prod, &worker_stop, None, None));
         let deadline = Instant::now() + Duration::from_secs(3);
         let process_id = std::process::id().to_string();
         let recording = loop {
@@ -282,6 +418,113 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires local PulseAudio / pipewire-pulse, pactl and gst-launch-1.0"]
+    fn selected_application_excludes_other_playback_and_never_falls_back() {
+        use std::process::{Child, Command, Stdio};
+        struct Playback(Child);
+        impl Drop for Playback {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        struct Module(String);
+        impl Drop for Module {
+            fn drop(&mut self) {
+                let _ = Command::new("pactl")
+                    .args(["unload-module", &self.0])
+                    .output();
+            }
+        }
+        let sink = format!("rusttalk_test_{}", std::process::id());
+        let output = Command::new("pactl")
+            .args([
+                "load-module",
+                "module-null-sink",
+                &format!("sink_name={sink}"),
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let _module = Module(String::from_utf8(output.stdout).unwrap().trim().to_string());
+        let spawn = |name: &str, frequency: u32| {
+            Playback(
+                Command::new("gst-launch-1.0")
+                    .args([
+                        "-q",
+                        "audiotestsrc",
+                        "is-live=true",
+                        &format!("freq={frequency}"),
+                        "volume=0.2",
+                        "!",
+                        "pulsesink",
+                        &format!("device={sink}"),
+                        &format!("stream-properties=props,application.name=(string){name}"),
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            )
+        };
+        let selected_name = format!("RustTalkTestSelected{}", std::process::id());
+        let _selected_playback = spawn(&selected_name, 1000);
+        let _other_playback = spawn("RustTalkTestOther", 2000);
+        let stop = Arc::new(AtomicBool::new(false));
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let application = loop {
+            if let Some(app) = applications(&stop)
+                .unwrap()
+                .into_iter()
+                .find(|app| app.name.starts_with(&selected_name))
+            {
+                break app.source;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let (mut prod, mut cons) = HeapRb::<f32>::new(96_000).split();
+        let worker_stop = stop.clone();
+        let selected = application.clone();
+        let worker =
+            std::thread::spawn(move || capture(&mut prod, &worker_stop, None, Some(&selected)));
+        let mut samples = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while samples.len() < 24_000 && Instant::now() < deadline {
+            while let Some(sample) = cons.try_pop() {
+                if samples.len() < 48_000 {
+                    samples.push(sample);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        stop.store(true, Ordering::Relaxed);
+        let _ = worker.join().unwrap();
+        assert!(samples.len() >= 24_000);
+        let energy = |frequency: f64| {
+            let (mut sin, mut cos) = (0.0, 0.0);
+            for (i, sample) in samples.iter().skip(4000).enumerate() {
+                let angle = std::f64::consts::TAU * frequency * i as f64 / 48_000.0;
+                sin += *sample as f64 * angle.sin();
+                cos += *sample as f64 * angle.cos();
+            }
+            sin * sin + cos * cos
+        };
+        assert!(
+            energy(1000.0) > energy(2000.0) * 100.0,
+            "other application leaked into capture"
+        );
+        let mut stale = application;
+        stale.cookie ^= 1;
+        let (mut prod, mut cons) = HeapRb::<f32>::new(48_000).split();
+        assert!(capture(&mut prod, &AtomicBool::new(false), None, Some(&stale)).is_err());
+        assert!(
+            cons.try_pop().is_none(),
+            "stale selection must never fall back to system audio"
+        );
+    }
+
+    #[test]
     fn stalled_server_cannot_block_stop() {
         use std::os::unix::net::UnixListener;
         let dir = tempfile::tempdir().unwrap();
@@ -291,7 +534,8 @@ mod tests {
         let (mut prod, mut cons) = HeapRb::<f32>::new(48_000).split();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
-        let worker = std::thread::spawn(move || capture(&mut prod, &worker_stop, Some(&server)));
+        let worker =
+            std::thread::spawn(move || capture(&mut prod, &worker_stop, Some(&server), None));
         let (_connection, _) = listener.accept().unwrap(); // accept, but never answer authentication
         let start = Instant::now();
         stop.store(true, Ordering::Relaxed);
