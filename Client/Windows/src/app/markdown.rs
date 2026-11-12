@@ -2,7 +2,8 @@
 use super::theme;
 use eframe::egui::{self, text::LayoutJob, Color32, FontId, TextFormat};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
+    hash::{Hash, Hasher},
     sync::mpsc,
     time::{Duration, Instant},
 };
@@ -16,6 +17,7 @@ const MAX_BYTES: usize = 16 * 1024;
 const MAX_BLOCKS: usize = 256;
 const CACHE_SIZE: usize = 64;
 const CODE_BYTES: usize = 4096;
+const MEASUREMENT_LIMIT: usize = 10_000;
 
 fn bounded(s: &str) -> &str {
     let mut end = s.len().min(MAX_BYTES);
@@ -66,7 +68,14 @@ fn inline(text: &str, style: TextFormat, depth: usize, budget: &mut usize, job: 
             let tail = &rest[m.len()..];
             if *budget >= tail.len() {
                 *budget -= tail.len();
-                if let Some(end) = tail.find(m).filter(|&end| end > 0) {
+                if let Some(end) = tail.match_indices(m).find_map(|(end, _)| {
+                    let slashes = tail[..end]
+                        .bytes()
+                        .rev()
+                        .take_while(|&b| b == b'\\')
+                        .count();
+                    (end > 0 && (m == "`" || slashes % 2 == 0)).then_some(end)
+                }) {
                     let mut styled = style.clone();
                     match m {
                         "`" => {
@@ -259,7 +268,7 @@ fn highlight_theme() -> Theme {
     theme
 }
 
-fn highlight(blocks: &mut [Block], syntaxes: &SyntaxSet, theme: &Theme) {
+fn highlight(blocks: &mut [Block], syntaxes: &SyntaxSet, theme: &Theme) -> bool {
     let start = Instant::now();
     for block in blocks {
         let Some(syntax) = block
@@ -281,10 +290,10 @@ fn highlight(blocks: &mut [Block], syntaxes: &SyntaxSet, theme: &Theme) {
         let mut job = LayoutJob::default();
         for line in code.split_inclusive('\n') {
             if start.elapsed() > Duration::from_millis(30) {
-                return;
+                return false;
             }
             let Ok(spans) = highlighter.highlight_line(line, syntaxes) else {
-                return;
+                return true;
             };
             for (style, text) in spans {
                 let mut f = format(13.0, true);
@@ -294,6 +303,16 @@ fn highlight(blocks: &mut [Block], syntaxes: &SyntaxSet, theme: &Theme) {
             }
         }
         block.job = job;
+    }
+    true
+}
+
+// A timeout can include lazy regex compilation; retries stay on the single worker.
+fn highlight_with_retry(blocks: &mut [Block], syntaxes: &SyntaxSet, theme: &Theme) {
+    for _ in 0..3 {
+        if highlight(blocks, syntaxes, theme) {
+            break;
+        }
     }
 }
 
@@ -309,6 +328,7 @@ type Work = (u64, Vec<Block>, egui::Context);
 pub(super) struct Cache {
     entries: VecDeque<Entry>,
     serial: u64,
+    measurements: HashMap<egui::Id, (u64, egui::Vec2)>,
     pending: bool,
     tx: mpsc::SyncSender<Work>,
     rx: mpsc::Receiver<(u64, Vec<Block>)>,
@@ -328,7 +348,7 @@ impl Default for Cache {
             };
             let theme = highlight_theme();
             while let Ok((serial, mut blocks, ctx)) = work.recv() {
-                highlight(&mut blocks, &syntaxes, &theme);
+                highlight_with_retry(&mut blocks, &syntaxes, &theme);
                 if result.send((serial, blocks)).is_err() {
                     break;
                 }
@@ -338,6 +358,7 @@ impl Default for Cache {
         Self {
             entries: VecDeque::new(),
             serial: 0,
+            measurements: HashMap::new(),
             pending: false,
             tx,
             rx,
@@ -354,6 +375,23 @@ impl Cache {
             }
         }
         let source = bounded(text);
+        let measurement_id = ui.id().with(id);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        source.hash(&mut hasher);
+        text.len().hash(&mut hasher);
+        ui.available_width().to_bits().hash(&mut hasher);
+        ui.ctx().pixels_per_point().to_bits().hash(&mut hasher);
+        theme::compact().hash(&mut hasher);
+        ui.spacing().item_spacing.x.to_bits().hash(&mut hasher);
+        ui.spacing().item_spacing.y.to_bits().hash(&mut hasher);
+        let fingerprint = hasher.finish();
+        if let Some(&(old, size)) = self.measurements.get(&measurement_id) {
+            let rect = egui::Rect::from_min_size(ui.next_widget_position(), size);
+            if old == fingerprint && !ui.is_rect_visible(rect) {
+                ui.allocate_exact_size(size, egui::Sense::hover());
+                return;
+            }
+        }
         let index = self
             .entries
             .iter()
@@ -372,23 +410,7 @@ impl Cache {
                 submitted: false,
             }
         };
-        if !entry.submitted
-            && !self.pending
-            && entry
-                .blocks
-                .iter()
-                .any(|b| b.language.as_deref().and_then(language).is_some())
-        {
-            if self
-                .tx
-                .try_send((entry.serial, entry.blocks.clone(), ui.ctx().clone()))
-                .is_ok()
-            {
-                self.pending = true;
-            }
-            entry.submitted = true;
-        }
-        ui.vertical(|ui| {
+        let response = ui.vertical(|ui| {
             for (i, block) in entry.blocks.iter().enumerate() {
                 if let Some(tag) = &block.language {
                     ui.push_id((id, i), |ui| {
@@ -414,9 +436,35 @@ impl Cache {
                 ui.label("[message display truncated]");
             }
         });
-        self.entries.push_back(entry);
-        if self.entries.len() > CACHE_SIZE {
-            self.entries.pop_front();
+        if ui.is_rect_visible(response.response.rect)
+            && !entry.submitted
+            && !self.pending
+            && entry
+                .blocks
+                .iter()
+                .any(|b| b.language.as_deref().and_then(language).is_some())
+        {
+            if self
+                .tx
+                .try_send((entry.serial, entry.blocks.clone(), ui.ctx().clone()))
+                .is_ok()
+            {
+                self.pending = true;
+            }
+            entry.submitted = true;
+        }
+        if self.measurements.len() >= MEASUREMENT_LIMIT
+            && !self.measurements.contains_key(&measurement_id)
+        {
+            self.measurements.clear();
+        }
+        self.measurements
+            .insert(measurement_id, (fingerprint, response.response.rect.size()));
+        if ui.is_rect_visible(response.response.rect) {
+            self.entries.push_back(entry);
+            if self.entries.len() > CACHE_SIZE {
+                self.entries.pop_front();
+            }
         }
     }
 }
@@ -439,6 +487,87 @@ pub(super) fn composer(ui: &egui::Ui, text: &str, width: f32) -> std::sync::Arc<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escaped_closing_markers_preserve_text() {
+        assert_eq!(plain(r"*a\*b*"), "a*b");
+        assert_eq!(plain(r"**a\**b**"), "a**b");
+        assert_eq!(plain(r"~~a\~~b~~"), "a~~b");
+        assert_eq!(plain(r"*a\\*"), r"a\");
+        assert_eq!(plain(r"`a\*b`"), r"a\*b");
+    }
+
+    #[test]
+    fn cold_languages_highlight_multiple_lines() {
+        for (tag, code) in [
+            ("rust", "let n = 42;\nlet m = 7;\n"),
+            ("csharp", "var n = 42;\nvar m = 7;\n"),
+            ("python", "n = 42\nm = 7\n"),
+        ] {
+            let syntaxes: SyntaxSet = syntect::dumps::from_uncompressed_data(include_bytes!(
+                "../../assets/syntaxes.packdump"
+            ))
+            .unwrap();
+            let mut blocks = parse(&format!("```{tag}\n{code}```"));
+            highlight_with_retry(&mut blocks, &syntaxes, &highlight_theme());
+            assert_eq!(blocks[0].job.text, code);
+            assert!(blocks[0].job.sections.len() > 1, "{tag} stayed plain");
+        }
+    }
+
+    #[test]
+    fn offscreen_history_does_not_thrash_visible_cache() {
+        let (tx, _work) = mpsc::sync_channel(1);
+        let (_result, rx) = mpsc::sync_channel(1);
+        let mut cache = Cache {
+            entries: VecDeque::new(),
+            serial: 0,
+            measurements: HashMap::new(),
+            pending: true,
+            tx,
+            rx,
+        };
+        let ctx = egui::Context::default();
+        let text = "ordinary words ".repeat(130);
+        let render = |cache: &mut Cache, width: f32, edited: bool| {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 480.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for id in 0..100 {
+                                cache.show(
+                                    ui,
+                                    id,
+                                    if edited && id == 99 { "edited" } else { &text },
+                                );
+                            }
+                        });
+                    });
+                },
+            );
+        };
+        render(&mut cache, 640.0, false);
+        render(&mut cache, 640.0, false);
+        let serial = cache.serial;
+        render(&mut cache, 640.0, false);
+        assert_eq!(cache.serial, serial, "unchanged history was reparsed");
+        render(&mut cache, 640.0, true);
+        assert!(
+            cache.serial > serial,
+            "offscreen edits must invalidate height"
+        );
+        let serial = cache.serial;
+        render(&mut cache, 400.0, true);
+        assert!(cache.serial > serial, "resize must invalidate height");
+        assert!(cache.entries.len() <= CACHE_SIZE);
+    }
     #[test]
     fn dialect_and_snippets() {
         assert_eq!(plain("# Heading\n**bold** *italic* ~~gone~~ `x*y`\n> quote\n- one\n1. two\n```rust\nfn main() {}\n```"), "Heading bold italic gone x*y quote one two fn main() {}\n");
@@ -473,6 +602,7 @@ mod tests {
         let mut cache = Cache {
             entries: VecDeque::new(),
             serial: 0,
+            measurements: HashMap::new(),
             pending: true,
             tx,
             rx,
@@ -486,8 +616,8 @@ mod tests {
                 cache.show(ui, 99, "**edited**");
             });
         });
-        assert_eq!(cache.entries.len(), CACHE_SIZE);
-        assert_eq!(cache.entries.back().unwrap().blocks[0].job.text, "edited");
+        assert!(cache.entries.len() <= CACHE_SIZE);
+        assert!(cache.measurements.len() <= MEASUREMENT_LIMIT);
         assert!(cache.pending, "UI rendered with a stalled worker");
     }
 

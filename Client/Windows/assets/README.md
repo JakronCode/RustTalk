@@ -54,11 +54,18 @@ code. Plain preview text uses the same parser and leaves code content intact.
 
 The per-client LRU holds 64 entries keyed by message ID **and content**; edits
 cannot reuse stale highlighting. Each entry is bounded by the limits above.
+A separate cache holds at most 10,000 layout measurements (fingerprint and size,
+not message text). Unchanged off-screen blocks reserve their measured space
+without parsing or touching the highlighting cache. Edits, width, scale, density
+and spacing changes invalidate measurements. First layout still measures every
+message; only visible blocks enter the parsed/highlighted cache.
 Highlighting uses one worker and capacity-one channels, with only one job in
 flight. The UI never waits for regex work. Until a result arrives, code is plain.
 Each code block is limited to 4 KiB, 128 lines and 256 bytes per line. A 30 ms
-cooperative budget is checked between lines for the whole message; it cannot
-interrupt a single regex call. A slow call can delay highlighting, but not UI
+cooperative budget is checked between lines for the whole message. The worker
+allows at most three passes, so lazy regex compilation during a cold pass does
+not permanently suppress ordinary highlighting. No pass can interrupt a single
+regex call. A slow call can delay highlighting, but not UI
 rendering or create an unbounded job/thread queue. Fancy-regex also has its own
 backtracking limit. No hard wall-clock CPU deadline is claimed.
 

@@ -930,8 +930,10 @@ pub(super) fn chat_line(
     let mut action = None;
     // Background (mention / reply target) is painted below the content afterwards.
     let bg = ui.painter().add(egui::Shape::Noop);
-    let row = ui
-        .horizontal(|ui| {
+    // Register the row before its children so Copy retains primary clicks.
+    let row_response = ui.scope_builder(
+        egui::UiBuilder::new().sense(egui::Sense::click()),
+        |ui| ui.horizontal(|ui| {
             ui.set_width(ui.available_width());
             if compact {
             } else if c.grouped {
@@ -1002,9 +1004,9 @@ pub(super) fn chat_line(
                     }
                 }
             });
-        })
-        .response
-        .rect;
+        }),
+    ).response;
+    let row = row_response.rect;
 
     let tint = if c.replying || editing {
         Some((theme::accent().gamma_multiply(0.22), theme::accent()))
@@ -1035,7 +1037,7 @@ pub(super) fn chat_line(
     let shift = ui.input(|i| i.modifiers.shift);
     let delete = |id| if shift { ChatAction::DeleteNow(id) } else { ChatAction::Delete(id) };
     // Right click: same actions as the hover buttons.
-    let resp = ui.interact(row, ui.id().with(("chat-line", line.id)), egui::Sense::click());
+    let resp = row_response;
     resp.context_menu(|ui| {
         ui.set_width(180.0);
         ui.spacing_mut().item_spacing.y = 2.0;
@@ -1164,6 +1166,56 @@ fn inline_editor(ui: &mut egui::Ui, id: u64, edit: EditBox) -> Option<ChatAction
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn code_copy_receives_click_inside_message_row() {
+        let ctx = egui::Context::default();
+        let mut textures = TextureCache::default();
+        let mut markdown = super::super::markdown::Cache::default();
+        let lines = vec![ChatLine {
+            id: 7,
+            kind: ChatKind::Message { from: "alice".into(), own: false },
+            text: "```unknown\nlet n = 42;\n```".into(),
+            timestamp: 0,
+            image: None,
+            reply_to: None,
+            edited: false,
+        }];
+        let mut frame = |events| {
+            ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 480.0))),
+                events,
+                ..Default::default()
+            }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let c = LineCtx { lines: &lines, me: "me", grouped: false, show_ts: true, animate: false, replying: false };
+                    chat_line(ui, &lines[0], &mut textures, &c, None, &mut markdown);
+                });
+            })
+        };
+        frame(vec![]);
+        let output = frame(vec![]);
+        let pos = output.shapes.iter().find_map(|shape| {
+            if let egui::Shape::Text(text) = &shape.shape {
+                (text.galley.job.text == "Copy").then(|| text.pos + text.galley.size() / 2.0)
+            } else {
+                None
+            }
+        }).expect("copy button is visible");
+        frame(vec![egui::Event::PointerMoved(pos)]);
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(vec![button(true)]);
+        let output = frame(vec![button(false)]);
+        assert!(output.platform_output.commands.iter().any(|command| {
+            matches!(command, egui::OutputCommand::CopyText(text) if text == "let n = 42;\n")
+        }), "row swallowed the copy click");
+    }
 
     #[test]
     fn stage_grid_uses_space_and_keeps_16_9() {
