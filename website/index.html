@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RustTalk – Voice chat for your own server</title>
-<meta name="description" content="RustTalk: lightweight, encrypted voice, video and text chat. Discord-style client, TeamSpeak-style self-hosted server. No accounts, no cloud.">
+<title>RustTalk – Your conversations. Your server. Your data.</title>
+<meta name="description" content="RustTalk: encrypted voice, video and text chat you run yourself. No accounts, no ads, no tracking. Own your data again.">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="img/apple-touch-icon.png">
 <meta property="og:title" content="RustTalk">
-<meta property="og:description" content="Voice chat for your own server. No accounts, no cloud.">
+<meta property="og:description" content="Your conversations. Your server. Your data. No accounts, no ads, no tracking.">
 <meta property="og:image" content="https://rusttalk.com/img/voice.png">
 <style>
 :root{
@@ -91,6 +91,15 @@ pre code{background:none;padding:0}
 .steps p{margin:0 0 10px;color:var(--muted)}
 .alt{background:var(--bg2);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
 .alt .card{background:var(--bg3)}
+/* why */
+.why{padding:84px 0;background:linear-gradient(180deg,var(--bg) 0%,#23243a 50%,var(--bg) 100%);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.why h2{font-size:clamp(28px,4.4vw,44px);line-height:1.15;margin:0 0 22px;max-width:820px}
+.why h2 span{background:linear-gradient(90deg,#8b93ff,#23a55a);-webkit-background-clip:text;background-clip:text;color:transparent}
+.manifest{font-size:clamp(17px,2vw,19.5px);line-height:1.7;color:var(--muted);max-width:760px;margin:0 0 36px}
+.pillars{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
+.pillars>div{background:rgba(43,45,49,.7);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:12px;padding:18px 20px;display:flex;flex-direction:column;gap:6px}
+.pillars b{font-size:16.5px}
+.pillars span{color:var(--muted);font-size:15px}
 /* footer */
 footer{padding:36px 0 50px;color:var(--dim);font-size:14px}
 footer .wrap{display:flex;gap:16px;flex-wrap:wrap;justify-content:space-between}
@@ -128,10 +137,10 @@ html[lang=en] [data-l=de],html[lang=de] [data-l=en]{display:none!important}
 
 <header class="hero" id="top">
   <div class="wrap">
-    <h1 data-l="en">Voice chat on <span>your own server</span>.</h1>
-    <h1 data-l="de">Voice-Chat auf <span>deinem eigenen Server</span>.</h1>
-    <p class="lead" data-l="en">RustTalk is a lightweight, encrypted voice, video and text chat. A Discord-style app with a TeamSpeak-style server you run yourself. No accounts, no cloud, no tracking.</p>
-    <p class="lead" data-l="de">RustTalk ist ein schlanker, verschlüsselter Voice-, Video- und Text-Chat. Eine App im Discord-Stil mit einem Server im TeamSpeak-Stil, den du selbst betreibst. Keine Accounts, keine Cloud, kein Tracking.</p>
+    <h1 data-l="en">Your conversations.<br><span>Your server. Your data.</span></h1>
+    <h1 data-l="de">Deine Gespräche.<br><span>Dein Server. Deine Daten.</span></h1>
+    <p class="lead" data-l="en">RustTalk is encrypted voice, video and text chat that you run yourself. No accounts, no ads, no tracking. What you say stays between you and the people you talk to.</p>
+    <p class="lead" data-l="de">RustTalk ist verschlüsselter Voice-, Video- und Text-Chat, den du selbst betreibst. Keine Accounts, keine Werbung, kein Tracking. Was du sagst, bleibt zwischen dir und den Menschen, mit denen du sprichst.</p>
     <div class="cta">
       <a class="btn primary" href="https://github.com/rusttalkcrew/RustTalk/releases/latest/download/rusttalk-windows.exe">
         <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 5.5 10.5 4.5v7H3zm8.5-1.2L21 3v8.5h-9.5zM3 12.5h7.5v7L3 18.5zm8.5 0H21V21l-9.5-1.3z"/></svg>
@@ -142,10 +151,27 @@ html[lang=en] [data-l=de],html[lang=de] [data-l=en]{display:none!important}
         <span data-l="en">Host a server</span><span data-l="de">Server hosten</span>
       </a>
     </div>
-    <div class="ver"><span class="js-ver"></span><span data-l="en">Free &amp; open source · Windows · Linux · Self-hosted server</span><span data-l="de">Kostenlos &amp; Open Source · Windows · Linux · Eigener Server</span></div>
+    <div class="ver"><span class="js-ver"></span><span data-l="en">Open source · Windows · Linux · Self-hosted</span><span data-l="de">Open Source · Windows · Linux · Selbst gehostet</span></div>
     <div class="shot-hero"><img src="img/voice.png" width="1100" height="731" alt="RustTalk voice channel with four people"></div>
   </div>
 </header>
+
+<section id="why" class="why">
+  <div class="wrap">
+    <h2 data-l="en">If it's free, you are the product.<br><span>Not here.</span></h2>
+    <h2 data-l="de">Wenn es nichts kostet, bist du das Produkt.<br><span>Hier nicht.</span></h2>
+    <p class="manifest" data-l="en">Most chat apps cost nothing because you pay with your data: who you talk to, when, how often and for how long. We are not up for that. RustTalk has no business built on your data and nothing to sell. The code is open, the server belongs to you, and your conversations never leave it. Owning your data again should not be a project for experts. It should be normal.</p>
+    <p class="manifest" data-l="de">Die meisten Chat-Apps kosten nichts, weil du mit deinen Daten bezahlst: mit wem du sprichst, wann, wie oft und wie lange. Darauf haben wir keine Lust. Hinter RustTalk steckt kein Geschäft mit deinen Daten und nichts, das verkauft wird. Der Code ist offen, der Server gehört dir, und deine Gespräche verlassen ihn nicht. Die eigenen Daten wieder selbst zu besitzen sollte kein Projekt für Experten sein, sondern selbstverständlich.</p>
+    <div class="pillars">
+      <div><b data-l="en">Your server, your rules</b><b data-l="de">Dein Server, deine Regeln</b>
+        <span data-l="en">You decide who joins, what is stored and for how long.</span><span data-l="de">Du entscheidest, wer reinkommt, was gespeichert wird und wie lange.</span></div>
+      <div><b data-l="en">Nothing to sell</b><b data-l="de">Nichts zu verkaufen</b>
+        <span data-l="en">No ads, no analytics, no profiles. There is nobody to sell your data to.</span><span data-l="de">Keine Werbung, keine Analyse, keine Profile. Es gibt niemanden, an den deine Daten gehen.</span></div>
+      <div><b data-l="en">Open, nothing hidden</b><b data-l="de">Offen, nichts versteckt</b>
+        <span data-l="en">Every line of code is public. Anyone can check what RustTalk does.</span><span data-l="de">Jede Zeile Code ist öffentlich. Jeder kann nachprüfen, was RustTalk tut.</span></div>
+    </div>
+  </div>
+</section>
 
 <section id="features">
   <div class="wrap">
