@@ -46,6 +46,15 @@ impl RustTalkApp {
                 ui.label(egui::RichText::new(&self.server_settings.name).strong().color(theme::HEADER));
                 ui.label(egui::RichText::new(&address).size(12.0).color(theme::MUTED));
                 ping_graph(ui, &points);
+                if let Some(secs) = summary.stale_secs {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}  No answer from the server for {secs:.0} s - voice traffic may be blocked",
+                            icons::regular::WARNING
+                        ))
+                        .color(theme::YELLOW),
+                    );
+                }
                 stats_grid(ui, &summary);
                 ui.label(
                     egui::RichText::new(format!(

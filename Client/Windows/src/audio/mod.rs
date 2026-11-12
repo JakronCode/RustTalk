@@ -300,6 +300,7 @@ fn recv_loop(
 ) {
     let mut buf = [0u8; rusttalk_shared::audio_packet::MAX_PACKET_LEN];
     let mut pinger = link::Pinger::default();
+    let session = link.session();
     while !stop.load(Ordering::Relaxed) {
         send_ping(&udp, token, &cipher, &link, &mut pinger);
         match udp.recv(&mut buf) {
@@ -309,14 +310,16 @@ fn recv_loop(
                 let Some(payload) = rusttalk_shared::audio_packet::open_packet(&header, &buf[..n], &cipher, rusttalk_shared::secure::DIR_TO_CLIENT) else {
                     continue;
                 };
-                if !link.replay.lock().unwrap().accept(header.counter) {
-                    continue; // replayed
+                match link.accept(session, header.counter) {
+                    None => break, // a newer session took over
+                    Some(false) => continue, // replayed
+                    Some(true) => {}
                 }
                 if header.flags & FLAG_CONTROL != 0 {
                     if let (0, Some(Control::Pong { audio_received, audio_relayed })) = (header.token, Control::decode(&payload)) {
                         let received = link.audio_received.load(Ordering::Relaxed);
                         if let Some(sample) = pinger.pong(header.sequence, Instant::now(), audio_received, audio_relayed, received) {
-                            link.record(sample);
+                            link.record(session, sample);
                         }
                     }
                     continue;

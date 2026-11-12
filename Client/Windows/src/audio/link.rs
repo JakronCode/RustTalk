@@ -16,6 +16,8 @@ pub const MAX_SAMPLES: usize = 128;
 /// Unanswered pings kept for matching pongs.
 const MAX_PENDING: usize = 8;
 const PENDING_TIMEOUT: Duration = Duration::from_secs(10);
+/// No pong for this long: the numbers are stale (UDP blocked or lost).
+pub const STALE_AFTER: Duration = Duration::from_secs(8);
 
 /// Counters at the time of one answered ping. All wrap.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -46,6 +48,8 @@ pub struct Summary {
     /// Percent; `None` while no audio flowed in that direction.
     pub outbound_loss: Option<f32>,
     pub inbound_loss: Option<f32>,
+    /// Seconds since the last pong once that exceeds [`STALE_AFTER`].
+    pub stale_secs: Option<f32>,
 }
 
 /// Loss in percent between two counter snapshots. A backwards or wrapped
@@ -94,24 +98,41 @@ impl History {
             .collect()
     }
 
-    pub fn summary(&self) -> Summary {
-        let (Some(first), Some(last)) = (self.samples.front(), self.samples.back()) else {
-            return Summary::default();
+    /// Stats over the samples within [`HISTORY`] of `now`. `since` is when
+    /// the session started, so a session that never got a pong turns stale too.
+    pub fn summary(&self, now: Instant, since: Instant) -> Summary {
+        let recent: Vec<&Sample> = self
+            .samples
+            .iter()
+            .filter(|s| now.saturating_duration_since(s.at) <= HISTORY)
+            .collect();
+        let last_at = self.samples.back().map_or(since, |s| s.at);
+        let silent = now.saturating_duration_since(last_at);
+        let stale_secs = (silent > STALE_AFTER).then_some(silent.as_secs_f32());
+        let (Some(first), Some(last)) = (recent.first(), recent.last()) else {
+            return Summary {
+                stale_secs,
+                ..Summary::default()
+            };
         };
-        let n = self.samples.len() as f32;
-        let average = self.samples.iter().map(|s| s.rtt_ms).sum::<f32>() / n;
-        let jitter = (self.samples.len() > 1).then(|| {
-            let diffs: f32 = self
-                .samples
+        let n = recent.len() as f32;
+        let average = recent.iter().map(|s| s.rtt_ms).sum::<f32>() / n;
+        let jitter = (recent.len() > 1).then(|| {
+            let diffs: f32 = recent
                 .iter()
-                .zip(self.samples.iter().skip(1))
+                .zip(recent.iter().skip(1))
                 .map(|(a, b)| (b.rtt_ms - a.rtt_ms).abs())
                 .sum();
             diffs / (n - 1.0)
         });
         let (a, b) = (first.counters, last.counters);
         Summary {
-            last_ms: Some(last.rtt_ms),
+            stale_secs,
+            last_ms: if stale_secs.is_some() {
+                None
+            } else {
+                Some(last.rtt_ms)
+            },
             average_ms: Some(average),
             jitter_ms: jitter,
             outbound_loss: loss_percent(
@@ -126,7 +147,27 @@ impl History {
     }
 }
 
+/// Replay window of one UDP session. `id` changes on every new session so a
+/// receive thread of an old session can never touch the new window.
+#[derive(Debug)]
+struct SessionReplay {
+    id: u64,
+    started: Instant,
+    window: ReplayWindow,
+}
+
+impl Default for SessionReplay {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            started: Instant::now(),
+            window: ReplayWindow::default(),
+        }
+    }
+}
+
 /// Shared between the audio threads and the UI (lives in `AudioControl`).
+/// Lock order: `replay` before `history`.
 #[derive(Debug, Default)]
 pub struct LinkStats {
     /// Audio packets sent (voice + screen audio).
@@ -134,31 +175,50 @@ pub struct LinkStats {
     /// Authenticated audio packets received.
     pub audio_received: AtomicU32,
     next_ping_id: AtomicU32,
-    /// Replay window for packets from the server; survives engine restarts.
-    pub replay: Mutex<ReplayWindow>,
+    /// Survives engine restarts (device change) within one session.
+    replay: Mutex<SessionReplay>,
     history: Mutex<History>,
 }
 
 impl LinkStats {
-    /// New session (server counters start at 0 again).
+    /// New session (new key, server counters start at 0 again).
     pub fn reset(&self) {
+        let mut r = self.replay.lock().unwrap();
+        r.id = r.id.wrapping_add(1);
+        r.started = Instant::now();
+        r.window = ReplayWindow::default();
+        self.history.lock().unwrap().clear();
         self.audio_sent.store(0, Ordering::Relaxed);
         self.audio_received.store(0, Ordering::Relaxed);
-        *self.replay.lock().unwrap() = ReplayWindow::default();
-        self.history.lock().unwrap().clear();
+    }
+
+    /// Current session id; a receive thread takes it once at start.
+    pub fn session(&self) -> u64 {
+        self.replay.lock().unwrap().id
+    }
+
+    /// Replay check for `session`. `None`: that session is over, the caller must stop.
+    pub fn accept(&self, session: u64, counter: u64) -> Option<bool> {
+        let mut r = self.replay.lock().unwrap();
+        (r.id == session).then(|| r.window.accept(counter))
     }
 
     pub fn next_ping_id(&self) -> u32 {
         self.next_ping_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    pub fn record(&self, s: Sample) {
-        self.history.lock().unwrap().push(s);
+    /// Ignored when `session` is no longer the current one.
+    pub fn record(&self, session: u64, s: Sample) {
+        let r = self.replay.lock().unwrap();
+        if r.id == session {
+            self.history.lock().unwrap().push(s);
+        }
     }
 
     pub fn view(&self, now: Instant) -> (Vec<(f32, f32)>, Summary) {
+        let r = self.replay.lock().unwrap();
         let h = self.history.lock().unwrap();
-        (h.points(now), h.summary())
+        (h.points(now), h.summary(now, r.started))
     }
 }
 
@@ -254,7 +314,7 @@ mod tests {
     fn summary_average_jitter_and_loss() {
         let t = Instant::now();
         let mut h = History::default();
-        assert_eq!(h.summary(), Summary::default());
+        assert_eq!(h.summary(t, t), Summary::default());
         h.push(sample(
             t,
             40.0,
@@ -281,12 +341,56 @@ mod tests {
                 received: 40,
             },
         ));
-        let s = h.summary();
+        let s = h.summary(t + Duration::from_secs(5), t);
+        assert_eq!(s.stale_secs, None);
         assert_eq!(s.last_ms, Some(50.0));
         assert_eq!(s.average_ms, Some(50.0));
         assert_eq!(s.jitter_ms, Some(15.0));
         assert_eq!(s.outbound_loss, Some(5.0));
         assert_eq!(s.inbound_loss, Some(20.0));
+    }
+
+    #[test]
+    fn summary_goes_stale_without_pongs() {
+        let t = Instant::now();
+        let mut h = History::default();
+        let silent = h.summary(t + STALE_AFTER + Duration::from_secs(1), t);
+        assert!(silent.stale_secs.is_some(), "never answered");
+        for i in 0..5 {
+            h.push(sample(
+                t + Duration::from_secs(i * 2),
+                6.0,
+                Counters::default(),
+            ));
+        }
+        let last = t + Duration::from_secs(8);
+        assert_eq!(
+            h.summary(last + Duration::from_secs(1), t).last_ms,
+            Some(6.0)
+        );
+        let s = h.summary(last + STALE_AFTER + Duration::from_secs(1), t);
+        assert!(s.stale_secs.is_some());
+        assert_eq!(s.last_ms, None, "no fresh ping to show");
+        let s = h.summary(last + HISTORY + Duration::from_secs(1), t);
+        assert_eq!(s.average_ms, None, "old samples drop out of the summary");
+        assert_eq!(s.outbound_loss, None);
+    }
+
+    #[test]
+    fn old_session_cannot_touch_new_replay_window() {
+        let link = LinkStats::default();
+        let old = link.session();
+        assert_eq!(link.accept(old, 5), Some(true));
+        link.reset();
+        let new = link.session();
+        assert_ne!(old, new);
+        // A late packet of the old receive thread with a huge counter.
+        assert_eq!(link.accept(old, 1_000_000), None, "old thread must stop");
+        assert_eq!(link.accept(new, 1), Some(true), "new session starts fresh");
+        link.record(old, sample(Instant::now(), 1.0, Counters::default()));
+        assert!(link.view(Instant::now()).0.is_empty(), "old sample ignored");
+        link.record(new, sample(Instant::now(), 1.0, Counters::default()));
+        assert_eq!(link.view(Instant::now()).0.len(), 1);
     }
 
     #[test]
