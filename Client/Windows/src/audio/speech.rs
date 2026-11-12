@@ -7,13 +7,18 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+#[cfg(windows)]
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use rusttalk_shared::audio_packet::SAMPLE_RATE;
+#[cfg(windows)]
 use windows::core::HSTRING;
+#[cfg(windows)]
 use windows::Media::SpeechSynthesis::{SpeechSynthesizer, VoiceInformation};
+#[cfg(windows)]
 use windows::Storage::Streams::DataReader;
 
 use super::resample::Resampler;
@@ -31,7 +36,7 @@ const MAX_DISK_CLIPS: usize = 500;
 /// The speech model is unloaded after this long without work.
 const MODEL_IDLE: Duration = Duration::from_secs(90);
 
-/// An installed Windows voice.
+/// An installed system voice (Windows only).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Voice {
     pub name: String,
@@ -40,6 +45,7 @@ pub struct Voice {
 }
 
 /// The installed voices (asked once).
+#[cfg(windows)]
 pub fn voices() -> &'static [Voice] {
     static VOICES: OnceLock<Vec<Voice>> = OnceLock::new();
     VOICES.get_or_init(|| {
@@ -57,11 +63,14 @@ pub fn voices() -> &'static [Voice] {
     })
 }
 
+#[cfg(not(windows))]
+pub fn voices() -> &'static [Voice] { &[] }
+
 struct Job {
     name: String,
     joined: bool,
     /// Voice id from the config: a Windows voice name, "neural:<preset>", or
-    /// None for the Windows default voice.
+    /// None for the platform default voice.
     voice: Option<String>,
     /// Language of the sentence for natural voices ("en" / "de"); Windows
     /// voices speak their own language.
@@ -99,7 +108,7 @@ impl Announcer {
     /// Makes both clips for `name` ahead of time. Only natural voices need
     /// this (they take about a second per new name; Windows voices are instant).
     pub fn prepare(&self, name: &str, voice: Option<&str>, lang: &str) {
-        if voice.is_some_and(|v| voice_pack::neural_id(v).is_some()) {
+        if natural_voice(voice).is_some() && voice_pack::installed_in(&voice_pack::dir()) {
             self.send(name, true, voice, lang, false);
             self.send(name, false, voice, lang, false);
         }
@@ -166,18 +175,24 @@ fn worker(rx: mpsc::Receiver<Job>, queue: SfxQueue) {
     }
 }
 
+/// Linux has no system voice; an unset or old system voice uses the natural default.
+fn natural_voice(voice: Option<&str>) -> Option<&'static str> {
+    voice.and_then(voice_pack::neural_id)
+        .or_else(|| if cfg!(windows) { None } else { voice_pack::neural_id(voice_pack::DEFAULT_VOICE) })
+}
+
 /// Makes the clip for a job: with the natural voice if it is chosen and
 /// installed, otherwise with a Windows voice.
 fn make_clip(job: &Job, model: &mut Option<Neural>) -> anyhow::Result<Vec<f32>> {
-    let preset = job.voice.as_deref().and_then(voice_pack::neural_id);
+    let preset = natural_voice(job.voice.as_deref());
     let dir = voice_pack::dir();
     match preset {
         Some(preset) if voice_pack::installed_in(&dir) => {
             neural_clip(model, &dir, &voice_pack::cache_dir(), preset, &job.lang, &phrase(&job.name, job.joined, &job.lang))
         }
         // Natural voice chosen but the pack is gone: Windows default voice.
-        Some(_) => windows_clip(&job.name, job.joined, None),
-        None => windows_clip(&job.name, job.joined, job.voice.as_deref()),
+        Some(_) => system_clip(&job.name, job.joined, None),
+        None => system_clip(&job.name, job.joined, job.voice.as_deref()),
     }
 }
 
@@ -242,8 +257,9 @@ fn phrase(name: &str, joined: bool, language: &str) -> String {
     }
 }
 
-/// A clip from a Windows voice (None = the default voice).
-fn windows_clip(name: &str, joined: bool, voice: Option<&str>) -> anyhow::Result<Vec<f32>> {
+/// A clip from the system voice (Windows only).
+#[cfg(windows)]
+fn system_clip(name: &str, joined: bool, voice: Option<&str>) -> anyhow::Result<Vec<f32>> {
     let synth = SpeechSynthesizer::new()?;
     if let Some(wanted) = voice {
         let found: Option<VoiceInformation> =
@@ -265,6 +281,11 @@ fn windows_clip(name: &str, joined: bool, voice: Option<&str>) -> anyhow::Result
 
     let (rate, pcm) = parse_wav(&wav)?;
     Ok(polish(rate, &pcm))
+}
+
+#[cfg(not(windows))]
+fn system_clip(_: &str, _: bool, _: Option<&str>) -> anyhow::Result<Vec<f32>> {
+    anyhow::bail!("Download natural voices in Settings > Notifications to enable spoken names")
 }
 
 /// Reads a PCM-16 WAV file: (sample rate, first channel as -1..1).
@@ -331,6 +352,17 @@ fn polish(rate: u32, pcm: &[f32]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(not(windows))]
+    fn linux_uses_natural_voices() {
+        assert!(voices().is_empty());
+        assert_eq!(natural_voice(None), Some("F1"));
+        assert_eq!(natural_voice(Some("Microsoft Zira")), Some("F1"));
+        assert_eq!(natural_voice(Some("neural:M3")), Some("M3"));
+        let error = system_clip("Alex", true, None).unwrap_err();
+        assert!(error.to_string().contains("Download natural voices"));
+    }
 
     #[test]
     fn names_become_speakable() {
@@ -404,13 +436,14 @@ mod tests {
     /// writes `target/sfx-preview/join_<voice>.wav` (chime + name) per voice.
     #[test]
     #[ignore]
+    #[cfg(windows)]
     fn dump_speech() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/sfx-preview");
         std::fs::create_dir_all(&dir).unwrap();
         assert!(!voices().is_empty(), "no Windows voice installed");
         for v in voices() {
             for (joined, sound) in [(true, sfx::Sound::Join), (false, sfx::Sound::Leave)] {
-                let clip = windows_clip("Phil", joined, Some(&v.name)).unwrap();
+                let clip = system_clip("Phil", joined, Some(&v.name)).unwrap();
                 assert!(clip.len() > SAMPLE_RATE as usize / 5, "{}: {} samples", v.name, clip.len());
                 // Mixed exactly like the output callback does it.
                 let q: SfxQueue = Default::default();

@@ -5,21 +5,45 @@
 //! (`device_query`, `GetAsyncKeyState` on Windows). No keyboard hook: the
 //! key still reaches other apps, no admin rights needed.
 
+#[cfg(windows)]
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+#[cfg(windows)]
 use std::time::Duration;
 
+#[cfg(windows)]
 use device_query::{DeviceQuery, DeviceState, Keycode};
 use eframe::egui;
 
 use crate::audio::AudioControl;
 
-/// What has to be held down to talk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PttBinding {
+pub enum Button {
     Key(egui::Key),
-    /// Side mouse button: 4 = back (XBUTTON1), 5 = forward (XBUTTON2).
     Mouse(u8),
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Modifiers {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+}
+
+impl From<egui::Modifiers> for Modifiers {
+    fn from(value: egui::Modifiers) -> Self {
+        Self {
+            ctrl: value.ctrl,
+            alt: value.alt,
+            shift: value.shift,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PttBinding {
+    pub button: Button,
+    pub modifiers: Modifiers,
 }
 
 /// Config name for a side mouse button ("Mouse4" / "Mouse5").
@@ -33,26 +57,104 @@ pub fn mouse_name(button: egui::PointerButton) -> Option<&'static str> {
 
 /// Parses `config.ptt_key` (egui key name, legacy uppercase names, "Mouse4/5").
 pub fn parse_binding(name: &str) -> Option<PttBinding> {
-    match name.trim().to_ascii_lowercase().as_str() {
-        "mouse4" => Some(PttBinding::Mouse(4)),
-        "mouse5" => Some(PttBinding::Mouse(5)),
-        _ => key_from_name(name).map(PttBinding::Key),
+    let mut parts = name.trim().rsplitn(2, '+');
+    let button = parts.next()?.trim();
+    let mut binding = match button.to_ascii_lowercase().as_str() {
+        "mouse4" => PttBinding::mouse(4),
+        "mouse5" => PttBinding::mouse(5),
+        _ => PttBinding::key(key_from_name(button)?),
+    };
+    if let Some(prefix) = parts.next() {
+        for modifier in prefix.split('+') {
+            let flag = match modifier.trim().to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => &mut binding.modifiers.ctrl,
+                "alt" => &mut binding.modifiers.alt,
+                "shift" => &mut binding.modifiers.shift,
+                _ => return None,
+            };
+            if *flag {
+                return None;
+            }
+            *flag = true;
+        }
     }
+    Some(binding)
 }
 
 impl PttBinding {
-    /// Held down in this egui frame (window focused).
-    pub fn is_down_in(&self, input: &egui::InputState) -> bool {
-        match self {
-            PttBinding::Key(k) => input.key_down(*k),
-            PttBinding::Mouse(4) => input.pointer.button_down(egui::PointerButton::Extra1),
-            PttBinding::Mouse(5) => input.pointer.button_down(egui::PointerButton::Extra2),
-            PttBinding::Mouse(_) => false,
+    pub fn key(key: egui::Key) -> Self {
+        Self {
+            button: Button::Key(key),
+            modifiers: Modifiers::default(),
         }
+    }
+
+    pub fn mouse(button: u8) -> Self {
+        Self {
+            button: Button::Mouse(button),
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    pub fn name(self) -> String {
+        let mut name = String::new();
+        for (held, label) in [
+            (self.modifiers.ctrl, "Ctrl+"),
+            (self.modifiers.alt, "Alt+"),
+            (self.modifiers.shift, "Shift+"),
+        ] {
+            if held {
+                name.push_str(label);
+            }
+        }
+        name.push_str(&match self.button {
+            Button::Key(key) => key.name().to_string(),
+            Button::Mouse(button) => format!("Mouse{button}"),
+        });
+        name
+    }
+
+    /// Exact modifiers prevent F8 from also firing for Ctrl+F8.
+    pub fn is_down_in(&self, input: &egui::InputState) -> bool {
+        self.modifiers == Modifiers::from(input.modifiers)
+            && match self.button {
+                Button::Key(k) => input.key_down(k),
+                Button::Mouse(4) => input.pointer.button_down(egui::PointerButton::Extra1),
+                Button::Mouse(5) => input.pointer.button_down(egui::PointerButton::Extra2),
+                Button::Mouse(_) => false,
+            }
     }
 }
 
+/// Capture the event's modifiers, not the state at the end of the frame.
+pub fn recorded_binding(event: &egui::Event) -> Option<Option<String>> {
+    let (mut binding, modifiers) = match event {
+        egui::Event::Key {
+            key: egui::Key::Escape,
+            pressed: true,
+            ..
+        } => return Some(None),
+        egui::Event::Key {
+            key,
+            pressed: true,
+            repeat: false,
+            modifiers,
+            ..
+        } => (PttBinding::key(*key), *modifiers),
+        egui::Event::PointerButton {
+            button,
+            pressed: true,
+            modifiers,
+            ..
+        } => (parse_binding(mouse_name(*button)?)?, *modifiers),
+        _ => return None,
+    };
+    binding.modifiers = modifiers.into();
+    Some(Some(binding.name()))
+}
+
 /// egui key -> OS key code for the global poller (US key positions).
+#[cfg(windows)]
 pub fn keycode_for(key: egui::Key) -> Option<Keycode> {
     use egui::Key as E;
     use Keycode as K;
@@ -143,32 +245,149 @@ pub fn keycode_for(key: egui::Key) -> Option<Keycode> {
     })
 }
 
-/// Shared with the poller: `Some` = global PTT on with this binding.
-pub type GlobalBinding = Arc<Mutex<Option<PttBinding>>>;
-
-/// Starts the poller thread (runs for the app's lifetime, ~10 ms tick).
-/// While the binding is `Some`, it alone sets `control.ptt_pressed`.
-pub fn spawn_global_ptt(control: Arc<AudioControl>) -> GlobalBinding {
-    let binding: GlobalBinding = Arc::new(Mutex::new(None));
-    let shared = binding.clone();
-    let _ = std::thread::Builder::new().name("global-ptt".into()).spawn(move || {
-        let state = DeviceState::new();
-        loop {
-            let current = *shared.lock().unwrap();
-            let Some(b) = current else {
-                std::thread::sleep(Duration::from_millis(50));
-                continue;
-            };
-            let down = match b {
-                PttBinding::Key(k) => keycode_for(k).is_some_and(|code| state.get_keys().contains(&code)),
-                PttBinding::Mouse(n) => state.get_mouse().button_pressed.get(n as usize).copied().unwrap_or(false),
-            };
-            control.ptt_pressed.store(down, Ordering::Relaxed);
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    });
-    binding
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    PushToTalk,
+    Mute,
+    Deafen,
 }
+impl Action {
+    pub const ALL: [Self; 3] = [Self::PushToTalk, Self::Mute, Self::Deafen];
+    pub fn index(self) -> usize {
+        self as usize
+    }
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::PushToTalk => "push-to-talk",
+            Self::Mute => "toggle-mute",
+            Self::Deafen => "toggle-deafen",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PushToTalk => "Push to talk",
+            Self::Mute => "Toggle mute",
+            Self::Deafen => "Toggle deafen",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Bindings {
+    pub keys: [Option<PttBinding>; 3],
+    pub generation: u64,
+}
+impl Bindings {
+    pub fn set(&mut self, keys: [Option<PttBinding>; 3]) -> bool {
+        if self.keys == keys {
+            return false;
+        }
+        self.keys = keys;
+        self.generation = self.generation.wrapping_add(1);
+        true
+    }
+    pub fn is_empty(self) -> bool {
+        self.keys.iter().all(Option::is_none)
+    }
+}
+pub type GlobalBinding = Arc<Mutex<Bindings>>;
+#[derive(Debug, Clone, Copy)]
+pub struct Event {
+    pub action: Action,
+    pub generation: u64,
+}
+
+/// Shared edge logic is tested on Linux too, even though Windows polls OS state.
+#[cfg(any(windows, test))]
+#[derive(Default)]
+struct KeyEdges {
+    generation: Option<u64>,
+    down: [bool; 3],
+}
+#[cfg(any(windows, test))]
+impl KeyEdges {
+    fn poll(&mut self, bindings: Bindings, down: [bool; 3]) -> [bool; 3] {
+        let mut pressed = [false; 3];
+        if self.generation == Some(bindings.generation) {
+            for i in 0..3 {
+                pressed[i] = bindings.keys[i].is_some() && down[i] && !self.down[i];
+            }
+        }
+        self.generation = Some(bindings.generation);
+        self.down = down;
+        pressed
+    }
+}
+
+#[cfg(windows)]
+pub fn spawn_global_ptt(
+    control: Arc<AudioControl>,
+) -> (GlobalBinding, std::sync::mpsc::Receiver<Event>) {
+    let binding: GlobalBinding = Arc::new(Mutex::new(Bindings::default()));
+    let shared = binding.clone();
+    let (tx, rx) = std::sync::mpsc::sync_channel(16);
+    let _ = std::thread::Builder::new()
+        .name("global-shortcuts".into())
+        .spawn(move || {
+            let state = DeviceState::new();
+            let mut edges = KeyEdges::default();
+            loop {
+                let current = *shared.lock().unwrap();
+                if current.is_empty() {
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+                let keys = state.get_keys();
+                let mouse = state.get_mouse();
+                let modifiers = Modifiers {
+                    ctrl: keys.contains(&Keycode::LControl) || keys.contains(&Keycode::RControl),
+                    alt: keys.contains(&Keycode::LAlt) || keys.contains(&Keycode::RAlt),
+                    shift: keys.contains(&Keycode::LShift) || keys.contains(&Keycode::RShift),
+                };
+                let down = current.keys.map(|binding| {
+                    binding.is_some_and(|binding| {
+                        binding.modifiers == modifiers
+                            && !keys.contains(&Keycode::LMeta)
+                            && !keys.contains(&Keycode::RMeta)
+                            && match binding.button {
+                                Button::Key(k) => {
+                                    keycode_for(k).is_some_and(|code| keys.contains(&code))
+                                }
+                                Button::Mouse(n) => mouse
+                                    .button_pressed
+                                    .get(n as usize)
+                                    .copied()
+                                    .unwrap_or(false),
+                            }
+                    })
+                });
+                let pressed = edges.poll(current, down);
+                let active = shared.lock().unwrap();
+                if *active == current {
+                    if current.keys[0].is_some() {
+                        control.ptt_pressed.store(down[0], Ordering::Relaxed);
+                    }
+                    for action in [Action::Mute, Action::Deafen] {
+                        if pressed[action.index()] {
+                            let _ = tx.try_send(Event {
+                                action,
+                                generation: current.generation,
+                            });
+                        }
+                    }
+                }
+                drop(active);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+    (binding, rx)
+}
+
+#[cfg(target_os = "linux")]
+#[path = "linux/hotkey.rs"]
+mod wayland;
+#[cfg(target_os = "linux")]
+pub use wayland::{shutdown_global_ptt, spawn_global_ptt, status};
 
 /// Maps a config string to an egui key.
 pub fn key_from_name(name: &str) -> Option<egui::Key> {
@@ -235,6 +454,115 @@ mod tests {
     use super::*;
 
     #[test]
+    fn chords_record_roundtrip_and_match_exact_modifiers() {
+        let event = egui::Event::Key {
+            key: egui::Key::F8,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        };
+        assert_eq!(recorded_binding(&event), Some(Some("Ctrl+F8".into())));
+        for name in [
+            "F8",
+            "Ctrl+F8",
+            "Ctrl+Alt+Shift+F8",
+            "Alt+Mouse5",
+            "Shift+Plus",
+        ] {
+            let binding = parse_binding(name).unwrap();
+            assert_eq!(parse_binding(&binding.name()), Some(binding));
+        }
+        assert_eq!(
+            parse_binding("shift+control+F8"),
+            parse_binding("Ctrl+Shift+F8")
+        );
+        for name in [
+            "Ctrl+",
+            "Ctrl+Ctrl+F8",
+            "Unknown+F8",
+            "Ctrl++F8",
+            "Alt+Mouse9",
+        ] {
+            assert_eq!(parse_binding(name), None, "{name}");
+        }
+        let ctrl = parse_binding("Ctrl+F8").unwrap();
+        let plain = parse_binding("F8").unwrap();
+        let context = egui::Context::default();
+        let raw = egui::RawInput {
+            modifiers: egui::Modifiers::CTRL,
+            events: vec![event],
+            ..Default::default()
+        };
+        let _ = context.run(raw, |ctx| {
+            ctx.input(|input| {
+                assert!(ctrl.is_down_in(input));
+                assert!(!plain.is_down_in(input));
+            })
+        });
+        let raw = egui::RawInput {
+            modifiers: egui::Modifiers::NONE,
+            ..Default::default()
+        };
+        let _ = context.run(raw, |ctx| {
+            ctx.input(|input| {
+                assert!(!ctrl.is_down_in(input), "releasing Ctrl releases the chord");
+                assert!(plain.is_down_in(input));
+            })
+        });
+        let mouse = egui::Event::PointerButton {
+            pos: egui::Pos2::ZERO,
+            button: egui::PointerButton::Extra2,
+            pressed: true,
+            modifiers: egui::Modifiers::ALT,
+        };
+        assert_eq!(recorded_binding(&mouse), Some(Some("Alt+Mouse5".into())));
+    }
+
+    #[test]
+    fn toggle_edges_fire_once_and_rebinding_does_not_toggle_held_keys() {
+        let mut bindings = Bindings::default();
+        bindings.set([
+            None,
+            Some(PttBinding::key(egui::Key::F10)),
+            Some(PttBinding::mouse(5)),
+        ]);
+        let mut edges = KeyEdges::default();
+        assert_eq!(edges.poll(bindings, [false; 3]), [false; 3]);
+        assert_eq!(
+            edges.poll(bindings, [false, true, false]),
+            [false, true, false]
+        );
+        assert_eq!(
+            edges.poll(bindings, [false, true, false]),
+            [false; 3],
+            "holding does not repeat"
+        );
+        assert_eq!(
+            edges.poll(bindings, [false, false, true]),
+            [false, false, true]
+        );
+        let old_generation = bindings.generation;
+        bindings.set([None; 3]);
+        assert_ne!(
+            old_generation, bindings.generation,
+            "queued events become stale on disconnect/recording"
+        );
+        assert_eq!(edges.poll(bindings, [false; 3]), [false; 3]);
+        bindings.set([None, Some(PttBinding::key(egui::Key::F10)), None]);
+        assert_eq!(
+            edges.poll(bindings, [false, true, false]),
+            [false; 3],
+            "already-held key must be released first"
+        );
+        edges.poll(bindings, [false; 3]);
+        assert_eq!(
+            edges.poll(bindings, [false, true, false]),
+            [false, true, false]
+        );
+    }
+
+    #[test]
     fn key_mapping_letters() {
         assert_eq!(key_from_name("v"), Some(egui::Key::V));
         assert_eq!(key_from_name("A"), Some(egui::Key::A));
@@ -247,16 +575,22 @@ mod tests {
     #[test]
     fn keybind_roundtrip_via_egui_names() {
         // What the settings store (key.name()) must map back to the key.
-        for k in [egui::Key::V, egui::Key::Space, egui::Key::F8, egui::Key::Backtick, egui::Key::Num3] {
+        for k in [
+            egui::Key::V,
+            egui::Key::Space,
+            egui::Key::F8,
+            egui::Key::Backtick,
+            egui::Key::Num3,
+        ] {
             assert_eq!(key_from_name(k.name()), Some(k), "{}", k.name());
         }
     }
 
     #[test]
     fn bindings_parse_keys_and_mouse_buttons() {
-        assert_eq!(parse_binding("V"), Some(PttBinding::Key(egui::Key::V)));
-        assert_eq!(parse_binding("Mouse4"), Some(PttBinding::Mouse(4)));
-        assert_eq!(parse_binding("mouse5"), Some(PttBinding::Mouse(5)));
+        assert_eq!(parse_binding("V"), Some(PttBinding::key(egui::Key::V)));
+        assert_eq!(parse_binding("Mouse4"), Some(PttBinding::mouse(4)));
+        assert_eq!(parse_binding("mouse5"), Some(PttBinding::mouse(5)));
         assert_eq!(parse_binding("Mouse9"), None);
         assert_eq!(mouse_name(egui::PointerButton::Extra1), Some("Mouse4"));
         assert_eq!(mouse_name(egui::PointerButton::Primary), None);
@@ -266,16 +600,28 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn os_key_and_mouse_state_can_be_queried() {
         // What the poller thread does every 10 ms (must not panic, mouse has buttons 1-5).
         let state = DeviceState::new();
         let _ = state.get_keys();
-        assert!(state.get_mouse().button_pressed.len() >= 6, "index 4/5 = side buttons");
+        assert!(
+            state.get_mouse().button_pressed.len() >= 6,
+            "index 4/5 = side buttons"
+        );
     }
 
     #[test]
+    #[cfg(windows)]
     fn common_ptt_keys_have_os_keycodes() {
-        for k in [egui::Key::V, egui::Key::Space, egui::Key::F8, egui::Key::Backtick, egui::Key::Num3, egui::Key::PageUp] {
+        for k in [
+            egui::Key::V,
+            egui::Key::Space,
+            egui::Key::F8,
+            egui::Key::Backtick,
+            egui::Key::Num3,
+            egui::Key::PageUp,
+        ] {
             assert!(keycode_for(k).is_some(), "{k:?}");
         }
         assert_eq!(keycode_for(egui::Key::Backtick), Some(Keycode::Grave));

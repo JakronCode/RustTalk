@@ -7,8 +7,8 @@ Guidance for AI coding agents (and humans) working on RustTalk. `CLAUDE.md` poin
 Lightweight, local-first voice chat written in Rust: a Discord-style client with a TeamSpeak-style self-hosted server. No online accounts, no cloud, no telemetry. Whoever runs a server owns the data on it.
 
 - **Server** (`Server/`): single Rust binary plus `server.toml`, runs on Linux (also builds for Windows) under a hardened systemd unit. One port, 7331 TCP+UDP. State in RAM plus SQLite (`rusqlite`, WAL).
-- **Client** (`Client/Windows/`): egui/eframe app for Windows.
-- **Shared** (`shared/`): protocol (`protocol.rs`, currently v13), framing, `secure.rs` (TLS pinning and UDP packet encryption), UDP packet format, release/update helpers.
+- **Client** (`Client/Windows/`): egui/eframe app. Windows is the main target; the same crate also builds on Linux (`src/linux/`, AppImage, PipeWire/GStreamer capture).
+- **Shared** (`shared/`): protocol (`protocol.rs`, currently v14), framing, `secure.rs` (TLS pinning and UDP packet encryption), UDP packet format, release/update helpers.
 - **Transport**: TCP carries the control channel (TLS, length-prefixed `bincode`): login, channels, chat, images, video frames, moderation. UDP carries Opus audio only, sealed with ChaCha20-Poly1305 using a per-session key delivered over TLS.
 - **Identity**: each client holds a secret identity. The server stores only its hash. Roles (Member / Moderator / Admin), bans and invites hang on the identity, not the username.
 - **Updates**: client and server check GitHub releases. The server never installs anything by itself (the service user cannot write its own binary). Updates are SHA-256 verified.
@@ -22,8 +22,9 @@ shared/            protocol, framing, secure, UDP packet format
 Server/src/        main, config, state, db, tcp, udp, tls, moderation, gif, update
 Server/tests/      integration tests (real server process + synthetic clients)
 Server/deploy/     systemd unit + install script
-Client/Windows/    egui client (app/, audio/, net, media, video, update, ...)
-.github/workflows/ release.yml
+Client/Windows/    egui client (app/, audio/, linux/, net, media, video, update, ...)
+packaging/ scripts/  Linux AppImage packaging
+.github/workflows/ build.yml (test + build matrix), release.yml
 ```
 
 ## Issue board first (avoid duplicate work)
@@ -82,11 +83,11 @@ Changing `shared/src/protocol.rs` or the wire format means bumping `PROTOCOL_VER
 
 ## Working in this repo
 
-- **Read the task runner first.** There is no Makefile. The scripts that carry the project's flags are `Server/Test_Scripts/run_tests.sh`, `Server/Test_Scripts/e2e_local.sh`, `Client/Windows/Test_Scripts/*.ps1`. CI is `.github/workflows/release.yml`. Use `--locked`.
+- **Read the task runner first.** There is no Makefile. The scripts that carry the project's flags are `Server/Test_Scripts/run_tests.sh`, `Server/Test_Scripts/e2e_local.sh`, `Client/Windows/Test_Scripts/*.ps1` and `scripts/package-linux.sh`. CI is `.github/workflows/build.yml`. Use `--locked`.
 - **Run tests serially where required.** Integration tests share TLS files and run with a single thread in CI.
 - **Quality gate before saying "done":** `cargo test --locked` for the touched crates (`bash Server/Test_Scripts/run_tests.sh` for the server), `cargo clippy` clean for new code, `cargo fmt`. Report failures honestly, with the output.
 - **Releases:** bump the version in `Client/Windows/Cargo.toml`, `Server/Cargo.toml` and `shared/Cargo.toml` together, then tag `vX.Y.Z`. The release workflow checks the versions match.
-- **Platform split:** keep Windows-only code behind `cfg(windows)` so shared UI and networking code stays portable.
+- **Platform split:** Windows-only code stays behind `cfg(windows)`, Linux-only code in `Client/Windows/src/linux/`. Don't break either target. UI and networking code is shared.
 - **Conventions:** Rust 2021. User-visible text and docs in English; some existing comments and `Konzept.md` are German, so match the file you are editing. Keep the README feature list, protocol version and known limitations accurate when behaviour changes.
 - **Comments:** keep them sparse. One line is usually enough, and only where the code can't say it (the why, not the what). No multi-paragraph comment blocks, no commented-out code, no restating the code.
 - **Small, focused changes.** One concern per branch and PR, with the issue number in it.

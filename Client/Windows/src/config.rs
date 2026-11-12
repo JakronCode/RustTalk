@@ -25,6 +25,10 @@ pub struct ClientConfig {
     #[serde(default = "default_ptt_key")]
     pub ptt_key: String,
     #[serde(default)]
+    pub mute_key: Option<String>,
+    #[serde(default)]
+    pub deafen_key: Option<String>,
+    #[serde(default)]
     pub voice_activation: bool,
     #[serde(default = "default_vad_threshold")]
     pub vad_threshold: f32,
@@ -129,7 +133,7 @@ fn default_server_address() -> String {
     format!("127.0.0.1:{}", rusttalk_shared::protocol::DEFAULT_PORT)
 }
 fn default_ptt_key() -> String {
-    "V".to_string()
+    "F8".to_string()
 }
 fn default_vad_threshold() -> f32 {
     0.02
@@ -151,6 +155,8 @@ impl Default for ClientConfig {
             server_address: default_server_address(),
             server_password: None,
             ptt_key: default_ptt_key(),
+            mute_key: None,
+            deafen_key: None,
             voice_activation: false,
             vad_threshold: default_vad_threshold(),
             noise_suppression: true,
@@ -216,7 +222,10 @@ impl ClientConfig {
         let mut bytes = [0u8; 32];
         if getrandom::fill(&mut bytes).is_err() {
             // Practically impossible; fall back to time + address entropy.
-            let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
             for (i, b) in bytes.iter_mut().enumerate() {
                 *b = ((seed >> ((i % 16) * 8)) as u8) ^ (i as u8).wrapping_mul(97);
             }
@@ -253,6 +262,8 @@ mod tests {
             server_address: "10.69.40.101:7331".into(),
             server_password: Some("x".into()),
             ptt_key: "SPACE".into(),
+            mute_key: Some("F10".into()),
+            deafen_key: Some("Mouse5".into()),
             voice_activation: true,
             vad_threshold: 0.05,
             noise_suppression: false,
@@ -260,8 +271,16 @@ mod tests {
             echo_cancellation: false,
             share_screen_audio: false,
             bookmarks: vec![
-                ServerBookmark { name: "Home".into(), address: "10.69.40.101:7331".into(), password: None },
-                ServerBookmark { name: "LAN".into(), address: "192.168.1.5".into(), password: Some("pw".into()) },
+                ServerBookmark {
+                    name: "Home".into(),
+                    address: "10.69.40.101:7331".into(),
+                    password: None,
+                },
+                ServerBookmark {
+                    name: "LAN".into(),
+                    address: "192.168.1.5".into(),
+                    password: Some("pw".into()),
+                },
             ],
             input_device: Some("Mikro".into()),
             output_device: None,
@@ -294,6 +313,8 @@ mod tests {
         let text = toml::to_string_pretty(&cfg).unwrap();
         let back: ClientConfig = toml::from_str(&text).unwrap();
         assert_eq!(back.username, "jb");
+        assert_eq!(back.mute_key.as_deref(), Some("F10"));
+        assert_eq!(back.deafen_key.as_deref(), Some("Mouse5"));
         assert_eq!(back.bookmarks.len(), 2);
         assert_eq!(back.bookmarks[0].name, "Home");
         assert_eq!(back.bookmarks[1].password.as_deref(), Some("pw"));
@@ -331,7 +352,8 @@ mod tests {
     fn empty_file_yields_defaults() {
         let cfg: ClientConfig = toml::from_str("").unwrap();
         assert_eq!(cfg.username, "User");
-        assert_eq!(cfg.ptt_key, "V");
+        assert_eq!(cfg.ptt_key, "F8");
+        assert!(cfg.mute_key.is_none() && cfg.deafen_key.is_none());
         assert!(!cfg.voice_activation);
         assert!(cfg.noise_suppression, "Rauschunterdrueckung default an");
         assert!(cfg.auto_gain, "Auto-Lautstaerke default an (alte Configs ohne Feld)");

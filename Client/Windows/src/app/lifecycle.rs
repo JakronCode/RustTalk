@@ -99,7 +99,7 @@ impl RustTalkApp {
                             );
                             if install.clicked() {
                                 match install::install(screen.desktop_shortcut) {
-                                    Ok(exe) => match std::process::Command::new(&exe).spawn() {
+                                    Ok(exe) => match update::restart(&exe) {
                                         Ok(_) => done = true,
                                         Err(e) => screen.error = Some(format!("Installed, but could not start it: {e}")),
                                     },
@@ -173,7 +173,7 @@ impl RustTalkApp {
                     // Restart into the new version.
                     self.config.save();
                     self.disconnect();
-                    match std::process::Command::new(&exe).spawn() {
+                    match update::restart(&exe) {
                         Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                         Err(e) => {
                             self.update.installing = false;

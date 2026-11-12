@@ -221,6 +221,8 @@ impl RustTalkApp {
         index: u32,
         cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
     ) {
+        // Invalidate callbacks from the previous device before replacing its preview.
+        self.video_epoch[epoch_slot(VideoKind::Camera)].fetch_add(1, Ordering::Relaxed);
         self.cam = None; // alten Thread stoppen
         *self.local_preview.lock().unwrap() = None;
         if let Some(d) = &mut self.cam_dialog {
@@ -248,6 +250,11 @@ impl RustTalkApp {
             self.after_source_stopped(VideoKind::Screen, cmd_tx);
             return;
         }
+        #[cfg(target_os = "linux")]
+        {
+            self.start_screen_share(ShareSource::Monitor(0), cmd_tx);
+        }
+        #[cfg(not(target_os = "linux"))]
         if self.screen_picker.is_none() {
             self.screen_picker = Some(ScreenPicker::open());
         }
@@ -410,8 +417,15 @@ impl RustTalkApp {
     pub(super) fn make_cam_error_sink(&self) -> impl FnMut(String) + Send + 'static {
         let events = self.event_tx.clone();
         let errors = self.cam_error.clone();
+        let epochs = self.video_epoch.clone();
+        let slot = epoch_slot(VideoKind::Camera);
+        let generation = epochs[slot].load(Ordering::Relaxed);
         move |msg: String| {
-            *errors.lock().unwrap() = Some(msg.clone());
+            let mut pending = errors.lock().unwrap();
+            if epochs[slot].load(Ordering::Relaxed) != generation {
+                return;
+            }
+            *pending = Some((generation, msg.clone()));
             let _ = events.send(NetEvent::Status(msg));
         }
     }
@@ -449,6 +463,18 @@ impl RustTalkApp {
 
     /// Decoded pictures -> textures; keyframe needs -> request (max. 1/s per stream).
     pub(super) fn poll_video(&mut self, ctx: &egui::Context) {
+        let camera_error = self.cam_error.lock().unwrap().take()
+            .filter(|(generation, _)| *generation == self.video_epoch[epoch_slot(VideoKind::Camera)].load(Ordering::Relaxed));
+        if let Some((_, error)) = camera_error {
+            self.cam = None;
+            if let Some(tx) = self.cmd_tx.clone() {
+                self.after_source_stopped(VideoKind::Camera, &tx);
+            }
+            if let Some(dialog) = &mut self.cam_dialog {
+                dialog.error = Some(error.clone());
+            }
+            self.set_error(error);
+        }
         while let Ok(msg) = self.video_rx.try_recv() {
             match msg {
                 DecodeMsg::Picture(key, img) => {
@@ -491,12 +517,6 @@ impl RustTalkApp {
             self.cam_dialog = None;
             return;
         };
-        // Fehler aus dem Kamera-Thread in den Dialog uebernehmen.
-        if let Some(err) = self.cam_error.lock().unwrap().take() {
-            if let Some(d) = &mut self.cam_dialog {
-                d.error = Some(err);
-            }
-        }
         let preview = self.local_preview_texture(ctx);
         let mut open = true;
         let mut action: Option<bool> = None; // Some(true) = teilen, Some(false) = abbrechen

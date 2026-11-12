@@ -260,7 +260,8 @@ pub struct RustTalkApp {
     show_settings: bool,
     settings_page: SettingsPage,
     /// Settings: waiting for a key press to bind push-to-talk.
-    recording_key: bool,
+    recording_key: Option<hotkey::Action>,
+    keybind_error: Option<String>,
     /// Camera list for the settings (lazy, `None` = reload).
     cameras: Option<Vec<CameraDevice>>,
     channel_settings: Option<ChannelSettings>,
@@ -301,6 +302,7 @@ pub struct RustTalkApp {
     voice_pack: crate::audio::voice_pack::Pack,
     /// Binding for the global PTT poller (`None` = off / focused window only).
     global_ptt: hotkey::GlobalBinding,
+    hotkey_events: std::sync::mpsc::Receiver<hotkey::Event>,
     /// Per-user playback volume (client id -> gain), filled from `config.user_volumes`.
     user_volumes: UserVolumeMap,
     /// Pegel-Messung ohne Verbindung (Einstellungs-Fenster).
@@ -351,7 +353,7 @@ pub struct RustTalkApp {
     /// Textur der eigenen Vorschau (wird pro Frame ueberschrieben).
     local_preview_tex: Option<egui::TextureHandle>,
     /// Fehler aus dem Kamera-Thread fuer die Anzeige im Kamera-Dialog.
-    cam_error: Arc<Mutex<Option<String>>>,
+    cam_error: Arc<Mutex<Option<(u64, String)>>>,
     giphy: GifPicker,
     /// No admin on the server yet: everyone may do everything.
     open_permissions: bool,
@@ -403,7 +405,7 @@ impl RustTalkApp {
         let control = Arc::new(AudioControl::new(config.voice_activation, config.vad_threshold));
         control.set_output_volume(config.output_volume);
         control.set_input_volume(config.input_volume);
-        let global_ptt = hotkey::spawn_global_ptt(control.clone());
+        let (global_ptt, hotkey_events) = hotkey::spawn_global_ptt(control.clone());
         let (toast_tx, toast_rx) = std::sync::mpsc::channel::<u64>();
         let (video_tx, video_rx) = std::sync::mpsc::channel::<media_ui::DecodeMsg>();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -438,7 +440,8 @@ impl RustTalkApp {
             new_channel_focus: false,
             show_settings: false,
             settings_page: SettingsPage::Voice,
-            recording_key: false,
+            recording_key: None,
+            keybind_error: None,
             cameras: None,
             channel_settings: None,
             confirm_delete: None,
@@ -460,6 +463,7 @@ impl RustTalkApp {
             talking: Arc::new(Mutex::new(HashMap::new())),
             local_muted: Arc::new(Mutex::new(HashSet::new())),
             global_ptt,
+            hotkey_events,
             announcer: crate::audio::speech::Announcer::new(sfx.clone()),
             voice_pack: crate::audio::voice_pack::Pack::new(),
             sfx,
@@ -561,6 +565,8 @@ impl RustTalkApp {
     }
 
     fn disconnect(&mut self) {
+        self.global_ptt.lock().unwrap().set([None; 3]);
+        self.control.ptt_pressed.store(false, Ordering::Relaxed);
         if let Some(tx) = self.cmd_tx.take() {
             let _ = tx.send(Command::Disconnect);
         }
@@ -824,7 +830,7 @@ impl RustTalkApp {
     fn auto_voices(&mut self) {
         use crate::audio::voice_pack::{self, State};
         static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        let allowed = crate::install::mode() == crate::install::Mode::Installed || std::env::var_os("RUSTTALK_AUTO_VOICES").is_some();
+        let allowed = cfg!(windows) && (crate::install::mode() == crate::install::Mode::Installed || std::env::var_os("RUSTTALK_AUTO_VOICES").is_some());
         if allowed && self.config.auto_download_voices && !STARTED.swap(true, Ordering::Relaxed) {
             if matches!(self.voice_pack.state(), State::Missing | State::Failed(_)) {
                 self.voice_pack.download();
@@ -1332,16 +1338,37 @@ impl eframe::App for RustTalkApp {
         if self.is_connected() {
             // Push-to-talk: either the global poller (also in the background)
             // or the focused window. Never while a new key is being recorded.
-            let binding = if self.recording_key { None } else { hotkey::parse_binding(&self.config.ptt_key) };
+            let binding = if self.recording_key.is_some() { None } else { hotkey::parse_binding(&self.config.ptt_key) };
             let global = self.config.global_ptt && binding.is_some();
-            *self.global_ptt.lock().unwrap() = if global { binding } else { None };
+            let keys = if self.recording_key.is_some() { [None; 3] } else {
+                [if global { binding } else { None },
+                 self.config.mute_key.as_deref().and_then(hotkey::parse_binding),
+                 self.config.deafen_key.as_deref().and_then(hotkey::parse_binding)]
+            };
+            let generation = {
+                let mut active = self.global_ptt.lock().unwrap();
+                if active.set(keys) { self.control.ptt_pressed.store(false, Ordering::Relaxed); }
+                active.generation
+            };
+            while let Ok(event) = self.hotkey_events.try_recv() {
+                if event.generation != generation || self.recording_key.is_some() { continue; }
+                if let Some(tx) = self.cmd_tx.clone() {
+                    match event.action {
+                        hotkey::Action::Mute => self.toggle_mute(&tx),
+                        hotkey::Action::Deafen => self.toggle_deafen(&tx),
+                        hotkey::Action::PushToTalk => {},
+                    }
+                }
+            }
             if !global {
                 let pressed = binding.is_some_and(|b| ctx.input(|i| b.is_down_in(i)));
                 self.control.ptt_pressed.store(pressed, Ordering::Relaxed);
             }
             self.ui_connected(ctx);
         } else {
-            *self.global_ptt.lock().unwrap() = None;
+            self.global_ptt.lock().unwrap().set([None; 3]);
+            self.control.ptt_pressed.store(false, Ordering::Relaxed);
+            while self.hotkey_events.try_recv().is_ok() {}
             self.ui_connect(ctx);
         }
         if self.show_settings {
@@ -1371,6 +1398,8 @@ impl eframe::App for RustTalkApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        #[cfg(target_os = "linux")]
+        hotkey::shutdown_global_ptt(&self.global_ptt);
         self.config.save();
     }
 }
@@ -1398,7 +1427,7 @@ impl RustTalkApp {
         }
 
         // Share audio follows the screen share (and the setting).
-        let want_audio = self.screen.is_some() && self.config.share_screen_audio && self.audio.is_some();
+        let want_audio = cfg!(windows) && self.screen.is_some() && self.config.share_screen_audio && self.audio.is_some();
         if !want_audio {
             self.screen_audio = None;
             if self.screen.is_none() {

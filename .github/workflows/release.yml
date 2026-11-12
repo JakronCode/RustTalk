@@ -1,82 +1,40 @@
-# Builds a release when a version tag is pushed (e.g. `git tag v0.4.0 && git push origin v0.4.0`).
-#
-# Attaches to the GitHub release:
-#   rusttalk-windows.exe         client = installer (the in-app updater downloads this)
-#   rusttalk-windows.exe.sha256  checksum (the updater refuses updates without it)
-#   rusttalk-server-linux-x86_64.tar.gz  server binary + server.toml + deploy scripts
-#   rusttalk-server-linux-x86_64 (+ .sha256)   bare server binary (`rusttalk-server update` downloads this)
-#   rusttalk-server-windows.exe (+ .sha256)    the same for a Windows server
 name: Release
-
 on:
   push:
     tags: ["v*"]
-
 permissions:
-  contents: write
-
+  contents: read
 jobs:
   check-version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - name: Tag must match the Cargo version
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Tag must match every workspace package
         run: |
-          tag="${GITHUB_REF_NAME#v}"
-          for f in Client/Windows/Cargo.toml Server/Cargo.toml shared/Cargo.toml; do
-            v=$(grep -m1 '^version' "$f" | cut -d'"' -f2)
-            if [ "$v" != "$tag" ]; then
-              echo "::error::$f has version $v, tag is $GITHUB_REF_NAME"
-              exit 1
-            fi
-          done
-
-  windows-client:
+          python3 - <<'PY'
+          import os, pathlib, tomllib
+          tag = os.environ['GITHUB_REF_NAME'].removeprefix('v')
+          for name in ['Client/Windows', 'Server', 'shared']:
+              path = pathlib.Path(name) / 'Cargo.toml'
+              version = tomllib.loads(path.read_text())['package']['version']
+              assert version == tag, f'{path}: {version} does not match tag {tag}'
+          PY
+  build:
     needs: check-version
-    runs-on: windows-latest
+    uses: ./.github/workflows/build.yml
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build
-        run: cargo build --release -p rusttalk-client -p rusttalk-server
-      - name: Package
-        shell: pwsh
-        run: |
-          Copy-Item target/release/rusttalk.exe rusttalk-windows.exe
-          Copy-Item target/release/rusttalk-server.exe rusttalk-server-windows.exe
-          foreach ($f in 'rusttalk-windows.exe', 'rusttalk-server-windows.exe') {
-            $hash = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
-            "$hash  $f" | Out-File -Encoding ascii -NoNewline "$f.sha256"
-          }
-      - uses: softprops/action-gh-release@v2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          files: |
-            rusttalk-windows.exe
-            rusttalk-windows.exe.sha256
-            rusttalk-server-windows.exe
-            rusttalk-server-windows.exe.sha256
-
-  linux-server:
-    needs: check-version
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Test
-        run: cargo test -p rusttalk-shared -p rusttalk-server
-      - name: Build
-        run: cargo build --release -p rusttalk-server
-      - name: Package
-        run: |
-          mkdir -p dist/rusttalk-server
-          cp target/release/rusttalk-server Server/server.toml dist/rusttalk-server/
-          cp -r Server/deploy dist/rusttalk-server/
-          tar -C dist -czf rusttalk-server-linux-x86_64.tar.gz rusttalk-server
-          cp target/release/rusttalk-server rusttalk-server-linux-x86_64
-          sha256sum rusttalk-server-linux-x86_64 > rusttalk-server-linux-x86_64.sha256
-      - uses: softprops/action-gh-release@v2
+          pattern: rusttalk-*
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          files: |
-            rusttalk-server-linux-x86_64.tar.gz
-            rusttalk-server-linux-x86_64
-            rusttalk-server-linux-x86_64.sha256
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true

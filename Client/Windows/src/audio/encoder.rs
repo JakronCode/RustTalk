@@ -185,8 +185,7 @@ pub fn run(
             gate.threshold = control.vad_threshold();
             gate.process(level) || (ns_on && speech_prob > 0.6)
         };
-        let send = !control.self_muted.load(Ordering::Relaxed)
-            && (control.ptt_pressed.load(Ordering::Relaxed) || vad_speech);
+        let send = control.should_transmit(vad_speech);
         control.transmitting.store(send, Ordering::Relaxed);
 
         if send {
