@@ -5,6 +5,7 @@ Static project website (English/German, no build step, no cookies, no tracking).
 | File | Purpose |
 |---|---|
 | `index.html` | Home page: features, screenshots, downloads, server setup |
+| `roadmap.html` | Planned, maybe-later and shipped features (update it when a release ships something new) |
 | `impressum.html`, `datenschutz.html` | Legal notice and privacy policy (required in Germany) |
 | `legal.css`, `lang.js` | Shared style and DE/EN switch for the legal pages |
 | `img/` | Screenshots and logo PNGs |
@@ -20,7 +21,7 @@ Open `index.html` in a browser, or serve the folder with any static file server.
 ## Deploy
 
 ```bash
-RUSTTALK_WEB_HOST=root@your-server bash website/deploy.sh
+RUSTTALK_WEB_HOST=user@your-server RUSTTALK_WEB_PORT=22 bash website/deploy.sh
 ```
 
 First-time server setup (Debian/Ubuntu):
