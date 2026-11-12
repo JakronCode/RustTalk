@@ -34,11 +34,14 @@
 //! v14: Opt-in watching: the server announces running streams
 //!     (`UserInfo.streams`, `StreamsChanged`) and relays video only to
 //!     viewers who asked for it (`Watch { from_id, kind, watching }`).
+//! v15: Encrypted UDP ping/pong (`audio_packet::FLAG_CONTROL`, UDP header
+//!     version 3) with server-side packet counters for the connection stats;
+//!     replayed UDP packets are dropped.
 
 use serde::{Deserialize, Serialize};
 
 /// Aktuelle Protokollversion. Client und Server müssen übereinstimmen.
-pub const PROTOCOL_VERSION: u16 = 14;
+pub const PROTOCOL_VERSION: u16 = 15;
 
 /// Max. length of a poke message.
 pub const MAX_POKE_LEN: usize = 100;

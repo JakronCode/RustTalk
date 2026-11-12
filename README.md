@@ -13,7 +13,7 @@ Lightweight voice chat in Rust — a Discord-style client with a TeamSpeak-style
 
 - **Echo cancellation** (WebRTC AEC3, pure Rust): speakers instead of headphones work
 - **Encryption:** control connection over TLS (the server's own certificate, pinned by the client on first connect like SSH; a changed certificate is refused with a warning), voice and screen audio encrypted with ChaCha20-Poly1305 (per-session key)
-- **Voice:** push-to-talk (optionally **global**, also while RustTalk is in the background; keys or side mouse buttons) + voice activity (VAD using RMS *and* RNNoise speech probability), Opus 64 kbit/s 48 kHz/20 ms over UDP with in-band FEC, jitter buffer with FEC/PLC, sinc resampler for any microphone sample rate
+- **Voice:** push-to-talk (optionally **global**, also while RustTalk is in the background; keys or side mouse buttons) + voice activity (VAD using RMS *and* RNNoise speech probability), Opus 64 kbit/s 48 kHz/20 ms over UDP with in-band FEC, jitter buffer with FEC/PLC, sinc resampler for any microphone sample rate; click "Voice Connected" for connection stats (ping graph of the last 4 minutes, jitter, inbound/outbound packet loss)
 - **Automatic gain control** (AGC + limiter): quiet microphones are boosted, loud ones tamed — can be turned off
 - **AI noise suppression** (RNNoise via `nnnoiseless`) — can be turned off
 - **Channel types:** Lobby (exactly one, join log, no talking/video), Category (grouping), Voice (voice + media chat), Text (chat); order via **drag & drop** (stored on the server)
@@ -45,7 +45,7 @@ Lightweight voice chat in Rust — a Discord-style client with a TeamSpeak-style
 | Language | Rust (edition 2021), Cargo workspace |
 | GUI | `eframe`/`egui` 0.31 + `egui-phosphor` (icons), custom theme |
 | Audio | `cpal` (I/O), `audiopus` (Opus), `nnnoiseless` (RNNoise), `ringbuf` (lock-free) |
-| Network | `tokio`; TCP (control, length-prefixed `bincode`) + UDP (audio, custom 20-byte header) |
+| Network | `tokio`; TCP (control, length-prefixed `bincode`) + UDP (audio + ping, custom 28-byte header) |
 | Server DB | `rusqlite` (bundled SQLite, WAL) |
 | Media | `image`, `rfd` (file dialog), `nokhwa` (camera, Media Foundation), `xcap` (screens/windows), `ureq` (GIF downloads) |
 | Server GIF search | `ureq` + `serde_json` (GIPHY API, cached) |
@@ -64,8 +64,8 @@ Client (Windows)                          Server (Debian)
                                             └──────────────┘
 ```
 
-- **TCP:** login, channels, chat (text + images), events, video frames (camera/screen), channel order, server settings, chat edits/replies, GIF search, roles/moderation/invites (protocol v12, TLS)
-- **UDP:** Opus audio only (20 ms frames, 28-byte header with token, sequence, counter; payload ChaCha20-Poly1305); the server opens each packet with the sender's key and seals it again per receiver
+- **TCP:** login, channels, chat (text + images), events, video frames (camera/screen), channel order, server settings, chat edits/replies, GIF search, roles/moderation/invites (protocol v15, TLS)
+- **UDP:** Opus audio plus small ping/pong control packets (20 ms frames, 28-byte header with token, sequence, counter; payload ChaCha20-Poly1305); the server opens each packet with the sender's key and seals it again per receiver, and drops replayed packets. Pongs carry two per-session packet counters (kept in RAM only) for the connection stats
 - **Lobby:** everyone lands here when connecting; talking is blocked on the server; join log
 
 Details (German): [Konzept.md](Konzept.md) · test log: [test.md](test.md) · roadmap: [ROADMAP.md](ROADMAP.md)
@@ -242,7 +242,7 @@ bash Server/Test_Scripts/e2e_local.sh
 ## Project structure
 
 ```
-├── shared/            # protocol (v12), framing, secure (TLS pinning + packet encryption), UDP packet format
+├── shared/            # protocol (v15), framing, secure (TLS pinning + packet encryption), UDP packet format
 ├── Server/            # Linux server (+ test_client CLI, integration tests, deploy/, Test_Scripts/)
 │   └── src/           #   main, config, state (RAM), db (SQLite), tcp, udp
 └── Client/Windows/    # egui client

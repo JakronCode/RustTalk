@@ -90,6 +90,8 @@ struct Welcome {
     settings: ServerSettings,
     gif_search: bool,
     open_permissions: bool,
+    udp_token: u64,
+    udp_key: Vec<u8>,
 }
 
 /// Stable test identity per name (64 hex chars).
@@ -115,8 +117,8 @@ async fn connect_with(port: u16, name: &str, password: Option<String>, invite: O
     let mut conn = (reader, writer);
     let first: ServerMessage = read_frame(&mut conn.0).await.unwrap().expect("erste Nachricht");
     match first {
-        ServerMessage::Welcome { client_id, channels, users, spawn_log, chat_history, settings, gif_search, open_permissions, .. } => {
-            Ok((conn, Welcome { client_id, channels, users, spawn_log, chat_history, settings, gif_search, open_permissions }))
+        ServerMessage::Welcome { client_id, channels, users, spawn_log, chat_history, settings, gif_search, open_permissions, udp_token, udp_key } => {
+            Ok((conn, Welcome { client_id, channels, users, spawn_log, chat_history, settings, gif_search, open_permissions, udp_token, udp_key }))
         }
         ServerMessage::Error { message } => Err(message),
         other => panic!("kein Welcome erhalten: {other:?}"),
@@ -1168,5 +1170,192 @@ fn parse_audio_rx(stdout: &str) -> u64 {
         .and_then(|rest| rest.split_whitespace().next())
         .and_then(|n| n.parse().ok())
         .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// UDP ping/pong + connection counters (protocol v15)
+// ---------------------------------------------------------------------------
+
+mod udp_stats {
+    use super::*;
+    use rusttalk_shared::audio_packet::{decode, open_packet, seal_packet, AudioHeader, Control, CONTROL_LEN, FLAG_CONTROL, MAX_PACKET_LEN};
+    use rusttalk_shared::secure::{PacketCipher, DIR_TO_CLIENT, DIR_TO_SERVER};
+    use tokio::net::UdpSocket;
+
+    struct Udp {
+        sock: UdpSocket,
+        token: u64,
+        cipher: PacketCipher,
+    }
+
+    impl Udp {
+        async fn new(port: u16, w: &Welcome) -> Self {
+            let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            sock.connect(("127.0.0.1", port)).await.unwrap();
+            let u = Self { sock, token: w.udp_token, cipher: PacketCipher::new(&w.udp_key).unwrap() };
+            u.send(&seal_packet(&AudioHeader::new(u.token, 0, 0), &u.cipher, DIR_TO_SERVER, &[])).await;
+            u
+        }
+
+        async fn send(&self, pkt: &[u8]) {
+            self.sock.send(pkt).await.unwrap();
+        }
+
+        fn audio(&self, seq: u32) -> Vec<u8> {
+            seal_packet(&AudioHeader::new(self.token, seq, seq * 960), &self.cipher, DIR_TO_SERVER, b"opus")
+        }
+
+        fn ping(&self, id: u32) -> Vec<u8> {
+            self.control(id, &Control::Ping.encode())
+        }
+
+        fn control(&self, id: u32, payload: &[u8]) -> Vec<u8> {
+            let mut h = AudioHeader::new(self.token, id, 0);
+            h.flags = FLAG_CONTROL;
+            seal_packet(&h, &self.cipher, DIR_TO_SERVER, payload)
+        }
+
+        /// Next authenticated packet: (header, plaintext).
+        async fn recv(&self, ms: u64) -> Option<(AudioHeader, Vec<u8>)> {
+            let mut buf = [0u8; MAX_PACKET_LEN];
+            loop {
+                let n = tokio::time::timeout(Duration::from_millis(ms), self.sock.recv(&mut buf)).await.ok()?.ok()?;
+                let Some((h, _)) = decode(&buf[..n]) else { continue };
+                let plain = open_packet(&h, &buf[..n], &self.cipher, DIR_TO_CLIENT).expect("server packets open with our key");
+                return Some((h, plain));
+            }
+        }
+
+        /// All pongs until it is quiet: (ping id, audio_received, audio_relayed).
+        async fn pongs(&self, ms: u64) -> Vec<(u32, u32, u32)> {
+            let mut out = Vec::new();
+            while let Some((h, plain)) = self.recv(ms).await {
+                if h.flags & FLAG_CONTROL == 0 {
+                    continue;
+                }
+                assert_eq!(h.token, 0, "pongs come from the server");
+                match Control::decode(&plain) {
+                    Some(Control::Pong { audio_received, audio_relayed }) => out.push((h.sequence, audio_received, audio_relayed)),
+                    other => panic!("pong expected, got {other:?}"),
+                }
+            }
+            out
+        }
+    }
+
+    async fn two_in_voice(port: u16) -> ((Conn, Welcome), (Conn, Welcome)) {
+        let (mut a, wa) = connect(port, "alice", None).await;
+        let (mut b, wb) = connect(port, "bob", None).await;
+        for conn in [&mut a, &mut b] {
+            send(conn, &ClientMessage::JoinChannel { channel_id: 2 }).await;
+        }
+        for conn in [&mut a, &mut b] {
+            drain(conn, 300).await;
+        }
+        ((a, wa), (b, wb))
+    }
+
+    const VOICE: &str = "[[channels]]\nname = \"Funkturm\"\nkind = \"voice\"\n";
+
+    #[tokio::test]
+    async fn ping_pong_reports_packet_counters() {
+        let port = free_port();
+        let _server = spawn_server(port, VOICE);
+        wait_for_port(port);
+        let ((_a, wa), (_b, wb)) = two_in_voice(port).await;
+        let ua = Udp::new(port, &wa).await;
+        let ub = Udp::new(port, &wb).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        for seq in 1..=5 {
+            ua.send(&ua.audio(seq)).await;
+        }
+        let mut got = 0;
+        while let Some((h, plain)) = ub.recv(500).await {
+            assert_eq!(h.flags & FLAG_CONTROL, 0);
+            assert_eq!(plain, b"opus");
+            got += 1;
+        }
+        assert_eq!(got, 5);
+
+        ua.send(&ua.ping(41)).await;
+        assert_eq!(ua.pongs(500).await, vec![(41, 5, 0)], "alice: 5 received from her, nothing relayed to her");
+        ub.send(&ub.ping(7)).await;
+        assert_eq!(ub.pongs(500).await, vec![(7, 0, 5)], "bob: 5 relayed to him");
+        assert!(ub.recv(300).await.is_none(), "alice's ping is never relayed to bob");
+    }
+
+    #[tokio::test]
+    async fn malformed_forged_and_replayed_packets_get_no_pong() {
+        let port = free_port();
+        let _server = spawn_server(port, VOICE);
+        wait_for_port(port);
+        let ((_a, wa), (_b, wb)) = two_in_voice(port).await;
+        let ua = Udp::new(port, &wa).await;
+        let ub = Udp::new(port, &wb).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let ping = ua.ping(1);
+        ua.send(&ping[..ping.len() - 1]).await; // truncated
+        ua.send(&ua.control(2, &[0u8; CONTROL_LEN + 1])).await; // oversized control payload
+        ua.send(&ua.control(3, &[1u8; CONTROL_LEN])).await; // bad ping padding
+        ua.send(&ua.control(4, &Control::Pong { audio_received: 1, audio_relayed: 1 }.encode())).await; // a client cannot send pongs
+        let forged = PacketCipher::new(&PacketCipher::random_key()).unwrap();
+        let mut h = AudioHeader::new(ua.token, 5, 0);
+        h.flags = FLAG_CONTROL;
+        ua.send(&seal_packet(&h, &forged, DIR_TO_SERVER, &Control::Ping.encode())).await; // wrong key
+        let mut h = AudioHeader::new(ua.token ^ 1, 6, 0);
+        h.flags = FLAG_CONTROL;
+        ua.send(&seal_packet(&h, &ua.cipher, DIR_TO_SERVER, &Control::Ping.encode())).await; // unknown token
+        ua.send(&[0u8; MAX_PACKET_LEN]).await; // garbage, full size
+        assert!(ua.pongs(500).await.is_empty(), "no pong for bad packets");
+
+        // Replay: the same ping and the same audio packet count once.
+        ua.send(&ping).await;
+        ua.send(&ping).await;
+        assert_eq!(ua.pongs(500).await.len(), 1, "replayed ping is dropped");
+        let audio = ua.audio(1);
+        ua.send(&audio).await;
+        ua.send(&audio).await;
+        let mut got = 0;
+        while ub.recv(400).await.is_some() {
+            got += 1;
+        }
+        assert_eq!(got, 1, "replayed audio is not relayed");
+        tokio::time::sleep(Duration::from_millis(1100)).await; // refill one ping token
+        ua.send(&ua.ping(9)).await;
+        assert_eq!(ua.pongs(500).await, vec![(9, 1, 0)], "replayed audio is not counted");
+    }
+
+    #[tokio::test]
+    async fn ping_flood_is_rate_limited() {
+        let port = free_port();
+        let _server = spawn_server(port, VOICE);
+        wait_for_port(port);
+        let ((_a, wa), _b) = two_in_voice(port).await;
+        let ua = Udp::new(port, &wa).await;
+        for id in 1..=50 {
+            ua.send(&ua.ping(id)).await;
+        }
+        let pongs = ua.pongs(500).await;
+        assert!((1..=4).contains(&pongs.len()), "burst of at most 3 (+1 refill), got {}", pongs.len());
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        ua.send(&ua.ping(99)).await;
+        assert_eq!(ua.pongs(500).await.len(), 1, "answers again after the limit refills");
+    }
+
+    #[tokio::test]
+    async fn old_protocol_version_is_refused() {
+        let port = free_port();
+        let _server = spawn_server(port, "");
+        wait_for_port(port);
+        let mut stream = tls_connect(port).await;
+        let hello = ClientMessage::Hello { username: "old".into(), protocol_version: PROTOCOL_VERSION - 1, password: None, identity: identity_for("old"), invite: None };
+        write_frame(&mut stream, &hello).await.unwrap();
+        match read_frame::<_, ServerMessage>(&mut stream).await {
+            Ok(Some(ServerMessage::Error { message })) => assert!(message.contains("Protocol version"), "{message}"),
+            other => panic!("refusal expected, got {other:?}"),
+        }
+    }
 }
 // wdac-dice: 2

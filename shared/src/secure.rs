@@ -175,9 +175,62 @@ impl PacketCipher {
     }
 }
 
+/// Rejects replayed packets: tracks the highest authenticated counter and a
+/// 128-packet window below it (IPsec-style). Call only after the AEAD check.
+#[derive(Debug, Default, Clone)]
+pub struct ReplayWindow {
+    highest: u64,
+    seen: u128,
+}
+
+impl ReplayWindow {
+    pub const SIZE: u64 = 128;
+
+    /// `true` = first time this counter is seen and it is not too old.
+    pub fn accept(&mut self, counter: u64) -> bool {
+        if counter == 0 {
+            return false; // counters start at 1
+        }
+        if counter > self.highest {
+            let shift = counter - self.highest;
+            self.seen = if shift >= Self::SIZE { 0 } else { self.seen << shift };
+            self.seen |= 1;
+            self.highest = counter;
+            return true;
+        }
+        let age = self.highest - counter;
+        if age >= Self::SIZE {
+            return false;
+        }
+        let bit = 1u128 << age;
+        if self.seen & bit != 0 {
+            return false;
+        }
+        self.seen |= bit;
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_window_rejects_duplicates_and_stale_counters() {
+        let mut w = ReplayWindow::default();
+        assert!(!w.accept(0));
+        assert!(w.accept(1));
+        assert!(!w.accept(1), "duplicate");
+        assert!(w.accept(5));
+        assert!(w.accept(3), "late but new");
+        assert!(!w.accept(3));
+        assert!(w.accept(1000));
+        assert!(!w.accept(5), "too old");
+        assert!(w.accept(1000 - 127));
+        assert!(!w.accept(1000 - 128));
+        assert!(w.accept(u64::MAX));
+        assert!(!w.accept(u64::MAX));
+    }
 
     #[test]
     fn packets_roundtrip_and_tampering_is_detected() {
