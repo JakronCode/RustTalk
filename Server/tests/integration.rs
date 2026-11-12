@@ -36,6 +36,9 @@ fn write_config(port: u16, extra: &str) -> PathBuf {
     let mut f = std::fs::File::create(&path).unwrap();
     writeln!(f, "bind_address = \"127.0.0.1:{port}\"").unwrap();
     writeln!(f, "server_name = \"Integrationstest\"").unwrap();
+    if !extra.contains("check_updates") {
+        writeln!(f, "check_updates = false").unwrap(); // tests never ask GitHub
+    }
     write!(f, "{extra}").unwrap();
     path
 }
@@ -750,6 +753,62 @@ admin_password = \"boss\"
     expect(&mut e, "Error", |m| matches!(m, ServerMessage::Error { .. })).await;
     send(&mut e, &ClientMessage::ClaimAdmin { password: Some("boss".into()) }).await;
     expect(&mut e, "erin admin", |m| matches!(m, ServerMessage::UserRoleChanged { client_id, role: Role::Admin } if *client_id == we.client_id)).await;
+}
+
+/// Fake GitHub API: `releases/latest` says v99.0.0 with a server binary.
+fn fake_github() -> u16 {
+    use std::io::{BufRead, BufReader};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).map(|n| n > 2).unwrap_or(false) {
+                line.clear();
+            }
+            let asset = if cfg!(windows) { "rusttalk-server-windows.exe" } else { "rusttalk-server-linux-x86_64" };
+            let body = format!(
+                r#"{{"tag_name":"v99.0.0","html_url":"http://x/v99","assets":[{{"name":"{asset}","browser_download_url":"http://x/bin"}},{{"name":"{asset}.sha256","browser_download_url":"http://x/sha"}}]}}"#
+            );
+            let mut s = stream;
+            let _ = write!(s, "HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+{body}", body.len());
+        }
+    });
+    port
+}
+
+/// The daily update check tells admins (and only admins) about a new version.
+#[tokio::test]
+async fn update_notice_reaches_only_admins() {
+    let gh = fake_github();
+    let port = free_port();
+    let _server = spawn_server_with_env(port, "check_updates = true
+", &[("RUSTTALK_UPDATE_API", format!("http://127.0.0.1:{gh}"))]);
+    wait_for_port(port);
+    let (mut a, wa) = connect(port, "alice", None).await;
+    send(&mut a, &ClientMessage::ClaimAdmin { password: None }).await;
+    // Open server at first = alice may see it right away (at login or when the
+    // check finishes), so the notice and the role change come in any order.
+    let (mut admin, mut notice) = (false, false);
+    while !(admin && notice) {
+        match recv(&mut a, 5000).await {
+            Some(ServerMessage::UserRoleChanged { client_id, role: Role::Admin }) if client_id == wa.client_id => admin = true,
+            Some(ServerMessage::Notice { message }) if message.contains("99.0.0") && message.contains("rusttalk-server update") => notice = true,
+            Some(_) => {}
+            None => panic!("admin={admin} notice={notice}"),
+        }
+    }
+
+    // A later admin gets it on login, a member never.
+    let (mut b, _) = connect(port, "bob", None).await;
+    let bob_msgs = drain(&mut b, 500).await;
+    assert!(!bob_msgs.iter().any(|m| matches!(m, ServerMessage::Notice { message } if message.contains("update"))), "{bob_msgs:?}");
 }
 
 /// Without TLS nothing gets through: a plain Hello is not answered.

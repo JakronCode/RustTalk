@@ -6,6 +6,8 @@ server_name = "RustTalk Server"
 max_clients = 32
 # password = "secret"           # optional password protection
 # admin_password = "boss"       # optional: whoever enters it (Server Settings > Roles) becomes admin
+check_updates = true            # look for new releases on GitHub (start + daily) and tell the admins;
+                                # installing is always manual: sudo rusttalk-server update
 
 # SQLite persistence: channels (incl. order), chat history and lobby log
 # survive restarts. Retention: max. 10,000 messages per text channel.

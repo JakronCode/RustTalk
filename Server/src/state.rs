@@ -104,6 +104,8 @@ pub struct State {
     gif_cache: crate::gif::GifCache,
     moderation: crate::moderation::Moderation,
     admin_password: Option<String>,
+    /// "Server update available ..." once the daily check found one.
+    update_notice: Option<String>,
 }
 
 fn now_secs() -> u64 {
@@ -138,6 +140,7 @@ impl State {
             gif_cache: Default::default(),
             moderation: Default::default(),
             admin_password: cfg.admin_password.clone().filter(|p| !p.is_empty()),
+            update_notice: None,
         };
 
         let spawn_entries: Vec<_> =
@@ -1151,6 +1154,31 @@ impl State {
             }),
             Some(_) => Ok(()),
         }
+    }
+
+    /// Admins (everyone while the server is open) can act on server notices.
+    fn is_admin(&self, client_id: u64) -> bool {
+        self.permissions_open() || self.clients.get(&client_id).is_some_and(|c| c.role == Role::Admin)
+    }
+
+    /// Remembers the update notice and sends it to the admins online.
+    /// Returns false if it is the same as before (nothing new).
+    pub fn set_update_notice(&mut self, message: String) -> bool {
+        if self.update_notice.as_deref() == Some(message.as_str()) {
+            return false;
+        }
+        let msg = ServerMessage::Notice { message: message.clone() };
+        for id in self.clients.keys().copied().filter(|id| self.is_admin(*id)) {
+            self.send_to(id, &msg);
+        }
+        self.update_notice = Some(message);
+        true
+    }
+
+    /// The update notice for a client that just connected (admins only).
+    pub fn update_notice_for(&self, client_id: u64) -> Option<ServerMessage> {
+        let message = self.update_notice.clone()?;
+        self.is_admin(client_id).then_some(ServerMessage::Notice { message })
     }
 
     /// Sendet eine Nachricht an alle verbundenen Clients.

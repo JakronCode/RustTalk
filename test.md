@@ -2,6 +2,19 @@
 
 > Pflichtdokumentation aller Testläufe. Neueste oben.
 
+## 2026-11-12 (27) – Update-Funktion für den Server
+
+**Entscheidung:** Prüfen + Hinweis, Installieren per Befehl (kein Selbst-Update, der Service-User darf sein Programm nicht überschreiben).
+
+**Server:** Prüft beim Start und täglich die neueste GitHub-Release (`check_updates = true` in server.toml) und schickt Admins (bzw. allen, solange der Server offen ist) einen Hinweis „Server update available: 0.6.1 -> x. Install it on the server with: sudo rusttalk-server update“ – beim Fund und beim Login; per `Notice`, also kein Protokollwechsel. `rusttalk-server update [--check] [--no-restart]`: lädt das nackte Binary der Plattform, prüft SHA-256 (Pflicht), Dateityp (ELF/MZ), startet es probeweise mit `--version`, tauscht es (altes bleibt als `.old`) und startet unter Linux den systemd-Dienst neu. `rusttalk-server --version`.
+**Release:** Workflow hängt zusätzlich `rusttalk-server-linux-x86_64` und `rusttalk-server-windows.exe` mit `.sha256` an. Versionsvergleich/Prüfsummen jetzt gemeinsam in `shared/src/release.rs` (Client nutzt dieselben Funktionen).
+
+**Tests:** Client 90 (2 Tests nach shared verschoben), Server 52, Integration 17 (neu: Hinweis nur an Admins), shared 18 ✅. `install_checks_before_it_swaps`: falsche Prüfsumme, kein Programm, startet nicht → alte Datei bleibt; echtes Binary wird getauscht.
+**Live (Windows):** Fake-GitHub: „up to date“, `--check`, falsche Prüfsumme (abgelehnt, nichts geändert), echtes Update (laufende exe getauscht, `.old` daneben) ✅.
+**Nicht geprüft:** Linux (chmod, `systemctl restart`) – erst mit einem Release, das die neuen Dateien hat.
+
+---
+
 ## 2026-11-12 (26) – Eigener Join-Sound, Beitreten per Doppelklick
 
 **Bug:** Beim eigenen Betreten eines Sprachkanals kam kein Sound (nur bei anderen). Jetzt: eigener Join-Sound beim Betreten eines Sprachkanals, Leave-Sound beim Zurück in die Lobby (ohne Namensansage).

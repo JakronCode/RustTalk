@@ -11,9 +11,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use sha2::{Digest, Sha256};
 
-pub const REPO: &str = "JakronCode/RustTalk";
+pub use rusttalk_shared::release::{is_newer, parse_sha_file, sha256_hex, REPO};
 pub const ASSET: &str = "rusttalk-windows.exe";
 const MAX_DOWNLOAD: u64 = 200 * 1024 * 1024;
 
@@ -26,17 +25,6 @@ pub struct Release {
     pub page_url: String,
     pub exe_url: String,
     pub sha_url: Option<String>,
-}
-
-/// "v0.4.0" / "0.4.0" -> (0, 4, 0). Pre-release suffixes are ignored.
-pub fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
-    let core = s.trim().trim_start_matches(['v', 'V']).split(['-', '+']).next()?;
-    let mut parts = core.split('.').map(|p| p.parse::<u64>().ok());
-    Some((parts.next()??, parts.next().flatten().unwrap_or(0), parts.next().flatten().unwrap_or(0)))
-}
-
-pub fn is_newer(remote: &str, current: &str) -> bool {
-    matches!((parse_version(remote), parse_version(current)), (Some(r), Some(c)) if r > c)
 }
 
 /// Reads a `releases/latest` response. `None` if there is no exe asset.
@@ -84,16 +72,6 @@ pub fn check() -> Result<Option<Release>> {
         Err(e) => bail!("GitHub not reachable: {e}"),
     };
     Ok(parse_release(&json).filter(|r| is_newer(&r.version, env!("CARGO_PKG_VERSION"))))
-}
-
-/// SHA-256 file content ("<hex>  <name>") -> lowercase hex.
-pub fn parse_sha_file(text: &str) -> Option<String> {
-    let hex = text.split_whitespace().next()?.to_lowercase();
-    (hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit())).then_some(hex)
-}
-
-pub fn sha256_hex(data: &[u8]) -> String {
-    Sha256::digest(data).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn download(url: &str, progress: Option<&AtomicU32>) -> Result<Vec<u8>> {
@@ -155,19 +133,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn versions() {
-        assert_eq!(parse_version("v0.4.0"), Some((0, 4, 0)));
-        assert_eq!(parse_version("1.2"), Some((1, 2, 0)));
-        assert_eq!(parse_version("v2.0.1-beta"), Some((2, 0, 1)));
-        assert_eq!(parse_version("abc"), None);
-        assert!(is_newer("v0.4.0", "0.3.0"));
-        assert!(is_newer("0.10.0", "0.9.9"), "numeric, not text compare");
-        assert!(!is_newer("v0.3.0", "0.3.0"));
-        assert!(!is_newer("v0.2.9", "0.3.0"));
-        assert!(!is_newer("garbage", "0.3.0"));
-    }
-
-    #[test]
     fn release_parsing_needs_the_exe() {
         let json = serde_json::json!({
             "tag_name": "v0.4.0",
@@ -186,14 +151,5 @@ mod tests {
         // Old releases (zip only) cannot be installed automatically.
         let old = serde_json::json!({ "tag_name": "v0.3.0", "assets": [{ "name": "rusttalk-v0.3.0.zip", "browser_download_url": "x" }] });
         assert!(parse_release(&old).is_none());
-    }
-
-    #[test]
-    fn checksums() {
-        assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-        let line = "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD  rusttalk-windows.exe\n";
-        assert_eq!(parse_sha_file(line).as_deref(), Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
-        assert_eq!(parse_sha_file("nothex  x"), None);
-        assert_eq!(parse_sha_file(""), None);
     }
 }

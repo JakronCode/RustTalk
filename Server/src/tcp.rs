@@ -150,6 +150,9 @@ async fn handle_connection(stream: Conn, peer: SocketAddr, state: SharedState) -
         if !motd.is_empty() {
             st.send_to(id, &ServerMessage::Notice { message: motd });
         }
+        if let Some(notice) = st.update_notice_for(id) {
+            st.send_to(id, &notice);
+        }
         (id, username, video_backlog)
     };
     info!("Client {client_id} ({username}) von {peer} verbunden");

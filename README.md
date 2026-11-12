@@ -94,6 +94,15 @@ Open port **7331** (TCP+UDP) in the firewall if nftables/ufw is active.
 
 Prebuilt binaries are attached to the [GitHub releases](https://github.com/JakronCode/RustTalk/releases) (`rusttalk-server-linux-x86_64.tar.gz`).
 
+**Updates:** the server looks for a newer release on start and once a day (`check_updates` in `server.toml`, on by default) and shows admins "Server update available" in the client. It never installs anything by itself - the service user cannot write its own program. To update, run on the server:
+
+```bash
+sudo /opt/rusttalk/server/bin/rusttalk-server update            # download, SHA-256 check, test-start, swap, restart the service
+/opt/rusttalk/server/bin/rusttalk-server update --check         # only look
+```
+
+The previous version stays next to it as `rusttalk-server.old` (to go back: `sudo mv rusttalk-server.old rusttalk-server && sudo systemctl restart rusttalk-server`). `--no-restart` skips the restart; `rusttalk-server --version` prints the version. Works the same for a Windows server (`rusttalk-server.exe update`, restart it yourself).
+
 ### Client (Windows) – install
 
 Download `rusttalk-windows.exe` from the [latest release](https://github.com/JakronCode/RustTalk/releases/latest) and run it. It installs itself for your user (no admin rights): `%LOCALAPPDATA%\Programs\RustTalk`, Start menu entry (optional desktop shortcut), settings in `%APPDATA%\RustTalk`. Uninstall via Windows **Apps & features**.
@@ -128,7 +137,7 @@ Bump the version in `Client/Windows/Cargo.toml`, `Server/Cargo.toml` and `shared
 git tag v0.4.0 && git push origin v0.4.0
 ```
 
-The [Release workflow](.github/workflows/release.yml) checks that the tag matches the versions and attaches `rusttalk-windows.exe` (+ `.sha256`, needed by the updater) and the Linux server package to the GitHub release.
+The [Release workflow](.github/workflows/release.yml) checks that the tag matches the versions and attaches `rusttalk-windows.exe` (+ `.sha256`, needed by the updater), the Linux server package and the bare server binaries `rusttalk-server-linux-x86_64` / `rusttalk-server-windows.exe` (+ `.sha256`, for `rusttalk-server update`) to the GitHub release.
 
 ### Tests
 

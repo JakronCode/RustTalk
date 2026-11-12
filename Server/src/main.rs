@@ -1,6 +1,8 @@
 //! RustTalk-Server: TeamSpeak-artiger Voice-Server.
 //!
 //! Start: `rusttalk-server [pfad/zur/server.toml]`
+//! Update: `sudo rusttalk-server update [--check] [--no-restart]` (see [`update`])
+//! Version: `rusttalk-server --version`
 
 mod config;
 mod db;
@@ -10,6 +12,7 @@ mod state;
 mod tls;
 mod tcp;
 mod udp;
+mod update;
 
 use std::sync::{Arc, Mutex};
 
@@ -22,20 +25,32 @@ use crate::state::State;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("--version" | "-V") => {
+            println!("rusttalk-server {}", update::VERSION);
+            return Ok(());
+        }
+        Some("update") => {
+            let code = tokio::task::spawn_blocking(move || update::run_cli(&args[1..])).await?;
+            std::process::exit(code);
+        }
+        _ => {}
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
-    let config_path =
-        std::env::args().nth(1).unwrap_or_else(|| "server.toml".to_string());
+    let config_path = args.first().cloned().unwrap_or_else(|| "server.toml".to_string());
     let cfg = ServerConfig::load(&config_path)
         .with_context(|| format!("Konfiguration '{config_path}' konnte nicht geladen werden"))?;
 
     info!(
-        "Starte RustTalk-Server '{}' (max. {} Clients)",
-        cfg.server_name, cfg.max_clients
+        "Starte RustTalk-Server {} '{}' (max. {} Clients)",
+        update::VERSION, cfg.server_name, cfg.max_clients
     );
     let state = Arc::new(Mutex::new(State::new(&cfg)?));
 
@@ -63,6 +78,28 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
+
+    // Update check: on start and once a day; admins get a notice in the client.
+    if cfg.check_updates {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+            loop {
+                tick.tick().await;
+                match tokio::task::spawn_blocking(update::check).await {
+                    Ok(Ok(Some(release))) => {
+                        let notice = update::notice(&release);
+                        if state.lock().unwrap().set_update_notice(notice.clone()) {
+                            tracing::warn!("{notice}");
+                        }
+                    }
+                    Ok(Ok(None)) => info!("Server ist aktuell ({})", update::VERSION),
+                    Ok(Err(e)) => tracing::warn!("Update-Pruefung fehlgeschlagen: {e:#}"),
+                    Err(_) => {}
+                }
+            }
+        });
+    }
 
     // TCP und UDP laufen auf derselben Port-Nummer (wie TeamSpeak).
     // TLS certificate next to the database (stable fingerprint for the clients).

@@ -82,6 +82,10 @@ pub struct ServerConfig {
     pub persist_state: bool,
     #[serde(default = "default_db_path")]
     pub db_path: String,
+    /// Look for a newer release on GitHub (on start, then daily) and tell
+    /// the admins. Never installs anything by itself.
+    #[serde(default = "default_true")]
+    pub check_updates: bool,
     /// Start-Channels. Ohne spawn-Eintrag wird automatisch "Spawn" erstellt.
     #[serde(default)]
     pub channels: Vec<ChannelConfig>,
@@ -95,6 +99,9 @@ fn default_server_name() -> String {
 }
 fn default_max_clients() -> usize {
     32
+}
+fn default_true() -> bool {
+    true
 }
 fn default_db_path() -> String {
     "rusttalk.db".to_string()
