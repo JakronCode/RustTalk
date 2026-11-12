@@ -645,6 +645,9 @@ impl RustTalkApp {
             ui.interact(r, ui.id().with(("ustat", user.id, tip)), egui::Sense::hover()).on_hover_text(tip);
             x -= 20.0;
         };
+        if me && self.screen_audio.is_some() {
+            icon_at(icons::regular::SPEAKER_HIGH, theme::GREEN, "Sharing audio");
+        }
         if user.deafened {
             icon_at(icons::regular::SPEAKER_SLASH, theme::RED, "Deafened");
         }
@@ -752,22 +755,28 @@ impl RustTalkApp {
 
         let cam_live = self.cam.as_ref().is_some_and(|c| c.is_sending());
         let screen_live = self.screen.is_some();
-        ui.columns(2, |cols| {
-            let (cam_state, cam_tip) = if cam_live {
-                (IconState::Active, "Turn off camera")
-            } else {
-                (IconState::Normal, "Turn on camera (with preview)")
-            };
-            if wide_toggle(&mut cols[0], icons::regular::VIDEO_CAMERA, "Camera", cam_state, cam_tip).clicked() {
-                self.toggle_cam(cmd_tx);
-            }
-            let (scr_state, scr_tip) = if screen_live {
-                (IconState::Active, "Stop sharing")
-            } else {
-                (IconState::Normal, "Share a screen or window")
-            };
-            if wide_toggle(&mut cols[1], icons::regular::SCREENCAST, "Screen", scr_state, scr_tip).clicked() {
-                self.toggle_screen(cmd_tx);
+        let labels = ["Camera", "Screen", "Audio"];
+        let required = labels.iter().map(|label| ui.painter().layout_no_wrap(
+            format!("{}  {label}", icons::regular::SPEAKER_HIGH),
+            egui::TextStyle::Button.resolve(ui.style()), theme::TEXT).size().x + ui.spacing().button_padding.x * 2.0)
+            .fold(0.0_f32, f32::max) * 3.0 + ui.spacing().item_spacing.x * 2.0;
+        let compact = ui.available_width() < required;
+        let active = self.audio_sharing_active();
+        ui.columns(3, |cols| {
+            for (index, (icon, live, tip)) in [
+                (icons::regular::VIDEO_CAMERA, cam_live, "Camera: choose a device or stop sharing"),
+                (icons::regular::SCREENCAST, screen_live, "Screen: share a screen or window, or stop sharing"),
+                (icons::regular::SPEAKER_HIGH, active, if active { "Stop sharing audio" } else { "Choose audio source" }),
+            ].into_iter().enumerate() {
+                let label = if compact { "" } else { labels[index] };
+                if wide_toggle(&mut cols[index], icon, label,
+                    if live { IconState::Active } else { IconState::Normal }, tip).clicked() {
+                    match index {
+                        0 => self.toggle_cam(cmd_tx),
+                        1 => self.toggle_screen(cmd_tx),
+                        _ => self.toggle_audio_sharing(),
+                    }
+                }
             }
         });
         ui.add_space(2.0);
@@ -983,12 +992,17 @@ fn wide_toggle(ui: &mut egui::Ui, icon: &str, label: &str, state: IconState, tip
         IconState::Disabled => (theme::DISABLED, theme::SIDEBAR),
         _ => (theme::HEADER, theme::INPUT),
     };
-    let btn = egui::Button::new(egui::RichText::new(format!("{icon}  {label}")).color(fg))
+    let text = if label.is_empty() { icon.to_string() } else { format!("{icon}  {label}") };
+    let btn = egui::Button::new(egui::RichText::new(text).color(fg))
         .fill(bg)
         .min_size(egui::vec2(ui.available_width(), 32.0));
-    ui.add_enabled(state != IconState::Disabled, btn)
-        .on_hover_text(tip)
-        .on_disabled_hover_text(tip)
+    // Button content follows the layout's alignment; centre it.
+    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+        ui.add_enabled(state != IconState::Disabled, btn)
+            .on_hover_text(tip)
+            .on_disabled_hover_text(tip)
+    })
+    .inner
 }
 
 /// Green "online" dot at the bottom right of the own avatar.

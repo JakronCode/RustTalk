@@ -69,9 +69,13 @@ pub fn build_input_stream(
 }
 
 /// Input stream for any device + format (loopback of an output device).
-pub fn build_stream_for(device: &cpal::Device, supported: &cpal::SupportedStreamConfig, producer: HeapProd<f32>) -> Result<cpal::Stream> {
+#[cfg(windows)]
+pub fn build_stream_for(device: &cpal::Device, supported: &cpal::SupportedStreamConfig, producer: HeapProd<f32>, failed: Arc<AtomicBool>) -> Result<cpal::Stream> {
     let config = supported.config();
-    let err_fn = |e| tracing::warn!("Loopback-Stream-Fehler: {e}");
+    let err_fn = move |e| {
+        failed.store(true, Ordering::Relaxed);
+        tracing::warn!("Computer audio capture failed: {e}");
+    };
     match supported.sample_format() {
         cpal::SampleFormat::F32 => build_in::<f32>(device, &config, |s| s, producer, None, None, err_fn),
         cpal::SampleFormat::I16 => build_in::<i16>(device, &config, |s| s as f32 / 32768.0, producer, None, None, err_fn),

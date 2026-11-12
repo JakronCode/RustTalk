@@ -33,6 +33,10 @@ Website: [rusttalk.com](https://rusttalk.com) (source in [website/](website/))
 - **SQLite persistence** (server): channels (incl. order), chat history (retention 10k per channel) and the lobby log survive restarts
 - **Client UI:** dark mode with a **custom primary color** (presets or picker), **cozy / compact density**, procedural logo, saved servers, settings in a separate window, mic level meter, avatars with talking ring, user panel with mic and headset device / volume dropdowns, per-user local mute and **per-user volume** 0–200 % (right click, remembered by name), **input volume**, UI scaling
 - **Auto-reconnect:** on connection loss the client retries with backoff (1 s … 30 s) and rejoins the last voice channel with the same mute state
+- **Audio sharing (Windows and Linux):** join a voice channel and click **Audio** beside Camera and Screen. All three controls become icons when the sidebar is narrow. Choose **System-wide audio** or an application playing audio, then click **Share audio**. Click the active Audio button again to stop sharing immediately; fullscreen keeps its stop control visible. Discovery does not record audio. Microphone mute and push to talk remain independent. Leaving or switching voice channels, disconnecting, changing devices or capture failure stops sharing; starting again requires an explicit action. A closed or stale application selection never falls back to system sound.
+  - **Linux:** requires `libpulse` and PulseAudio or `pipewire-pulse`. Applications are listed by playback stream (an app can expose several streams); the selected stream alone is monitored on its actual output. System-wide capture uses the default output monitor, independently of RustTalk's playback-device choice, including when sharing one window. Streams use server-enforced `DONT_MOVE` and verified monitor ownership. **Include system audio with screen** starts whole-output capture only after video produces a valid frame. Restart after changing the system default output.
+  - **Windows:** system-wide capture uses WASAPI loopback on the selected output. Application capture uses Windows process-tree loopback, available on Windows 10 build 20348 and newer, and captures that process plus its children across outputs. Protected content or apps without active audio sessions may be unavailable. Process identity is rechecked before capture; exiting the selected process stops sharing.
+  - Audio reuses encrypted Opus transport and per-user mute/volume. The existing echo canceller reduces RustTalk playback during system sharing but cannot guarantee complete removal.
 - **Video (H.264 30 fps over TCP, OpenH264):** webcam with device selection + live preview, share a screen or a single window via a picker ("Applications" / "Entire Screen") **with computer audio** (WASAPI loopback, your RustTalk voices are filtered out); camera and screen at the same time. **Watching is opt-in:** other people's streams show as a "Watch Stream" / "Watch Camera" card, and the server only sends video to those who clicked it ("Stop watching" in the tile's corner) - no forced bandwidth. Click a tile for fullscreen with a member bar (green dot while talking). Quality levels "Best" (1440p screen / 1080p camera, up to ~10 Mbit/s), "High" (1080p / 720p, ~6 Mbit/s) and "Balanced" (720p / 540p, ~2.5 Mbit/s); monitors are captured with DXGI Desktop Duplication, pictures scaled with SIMD, OpenH264 with its assembly (~25 ms per 1440p frame from capture to H.264 instead of ~180 ms); viewers who join late or lose frames ask the sender for a keyframe
 - **Server settings** (in the app): name, icon, welcome message and rules in the lobby, **join/leave messages** in an announcement text channel, AFK notice template, message of the day, **auto AFK mover** (muted users are moved after N minutes, default 10) — roles/bans/invites as WIP
 - **Report a Bug** button that opens a pre-filled GitHub issue
@@ -199,7 +203,7 @@ Command line (for admins/scripts): `rusttalk-windows.exe --install [--desktop-sh
 
 ### Client (Linux) – minimal build
 
-Build and run from the repository root:
+Build and run from the repository root (Linux audio sharing links to `libpulse`; install `libpulse-dev` on Debian/Ubuntu or `libpulse` on Arch):
 
 ```sh
 cargo build --release --locked -p rusttalk-client
@@ -216,7 +220,7 @@ and sharing use V4L2. The Screen button opens the native desktop portal picker;
 the selected monitor or window is captured through PipeWire. Camera and screen
 can be shared together. Background push-to-talk uses the Wayland GlobalShortcuts
 portal; enable it in Settings > Keybinds. Desktop notifications include a channel
-open action. Screen audio is separate work and is not included here.
+open action. Audio-only and screen audio capture use the default output monitor through PulseAudio or pipewire-pulse (see the audio-sharing requirements above).
 
 Settings > Keybinds also provides global **Toggle mute** and **Toggle deafen**
 shortcuts on Windows and Wayland. Both start unassigned. Click a selector and

@@ -15,6 +15,10 @@ fn set_active<T>(
     Ok(())
 }
 
+fn wants_shared_audio(audio_only: bool, screen: bool, share_screen_audio: bool) -> bool {
+    audio_only || (cfg!(any(windows, target_os = "linux")) && screen && share_screen_audio)
+}
+
 fn wants_preview(show_settings: bool, page: SettingsPage, in_voice: bool) -> bool {
     show_settings && page == SettingsPage::Voice && !in_voice
 }
@@ -26,7 +30,7 @@ impl RustTalkApp {
         if in_voice {
             self.mic_monitor = None; // release local preview before opening live capture
         } else {
-            self.screen_audio = None;
+            self.stop_shared_audio();
         }
         let voice_channel = self.my_voice_channel().filter(|_| self.connected);
         if self
@@ -34,6 +38,7 @@ impl RustTalkApp {
             .as_ref()
             .is_some_and(|audio| audio.voice_channel != voice_channel)
         {
+            self.stop_shared_audio();
             self.audio = None;
             self.talking.lock().unwrap().clear();
         }
@@ -72,6 +77,70 @@ impl RustTalkApp {
                 voice_channel,
             )
         })
+    }
+
+    pub(super) fn stop_shared_audio(&mut self) {
+        self.screen_audio = None;
+        self.audio_only = false;
+        self.audio_picker = None;
+        self.shared_audio_source = Default::default();
+        self.screen_audio_failed = true;
+    }
+
+    #[cfg(test)]
+    pub(super) fn toggle_audio_only(&mut self) {
+        if self.audio_only {
+            self.stop_shared_audio();
+        } else if self.connected && self.my_voice_channel().is_some() {
+            self.audio_only = true;
+            self.screen_audio_failed = false;
+            self.sync_shared_audio();
+        }
+    }
+
+    pub(super) fn sync_shared_audio(&mut self) {
+        let in_voice = self.connected && self.my_voice_channel().is_some();
+        if !in_voice {
+            self.stop_shared_audio();
+            return;
+        }
+        if self
+            .screen_audio
+            .as_ref()
+            .is_some_and(|audio| audio.failed())
+        {
+            self.stop_shared_audio();
+            self.set_error("Computer audio stopped: capture device or encoder failed. Start sharing again to retry.");
+            return;
+        }
+        let wanted = wants_shared_audio(
+            self.audio_only,
+            self.screen
+                .as_ref()
+                .is_some_and(|screen| screen.is_sending()),
+            self.config.share_screen_audio,
+        );
+        if !wanted {
+            self.screen_audio = None;
+        } else if self.screen_audio.is_none() && !self.screen_audio_failed {
+            let result = self
+                .audio
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Voice audio is unavailable"))
+                .and_then(|engine| {
+                    engine.start_shared_audio(
+                        self.config.output_device.as_deref(),
+                        &self.shared_audio_source,
+                    )
+                });
+            match result {
+                Ok(audio) => self.screen_audio = Some(audio),
+                Err(e) => {
+                    self.stop_shared_audio();
+                    self.set_error(format!("Computer audio not shared: {e:#}"));
+                }
+            }
+        }
     }
 
     pub(super) fn sync_mic_preview(&mut self) {
@@ -173,6 +242,116 @@ mod tests {
         sfx::mix_into(&app.sfx, &mut actual);
         assert_eq!(actual, expected);
         app.sfx.lock().unwrap().clear();
+    }
+
+    #[test]
+    fn automatic_screen_audio_requires_live_screen_and_opt_in() {
+        assert_eq!(
+            wants_shared_audio(false, true, true),
+            cfg!(any(windows, target_os = "linux"))
+        );
+        assert!(!wants_shared_audio(false, false, true));
+        assert!(!wants_shared_audio(false, true, false));
+        assert!(wants_shared_audio(true, false, false));
+    }
+
+    #[test]
+    fn audio_picker_needs_voice_and_explicit_share_action() {
+        use crate::audio::share_source::AudioShareSource;
+        let devices = Devices::new();
+        let mut app = app();
+        let _commands = connect(&mut app);
+        app.open_audio_picker();
+        app.start_audio_selection(AudioShareSource::System);
+        assert!(app.audio_picker.is_none());
+        assert_eq!(devices.0.borrow().systems, 0);
+        move_to(&mut app, 2);
+        app.open_audio_picker();
+        assert!(app.audio_picker.is_some());
+        app.sync_shared_audio();
+        assert_eq!(devices.0.borrow().systems, 0);
+        app.start_audio_selection(AudioShareSource::System);
+        assert_eq!(devices.0.borrow().systems, 1);
+        assert!(app.audio_picker.is_none());
+        app.open_audio_picker();
+        move_to(&mut app, 1);
+        assert!(app.audio_picker.is_none());
+        assert_eq!(devices.0.borrow().systems, 0);
+    }
+
+    #[test]
+    fn audio_button_stops_active_sharing_without_reopening_picker() {
+        use crate::audio::share_source::AudioShareSource;
+        let devices = Devices::new();
+        let mut app = app();
+        let _commands = connect(&mut app);
+        move_to(&mut app, 2);
+        app.toggle_audio_sharing();
+        assert!(app.audio_picker.is_some());
+        app.start_audio_selection(AudioShareSource::System);
+        assert!(app.audio_sharing_active());
+        assert_eq!(devices.0.borrow().systems, 1);
+        app.toggle_audio_sharing();
+        assert!(app.audio_picker.is_none());
+        assert!(!app.audio_sharing_active());
+        assert_eq!(devices.0.borrow().systems, 0);
+        app.sync_shared_audio();
+        assert_eq!(devices.0.borrow().systems, 0, "no automatic resume after stop");
+    }
+
+    #[test]
+    fn audio_only_is_explicit_and_stops_at_membership_and_device_boundaries() {
+        let devices = Devices::new();
+        let mut app = app();
+        let _commands = connect(&mut app);
+        app.toggle_audio_only(); // lobby cannot capture
+        assert_eq!(devices.0.borrow().systems, 0);
+        move_to(&mut app, 2);
+        app.sync_shared_audio();
+        assert_eq!(devices.0.borrow().systems, 0); // joining is not consent
+        app.control.self_muted.store(true, Ordering::Relaxed);
+        app.toggle_audio_only();
+        assert_eq!(devices.0.borrow().systems, 1);
+        assert_eq!(devices.0.borrow().inputs, 1);
+        assert!(app.screen.is_none() && app.cam.is_none());
+        app.toggle_audio_only();
+        assert_eq!(devices.0.borrow().systems, 0);
+        app.toggle_audio_only();
+        app.screen_audio.as_ref().unwrap().simulate_failure();
+        app.sync_shared_audio();
+        assert_eq!(devices.0.borrow().systems, 0);
+        assert!(app.status_is_error);
+        app.sync_shared_audio();
+        assert_eq!(devices.0.borrow().systems, 0);
+        app.toggle_audio_only();
+        move_to(&mut app, 4);
+        app.sync_shared_audio();
+        assert_eq!(devices.0.borrow().systems, 0);
+        app.toggle_audio_only();
+        app.apply_devices((None, None));
+        app.sync_shared_audio();
+        assert_eq!(devices.0.borrow().systems, 0);
+        app.toggle_audio_only();
+        move_to(&mut app, 1);
+        assert_eq!(devices.0.borrow().systems, 0);
+        move_to(&mut app, 2);
+        app.toggle_audio_only();
+        app.handle_event(NetEvent::Disconnected {
+            reason: "lost".into(),
+        });
+        assert_eq!(devices.0.borrow().systems, 0);
+        let _commands = connect(&mut app);
+        move_to(&mut app, 2);
+        app.sync_shared_audio();
+        assert_eq!(devices.0.borrow().systems, 0);
+        devices.0.borrow_mut().fail_system = true;
+        app.toggle_audio_only();
+        assert!(app.status_is_error && !app.audio_only);
+        devices.0.borrow_mut().fail_system = false;
+        app.sync_shared_audio();
+        assert_eq!(devices.0.borrow().systems, 0); // failure never retries automatically
+        app.toggle_audio_only();
+        assert_eq!(devices.0.borrow().systems, 1);
     }
 
     #[test]

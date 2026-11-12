@@ -16,6 +16,13 @@ pub mod neural;
 pub mod playback;
 pub mod resample;
 pub mod screen_audio;
+pub mod share_source;
+#[cfg(windows)]
+#[path = "../windows_audio.rs"]
+mod windows_audio;
+#[cfg(target_os = "linux")]
+#[path = "../linux/system_audio.rs"]
+mod system_audio;
 pub mod sfx;
 pub mod speech;
 pub mod voice_pack;
@@ -316,10 +323,16 @@ impl AudioEngine {
     }
 
     /// Starts sending the computer audio (screen share with sound).
+    #[cfg(test)]
     pub fn start_screen_audio(&self, output_device: Option<&str>) -> Result<screen_audio::ScreenAudio> {
         anyhow::ensure!(self.voice_channel.is_some(), "Join a voice channel before sharing audio");
+        self.start_shared_audio(output_device, &share_source::AudioShareSource::System)
+    }
+
+    pub fn start_shared_audio(&self, output_device: Option<&str>, source: &share_source::AudioShareSource) -> Result<screen_audio::ScreenAudio> {
+        anyhow::ensure!(self.voice_channel.is_some(), "Join a voice channel before sharing audio");
         let udp = self.udp.try_clone().context("UDP-Socket klonen")?;
-        screen_audio::ScreenAudio::start(udp, self.token, self.cipher.clone(), self.shared.control.link.clone(), output_device, self.render_tap.clone())
+        screen_audio::ScreenAudio::start_source(udp, self.token, self.cipher.clone(), self.shared.control.link.clone(), output_device, self.render_tap.clone(), source)
     }
 
     fn stop(&mut self) {

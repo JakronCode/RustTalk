@@ -46,6 +46,14 @@ impl RustTalkApp {
                 egui::Frame::default().fill(theme::DARK).inner_margin(egui::Margin::symmetric(12, 8)),
             )
             .show(ctx, |ui| {
+                if self.screen_audio.is_some() {
+                    ui.horizontal(|ui| {
+                        ui.label("Sharing computer audio");
+                        if ui.button("Stop sharing audio").clicked() {
+                            self.stop_shared_audio();
+                        }
+                    });
+                }
                 // Centered member row (scrolls only when it does not fit).
                 let row_w = members.len() as f32 * 84.0 + members.len().saturating_sub(1) as f32 * ui.spacing().item_spacing.x;
                 let pad = ((ui.available_width() - row_w) / 2.0 - ui.spacing().item_spacing.x).max(0.0);
@@ -267,6 +275,7 @@ impl RustTalkApp {
         cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
     ) {
         self.screen = None;
+        self.screen_audio_failed = false; // explicit capture request permits a retry
         // Erst Sharing melden, dann senden (Server relayed nur Sharer).
         let _ = cmd_tx.send(Command::SetSharing(true));
         match video::start_screen(

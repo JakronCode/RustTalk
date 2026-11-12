@@ -1,7 +1,7 @@
-//! Computer audio while sharing the screen ("Share audio").
+//! Computer audio shared independently or alongside a screen.
 //!
-//! WASAPI loopback of the output device (`cpal` records an output device
-//! as input) -> mono 48 kHz -> echo canceller against our own playback
+//! WASAPI loopback on Windows, or a PulseAudio output monitor on Linux
+//! -> mono 48 kHz -> echo canceller against our own playback
 //! (otherwise everyone would hear the other speakers again) -> Opus in music
 //! mode -> UDP with `FLAG_SCREEN_AUDIO`. Silence is not sent. Receivers mix it
 //! like a voice (per-user mute/volume apply), without the talking indicator.
@@ -14,6 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use audiopus::coder::Encoder;
 use audiopus::{Application, Bitrate, Channels, SampleRate, Signal};
+#[cfg(windows)]
 use cpal::traits::DeviceTrait;
 use ringbuf::traits::{Consumer, Split};
 use ringbuf::{HeapProd, HeapRb};
@@ -33,7 +34,10 @@ const SILENCE_HANGOVER: u32 = 25; // 0.5 s
 
 /// Running "share audio"; dropping it stops everything.
 pub struct ScreenAudio {
-    _stream: cpal::Stream,
+    _stream: Option<super::DeviceStream>,
+    #[cfg(any(windows, target_os = "linux"))]
+    capture_worker: Option<std::thread::JoinHandle<()>>,
+    worker: Option<std::thread::JoinHandle<()>>,
     stop: Arc<AtomicBool>,
     tap: RenderTap,
 }
@@ -42,30 +46,80 @@ impl Drop for ScreenAudio {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         *self.tap.lock().unwrap() = None;
+        if let Some(worker) = self.worker.take() { let _ = worker.join(); }
+        #[cfg(any(windows, target_os = "linux"))]
+        if let Some(worker) = self.capture_worker.take() { let _ = worker.join(); }
     }
 }
 
 impl ScreenAudio {
+    #[cfg(test)]
+    pub fn simulate_failure(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
+    pub fn failed(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
     pub fn start(udp: UdpSocket, token: u64, cipher: Arc<PacketCipher>, link: Arc<super::link::LinkStats>, output_device: Option<&str>, tap: RenderTap) -> Result<Self> {
-        let device = super::playback::pick_output_device(output_device)?;
-        let supported = device.default_output_config().context("Output device has no format")?;
-        let config = supported.config();
-        tracing::info!("Loopback: {:?}, {} Hz, {} Kanaele", device.name().unwrap_or_default(), config.sample_rate.0, config.channels);
+        Self::start_source(udp, token, cipher, link, output_device, tap, &super::share_source::AudioShareSource::System)
+    }
+
+    pub fn start_source(udp: UdpSocket, token: u64, cipher: Arc<PacketCipher>, link: Arc<super::link::LinkStats>, output_device: Option<&str>, tap: RenderTap, source: &super::share_source::AudioShareSource) -> Result<Self> {
+        use super::share_source::AudioShareSource;
+        #[cfg(test)]
+        if let Some(stream) = super::test_devices::open(super::test_devices::Kind::System, output_device) {
+            return Ok(Self { _stream: Some(stream?), #[cfg(any(windows, target_os = "linux"))] capture_worker: None, worker: None, stop: Arc::new(AtomicBool::new(false)), tap });
+        }
+        #[cfg(not(windows))]
+        let _ = output_device; // Linux captures the system default output, not a CPAL device.
+        anyhow::ensure!(cfg!(any(windows, target_os = "linux")), "System audio capture is not supported on this platform");
+        let stop = Arc::new(AtomicBool::new(false));
         let (prod, cons) = HeapRb::<f32>::new(SAMPLE_RATE as usize * 2).split();
-        let stream = super::capture::build_stream_for(&device, &supported, prod).context("Could not record the computer audio")?;
+        #[cfg(windows)]
+        let mut capture_worker = None;
+        #[cfg(windows)]
+        let stream = if let AudioShareSource::Application(application) = source {
+            capture_worker = Some(super::windows_audio::start(application.clone(), prod, stop.clone())?);
+            None
+        } else {
+            let device = super::playback::pick_output_device(output_device)?;
+            let supported = device.default_output_config().context("Output device has no format")?;
+            let stream = super::capture::build_stream_for(&device, &supported, prod, stop.clone())
+                .context("Could not record the computer audio")?;
+            #[cfg(test)]
+            let stream = super::DeviceStream::Hardware { _stream: stream };
+            Some(stream)
+        };
+        #[cfg(not(windows))]
+        let stream = None;
+        #[cfg(target_os = "linux")]
+        let capture_worker = Some(super::system_audio::start(prod, stop.clone(), match source {
+            AudioShareSource::System => None,
+            AudioShareSource::Application(application) => Some(application.clone()),
+        })?);
 
         let (render_prod, render_cons) = HeapRb::<f32>::new(SAMPLE_RATE as usize).split();
-        *tap.lock().unwrap() = Some(render_prod);
-
-        let stop = Arc::new(AtomicBool::new(false));
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("screen-audio".into())
             .spawn({
                 let stop = stop.clone();
                 move || encode_loop(cons, render_cons, udp, token, cipher, link, stop)
             })
-            .context("screen audio thread")?;
-        Ok(Self { _stream: stream, stop, tap })
+            .context("screen audio thread");
+        let worker = match worker {
+            Ok(worker) => worker,
+            Err(e) => {
+                stop.store(true, Ordering::Relaxed);
+                #[cfg(any(windows, target_os = "linux"))]
+                if let Some(worker) = capture_worker { let _ = worker.join(); }
+                return Err(e);
+            }
+        };
+        *tap.lock().unwrap() = Some(render_prod);
+        Ok(Self { _stream: stream, #[cfg(any(windows, target_os = "linux"))] capture_worker, worker: Some(worker), stop, tap })
     }
 }
 
@@ -88,7 +142,8 @@ fn encode_loop(
             e
         }
         Err(e) => {
-            tracing::error!("Opus (Bildschirmton) nicht erstellbar: {e}");
+            stop.store(true, Ordering::Relaxed);
+            tracing::error!("Computer audio encoder failed: {e}");
             return;
         }
     };
@@ -125,6 +180,8 @@ fn encode_loop(
             let _ = udp.send(&seal_packet(&header, &cipher, DIR_TO_SERVER, &opus[..len]));
             link.audio_sent.fetch_add(1, Ordering::Relaxed);
             seq = seq.wrapping_add(1);
+        } else {
+            stop.store(true, Ordering::Relaxed);
         }
     }
 }
@@ -141,15 +198,68 @@ mod tests {
         assert_eq!(crate::audio::mixer_speaker(s), 42);
     }
 
+    #[test]
+    fn encoder_sends_separate_encrypted_audio_and_joins_on_stop() {
+        use ringbuf::traits::Producer;
+        use rusttalk_shared::audio_packet::{decode, open_packet};
+        let devices = crate::audio::test_devices::Devices::new();
+        let stream = crate::audio::test_devices::open(crate::audio::test_devices::Kind::System, None).unwrap().unwrap();
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender.connect(receiver.local_addr().unwrap()).unwrap();
+        let cipher = Arc::new(PacketCipher::new(&[7; 32]).unwrap());
+        let voice = seal_packet(&AudioHeader::new(42, 1, 0), &cipher, DIR_TO_SERVER, b"voice");
+        let (mut prod, cons) = HeapRb::<f32>::new(FRAME_SAMPLES * 3).split();
+        prod.push_slice(&[0.3; FRAME_SAMPLES * 3]);
+        let (render_prod, render_cons) = HeapRb::<f32>::new(FRAME_SAMPLES).split();
+        let tap = Arc::new(Mutex::new(Some(render_prod)));
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker = std::thread::spawn({
+            let cipher = cipher.clone();
+            let stop = stop.clone();
+            move || encode_loop(cons, render_cons, sender, 42, cipher, Arc::new(super::super::link::LinkStats::default()), stop)
+        });
+        let audio = ScreenAudio { _stream: Some(stream), #[cfg(any(windows, target_os = "linux"))] capture_worker: None, worker: Some(worker), stop: stop.clone(), tap: tap.clone() };
+        let mut buf = [0; 1500];
+        let n = receiver.recv(&mut buf).unwrap();
+        let (header, _) = decode(&buf[..n]).unwrap();
+        assert_eq!(header.flags, FLAG_SCREEN_AUDIO);
+        assert_ne!(header.counter, decode(&voice).unwrap().0.counter);
+        assert!(!open_packet(&header, &buf[..n], &cipher, DIR_TO_SERVER).unwrap().is_empty());
+        drop(audio);
+        assert!(stop.load(Ordering::Relaxed));
+        assert!(tap.lock().unwrap().is_none());
+        assert_eq!(devices.0.borrow().systems, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a running local PulseAudio or pipewire-pulse server"]
+    fn linux_system_audio_worker_stops() {
+        let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+        udp.connect(udp.local_addr().unwrap()).unwrap();
+        let tap = Arc::new(Mutex::new(None));
+        let audio = ScreenAudio::start(udp, 42, Arc::new(PacketCipher::new(&[7; 32]).unwrap()),
+            Arc::new(super::super::link::LinkStats::default()), None, tap.clone()).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!audio.failed());
+        let start = std::time::Instant::now();
+        drop(audio);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(tap.lock().unwrap().is_none());
+    }
+
     /// Opens the loopback recording of the default output device (plays nothing).
     /// Manual: `cargo test -p rusttalk-client loopback_opens -- --ignored`
     #[test]
     #[ignore]
+    #[cfg(windows)]
     fn loopback_opens() {
         let device = crate::audio::playback::pick_output_device(None).expect("output device");
         let supported = device.default_output_config().expect("format");
         let (prod, _cons) = HeapRb::<f32>::new(48_000).split();
-        let stream = crate::audio::capture::build_stream_for(&device, &supported, prod).expect("loopback stream");
+        let stream = crate::audio::capture::build_stream_for(&device, &supported, prod, Arc::new(AtomicBool::new(false))).expect("loopback stream");
         std::thread::sleep(Duration::from_millis(300));
         drop(stream);
     }
