@@ -33,11 +33,11 @@ fn configure_socket(stream: &TcpStream) {
     #[cfg(target_os = "linux")]
     let ka = ka.with_retries(3);
     if let Err(e) = sock.set_tcp_keepalive(&ka) {
-        debug!("Keepalive setzen: {e}");
+        debug!("Could not set keepalive: {e}");
     }
     #[cfg(target_os = "linux")]
     if let Err(e) = sock.set_tcp_user_timeout(Some(Duration::from_secs(20))) {
-        debug!("TCP_USER_TIMEOUT setzen: {e}");
+        debug!("Could not set TCP_USER_TIMEOUT: {e}");
     }
 }
 
@@ -45,9 +45,9 @@ fn configure_socket(stream: &TcpStream) {
 type Conn = tokio_rustls::server::TlsStream<TcpStream>;
 
 pub async fn run_listener(state: SharedState, bind: &str, tls: Arc<rustls::ServerConfig>) -> Result<()> {
-    let listener = TcpListener::bind(bind).await.with_context(|| format!("TCP-Bind an {bind}"))?;
+    let listener = TcpListener::bind(bind).await.with_context(|| format!("Could not bind TCP to {bind}"))?;
     let acceptor = tokio_rustls::TlsAcceptor::from(tls);
-    info!("TCP-Steuerkanal (TLS) lauscht auf {bind}");
+    info!("TCP control channel (TLS) listening on {bind}");
     loop {
         let (stream, peer) = listener.accept().await?;
         let state = state.clone();
@@ -57,12 +57,12 @@ pub async fn run_listener(state: SharedState, bind: &str, tls: Arc<rustls::Serve
             configure_socket(&stream);
             let stream = match tokio::time::timeout(HELLO_TIMEOUT, acceptor.accept(stream)).await {
                 Ok(Ok(s)) => s,
-                Ok(Err(e)) => return debug!("TLS-Handshake {peer} fehlgeschlagen: {e}"),
-                Err(_) => return debug!("TLS-Handshake {peer}: Timeout"),
+                Ok(Err(e)) => return debug!("TLS handshake with {peer} failed: {e}"),
+                Err(_) => return debug!("TLS handshake with {peer}: timeout"),
             };
             match handle_connection(stream, peer, state).await {
-                Ok(()) => debug!("Verbindung {peer} beendet"),
-                Err(e) => debug!("Verbindung {peer} beendet: {e:#}"),
+                Ok(()) => debug!("Connection {peer} closed"),
+                Err(e) => debug!("Connection {peer} closed: {e:#}"),
             }
         });
     }
@@ -74,9 +74,9 @@ async fn handle_connection(stream: Conn, peer: SocketAddr, state: SharedState) -
     // 1. Hello mit Timeout erwarten.
     let hello: Option<ClientMessage> = tokio::time::timeout(HELLO_TIMEOUT, read_frame(&mut reader))
         .await
-        .context("Hello-Timeout")??;
+        .context("Hello timeout")??;
     let Some(ClientMessage::Hello { username, protocol_version, password, identity, invite }) = hello else {
-        bail!("erste Nachricht war kein Hello");
+        bail!("first message was not Hello");
     };
     let ip = peer.ip().to_string();
 
@@ -86,12 +86,12 @@ async fn handle_connection(stream: Conn, peer: SocketAddr, state: SharedState) -
             "Protocol version not supported (client: {protocol_version}, server: {PROTOCOL_VERSION}) - please update RustTalk"
         );
         let _ = write_frame(&mut writer, &ServerMessage::Error { message: msg }).await;
-        bail!("Protokollversion {protocol_version} abgelehnt ({peer})");
+        bail!("Protocol version {protocol_version} refused ({peer})");
     }
     let Some(uid) = crate::moderation::uid_from_identity(&identity) else {
         let msg = "Invalid identity - please update RustTalk".to_string();
         let _ = write_frame(&mut writer, &ServerMessage::Error { message: msg }).await;
-        bail!("Ungueltige Identitaet ({peer})");
+        bail!("Invalid identity ({peer})");
     };
     // MutexGuard vor dem await wieder fallen lassen (Send-Safety).
     let login_error: Option<String> = {
@@ -106,7 +106,7 @@ async fn handle_connection(stream: Conn, peer: SocketAddr, state: SharedState) -
     };
     if let Some(message) = login_error {
         let _ = write_frame(&mut writer, &ServerMessage::Error { message: message.clone() }).await;
-        bail!("Login abgelehnt ({peer}): {message}");
+        bail!("Login refused ({peer}): {message}");
     }
 
     // 3. Registrierung + Welcome an den Neuen + UserJoined an alle.
@@ -155,7 +155,7 @@ async fn handle_connection(stream: Conn, peer: SocketAddr, state: SharedState) -
         }
         (id, username, video_backlog)
     };
-    info!("Client {client_id} ({username}) von {peer} verbunden");
+    info!("Client {client_id} ({username}) connected from {peer}");
 
     // 4. Writer-Task uebernimmt ab hier den Sendeteil des Streams.
     let mut writer_handle = tokio::spawn(writer_task(writer, rx, video_backlog));
@@ -164,7 +164,7 @@ async fn handle_connection(stream: Conn, peer: SocketAddr, state: SharedState) -
     //    (sonst wuerde der Server ewig auf einen toten Client warten).
     let result = tokio::select! {
         r = message_loop(&mut reader, &state, client_id) => r,
-        _ = &mut writer_handle => Err(anyhow::anyhow!("Senden an Client fehlgeschlagen")),
+        _ = &mut writer_handle => Err(anyhow::anyhow!("Sending to client failed")),
     };
 
     // 6. Cleanup: Client entfernen, alle informieren, Writer beenden.
@@ -179,8 +179,8 @@ async fn handle_connection(stream: Conn, peer: SocketAddr, state: SharedState) -
     }
     writer_handle.abort();
     match &result {
-        Ok(()) => info!("Client {client_id} ({username}) getrennt"),
-        Err(e) => info!("Client {client_id} ({username}) getrennt: {e:#}"),
+        Ok(()) => info!("Client {client_id} ({username}) disconnected"),
+        Err(e) => info!("Client {client_id} ({username}) disconnected: {e:#}"),
     }
     result
 }
@@ -205,11 +205,11 @@ async fn writer_task(
         match res {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                debug!("Schreiben fehlgeschlagen: {e}");
+                debug!("Write failed: {e}");
                 break;
             }
             Err(_) => {
-                debug!("Schreiben haengt seit {WRITE_TIMEOUT:?}");
+                debug!("Write stuck for {WRITE_TIMEOUT:?}");
                 break;
             }
         }
@@ -512,7 +512,7 @@ fn spawn_gif_search(state: SharedState, client_id: u64, query: String, offset: u
                 st.send_to(client_id, &reply(results, None, &query));
             }
             Err(e) => {
-                tracing::warn!("GIF-Suche fehlgeschlagen: {e}");
+                tracing::warn!("GIF search failed: {e}");
                 st.send_to(client_id, &reply(Vec::new(), Some(e), &query));
             }
         }
@@ -533,7 +533,7 @@ fn spawn_set_gif_key(state: SharedState, client_id: u64, key: Option<String>) {
         let mut st = state.lock().unwrap();
         st.set_gif_key(None);
         st.audit(client_id, "removed the GIPHY key".to_string());
-        info!("GIF-Suche deaktiviert (Client {client_id})");
+        info!("GIF search disabled (client {client_id})");
         st.broadcast(&ServerMessage::GifSearchChanged { available: false });
         return;
     };
@@ -553,7 +553,7 @@ fn spawn_set_gif_key(state: SharedState, client_id: u64, key: Option<String>) {
                 st.set_gif_key(Some(key));
                 st.gif_store("", 0, trending);
                 st.audit(client_id, "set the GIPHY key".to_string());
-                info!("GIF-Suche aktiviert (Client {client_id})");
+                info!("GIF search enabled (client {client_id})");
                 st.broadcast(&ServerMessage::GifSearchChanged { available: true });
                 st.send_to(client_id, &ServerMessage::Notice { message: "GIF search is now active for everyone".to_string() });
             }

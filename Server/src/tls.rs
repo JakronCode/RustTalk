@@ -16,14 +16,14 @@ pub fn load_or_create(dir: &Path) -> Result<(Vec<u8>, Vec<u8>)> {
         return Ok((cert, key));
     }
     let ck = rcgen::generate_simple_self_signed(vec![rusttalk_shared::secure::TLS_SERVER_NAME.to_string()])
-        .context("Zertifikat erzeugen")?;
+        .context("Could not create certificate")?;
     let cert = ck.cert.der().to_vec();
     let key = ck.signing_key.serialize_der();
     std::fs::create_dir_all(dir).ok();
-    std::fs::write(&cert_path, &cert).with_context(|| format!("{} schreiben", cert_path.display()))?;
-    std::fs::write(&key_path, &key).with_context(|| format!("{} schreiben", key_path.display()))?;
+    std::fs::write(&cert_path, &cert).with_context(|| format!("Could not write {}", cert_path.display()))?;
+    std::fs::write(&key_path, &key).with_context(|| format!("Could not write {}", key_path.display()))?;
     restrict(&key_path);
-    info!("Neues TLS-Zertifikat erzeugt: {}", cert_path.display());
+    info!("Created new TLS certificate: {}", cert_path.display());
     Ok((cert, key))
 }
 

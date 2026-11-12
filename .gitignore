@@ -20,3 +20,6 @@ dist/
 *.der
 *.pem
 *.key
+
+# Local dev data (make setup-server / make client)
+.dev/
