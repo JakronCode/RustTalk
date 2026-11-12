@@ -483,6 +483,9 @@ fn recv_loop(
                 }
                 continue; // Read-Timeout -> Stop-Flag pruefen
             }
+            // Winsock discards oversized UDP datagrams and reports WSAEMSGSIZE.
+            #[cfg(windows)]
+            Err(e) if e.raw_os_error() == Some(10040) => continue,
             Err(e) => {
                 tracing::warn!("UDP-Empfangsfehler: {e}");
                 break;
