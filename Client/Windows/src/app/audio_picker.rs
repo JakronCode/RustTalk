@@ -159,7 +159,7 @@ impl RustTalkApp {
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .fixed_size([400.0, 0.0])
+            .fixed_size([400.0, 520.0])
             .show(ctx, |ui| {
                 ui.label(
                     egui::RichText::new("Your microphone stays separate.").color(theme::MUTED),
@@ -397,12 +397,16 @@ mod tests {
         let mut app = RustTalkApp::with_config(ctx.clone(), ClientConfig::default(), false);
         app.audio_picker = Some(AudioPicker {
             selected: AudioShareSource::System,
-            applications: vec![AudioApplication {
-                label: "Firefox".into(),
-                detail: None,
-                icon: None,
-                source: share_source::ApplicationSource::for_test(1),
-            }],
+            applications: ["Firefox", "Discord", "Limusic", "Scrcpy"]
+                .into_iter()
+                .enumerate()
+                .map(|(i, name)| AudioApplication {
+                    label: name.into(),
+                    detail: None,
+                    icon: None,
+                    source: share_source::ApplicationSource::for_test(i as u32 + 1),
+                })
+                .collect(),
             textures: vec![],
             pending: None,
             stop: Arc::new(AtomicBool::new(false)),
@@ -422,20 +426,33 @@ mod tests {
                 |ctx| app.ui_audio_picker(ctx),
             ));
         }
-        let visible = output.unwrap().shapes.iter().any(|shape| {
-            if let egui::epaint::Shape::Text(text) = &shape.shape {
-                text.galley.job.text == "Firefox"
-                    && shape
-                        .clip_rect
-                        .contains(text.pos + text.galley.size() * 0.5)
-            } else {
-                false
+        let output = output.unwrap();
+        for label in ["Firefox", "Discord", "Limusic", "Scrcpy"] {
+            assert!(
+                output.shapes.iter().any(|shape| {
+                    if let egui::epaint::Shape::Text(text) = &shape.shape {
+                        text.galley.job.text == label
+                            && shape.clip_rect.contains_rect(egui::Rect::from_min_size(
+                                text.pos,
+                                text.galley.size(),
+                            ))
+                    } else {
+                        false
+                    }
+                }),
+                "{label} must be fully visible"
+            );
+        }
+        for shape in &output.shapes {
+            if let egui::epaint::Shape::Rect(card) = &shape.shape {
+                if (card.rect.height() - 52.0).abs() < 0.1 {
+                    assert!(
+                        shape.clip_rect.contains_rect(card.rect.shrink(0.5)),
+                        "source cards must not be cropped by the list viewport"
+                    );
+                }
             }
-        });
-        assert!(
-            visible,
-            "application card must be visible, not clipped by window sizing"
-        );
+        }
     }
 
     #[test]
