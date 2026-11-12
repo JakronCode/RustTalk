@@ -260,7 +260,13 @@ impl State {
             );
             state.db = Some(db);
         }
+        state.moderation.set_closed(cfg.admin_password_required);
         Ok(state)
+    }
+
+    /// Closes the database cleanly (shutdown); later changes are not persisted.
+    pub fn close_db(&mut self) {
+        self.db = None;
     }
 
     /// Grundstruktur aus der Config (Spawn zuerst, dann Kategorien, dann
@@ -925,7 +931,7 @@ impl State {
         Ok((changed, (was_open != now_open).then_some(now_open)))
     }
 
-    /// Become admin: free while nobody is admin, else with `admin_password`.
+    /// Become admin: free while the server is open, else with `admin_password`.
     pub fn claim_admin(&mut self, client_id: u64, password: Option<&str>) -> Result<(Vec<(u64, Role)>, Option<bool>), String> {
         let c = self.clients.get(&client_id).ok_or("Client does not exist")?;
         if c.role == Role::Admin {

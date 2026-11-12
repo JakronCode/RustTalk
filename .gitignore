@@ -23,3 +23,6 @@ dist/
 
 # Local dev data (make setup-server / make client)
 .dev/
+
+# Docker admin secret (Server/deploy/docker-compose.yml)
+admin_password.txt

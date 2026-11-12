@@ -1358,4 +1358,194 @@ mod udp_stats {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Container image behaviour (RUSTTALK_CONTAINER=1), health check, shutdown
+// ---------------------------------------------------------------------------
+
+const ADMIN_SECRET: &str = "integration-admin-secret-0123456789";
+
+/// Fresh directory per test (the "volume").
+fn data_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("rusttalk-it-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Runs the server binary to its exit (at most 15 s); returns (success, stdout, stderr).
+fn run_to_exit(args: &[&str], env: &[(&str, String)]) -> (bool, String, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rusttalk-server"))
+        .args(args)
+        .env_remove("RUSTTALK_CONTAINER")
+        .env_remove("RUSTTALK_ADMIN_PASSWORD_FILE")
+        .envs(env.iter().map(|(k, v)| (*k, v.as_str())))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start server process");
+    for _ in 0..150 {
+        if child.try_wait().unwrap().is_some() {
+            let out = child.wait_with_output().unwrap();
+            return (out.status.success(), String::from_utf8_lossy(&out.stdout).into(), String::from_utf8_lossy(&out.stderr).into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    panic!("server did not exit: {args:?}");
+}
+
+fn healthy(config: &std::path::Path) -> bool {
+    run_to_exit(&["--healthcheck", config.to_str().unwrap()], &[]).0
+}
+
+#[tokio::test]
+async fn healthcheck_follows_the_listener() {
+    let port = free_port();
+    let config = std::env::temp_dir().join(format!("rusttalk-it-{port}.toml"));
+    {
+        let _server = spawn_server(port, "");
+        wait_for_port(port);
+        assert!(healthy(&config), "listener is up");
+    }
+    // ServerGuard killed it: the port is closed again.
+    assert!(!healthy(&config), "listener is down");
+    let (ok, _, err) = run_to_exit(&["--healthcheck", "/nonexistent/rusttalk/server.toml"], &[]);
+    assert!(!ok && err.contains("unhealthy"), "{err}");
+}
+
+#[test]
+fn bad_admin_secrets_fail_closed_without_leaking() {
+    let dir = data_dir("badsecret");
+    let config = dir.join("server.toml");
+    let marker = "LEAKMARKER";
+    let short = dir.join("short");
+    std::fs::write(&short, format!("{marker}\n")).unwrap();
+    let big = dir.join("big");
+    std::fs::write(&big, format!("{marker}{}", "x".repeat(2000))).unwrap();
+    let cases = [(short, "shorter than"), (big, "larger than"), (dir.join("missing"), "Cannot read")];
+    for container in [false, true] {
+        for (secret, want) in &cases {
+            let mut env = vec![("RUSTTALK_ADMIN_PASSWORD_FILE", secret.to_string_lossy().into_owned())];
+            if container {
+                env.push(("RUSTTALK_CONTAINER", "1".into()));
+            }
+            let (ok, out, err) = run_to_exit(&[config.to_str().unwrap()], &env);
+            assert!(!ok, "must not start ({secret:?}, container={container})");
+            assert!(err.contains(want) && err.contains("RUSTTALK_ADMIN_PASSWORD_FILE"), "{err}");
+            assert!(!out.contains(marker) && !err.contains(marker), "secret leaked: {out}{err}");
+            assert!(!config.exists(), "nothing is created before the secret is valid");
+        }
+    }
+
+    // Container without any admin secret: refuses, no database or key is created.
+    let (ok, _, err) = run_to_exit(&[config.to_str().unwrap()], &[("RUSTTALK_CONTAINER", "1".into())]);
+    assert!(!ok && err.contains("No admin password"), "{err}");
+    assert!(config.exists(), "first run wrote the default config");
+    for name in ["rusttalk.db", "tls-key.der", "tls-cert.der"] {
+        assert!(!dir.join(name).exists(), "{name} must not exist yet");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn container_mode_is_closed_until_the_admin_logs_in() {
+    let dir = data_dir("container");
+    let port = free_port();
+    let secret = dir.join("admin_password");
+    std::fs::write(&secret, format!("{ADMIN_SECRET}\n")).unwrap();
+    let extra = format!("persist_state = true\ndb_path = {:?}\n", dir.join("rusttalk.db").to_string_lossy());
+    let server = spawn_server_with_env(
+        port,
+        &extra,
+        &[("RUSTTALK_CONTAINER", "1".into()), ("RUSTTALK_ADMIN_PASSWORD_FILE", secret.to_string_lossy().into_owned())],
+    );
+    wait_for_port(port);
+    #[cfg(unix)]
+    for name in ["tls-key.der", "tls-cert.der"] {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(dir.join(name)).unwrap().permissions().mode() & 0o777, 0o600, "{name}");
+    }
+
+    let (mut a, wa) = connect(port, "alice", None).await;
+    let (mut b, _) = connect(port, "bob", None).await;
+    assert!(!wa.open_permissions, "no open mode without an admin");
+    drain(&mut a, 300).await;
+    drain(&mut b, 300).await;
+    send(&mut b, &ClientMessage::ClaimAdmin { password: None }).await;
+    match expect(&mut b, "Error", |m| matches!(m, ServerMessage::Error { .. })).await {
+        ServerMessage::Error { message } => assert!(message.contains("Wrong admin password"), "{message}"),
+        _ => unreachable!(),
+    }
+    send(&mut b, &ClientMessage::ClaimAdmin { password: Some("guess".into()) }).await;
+    expect(&mut b, "Error", |m| matches!(m, ServerMessage::Error { .. })).await;
+    send(&mut b, &ClientMessage::CreateChannel { name: "x".into(), kind: ChannelKind::Text, parent: None }).await;
+    expect(&mut b, "Error", |m| matches!(m, ServerMessage::Error { .. })).await;
+
+    send(&mut a, &ClientMessage::ClaimAdmin { password: Some(ADMIN_SECRET.into()) }).await;
+    expect(&mut a, "alice admin", |m| matches!(m, ServerMessage::UserRoleChanged { client_id, role: Role::Admin } if *client_id == wa.client_id)).await;
+    send(&mut a, &ClientMessage::CreateChannel { name: "ops".into(), kind: ChannelKind::Text, parent: None }).await;
+    expect(&mut a, "ChannelCreated", |m| matches!(m, ServerMessage::ChannelCreated { .. })).await;
+    drop(server);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn container_refuses_update_installs_but_still_checks() {
+    let gh = fake_github();
+    let api = ("RUSTTALK_UPDATE_API", format!("http://127.0.0.1:{gh}"));
+    let container = ("RUSTTALK_CONTAINER", "1".to_string());
+
+    let (ok, out, err) = run_to_exit(&["update"], &[api.clone(), container.clone()]);
+    assert!(!ok, "install refused");
+    assert!(err.contains("pulling the new image"), "{err}");
+    assert!(!out.contains("New version"), "refused before asking GitHub: {out}");
+
+    let (ok, out, _) = run_to_exit(&["update", "--check"], &[api, container]);
+    assert!(ok && out.contains("New version available") && out.contains("99.0.0"), "{out}");
+}
+
+/// docker stop / systemctl stop: SIGTERM closes SQLite cleanly, data and key survive.
+#[cfg(unix)]
+#[tokio::test]
+async fn sigterm_shuts_down_cleanly() {
+    let dir = data_dir("sigterm");
+    let port = free_port();
+    let db = dir.join("rusttalk.db");
+    let extra = format!("persist_state = true\ndb_path = {:?}\n", db.to_string_lossy());
+
+    let mut server = spawn_server(port, &extra);
+    wait_for_port(port);
+    let (mut a, _) = connect(port, "alice", None).await;
+    drain(&mut a, 300).await;
+    send(&mut a, &ClientMessage::CreateChannel { name: "kept".into(), kind: ChannelKind::Text, parent: None }).await;
+    expect(&mut a, "ChannelCreated", |m| matches!(m, ServerMessage::ChannelCreated { .. })).await;
+    let cert = std::fs::read(dir.join("tls-cert.der")).unwrap();
+
+    let pid = server.0.id().to_string();
+    assert!(Command::new("kill").args(["-TERM", &pid]).status().unwrap().success());
+    let mut status = None;
+    for _ in 0..50 {
+        status = server.0.try_wait().unwrap();
+        if status.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let status = status.expect("server stops within 5 s after SIGTERM");
+    assert!(status.success(), "clean exit, not killed: {status:?}");
+    let wal = dir.join("rusttalk.db-wal");
+    assert!(std::fs::metadata(&wal).map(|m| m.len() == 0).unwrap_or(true), "WAL checkpointed on close");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let check: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
+    assert_eq!(check, "ok");
+    drop(conn);
+
+    let _server = spawn_server(port, &extra);
+    wait_for_port(port);
+    let (_a, wa) = connect(port, "alice", None).await;
+    assert!(wa.channels.iter().any(|c| c.name == "kept"), "{:?}", wa.channels);
+    assert_eq!(std::fs::read(dir.join("tls-cert.der")).unwrap(), cert, "same certificate (pinned fingerprint)");
+    std::fs::remove_dir_all(&dir).ok();
+}
 // wdac-dice: 2

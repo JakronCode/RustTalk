@@ -24,8 +24,17 @@
 //! category = "Voice-Area"
 //! ```
 
-use serde::Deserialize;
+use std::io::Read;
+use std::path::Path;
+
+use anyhow::{bail, Context};
 use rusttalk_shared::protocol::ChannelKind;
+use serde::Deserialize;
+
+/// Names a file holding the admin password (Docker/systemd secret); overrides `admin_password`.
+pub const ADMIN_PASSWORD_FILE_ENV: &str = "RUSTTALK_ADMIN_PASSWORD_FILE";
+const SECRET_MIN_CHARS: usize = 16;
+const SECRET_MAX_BYTES: u64 = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -89,6 +98,10 @@ pub struct ServerConfig {
     /// Start-Channels. Ohne spawn-Eintrag wird automatisch "Spawn" erstellt.
     #[serde(default)]
     pub channels: Vec<ChannelConfig>,
+    /// Set by the container image, not by server.toml: no "open" mode, becoming
+    /// admin always needs the admin password.
+    #[serde(skip)]
+    pub admin_password_required: bool,
 }
 
 fn default_bind_address() -> String {
@@ -113,6 +126,34 @@ impl ServerConfig {
         let cfg: ServerConfig = toml::from_str(&text)?;
         Ok(cfg)
     }
+}
+
+/// Reads a one-line secret from a file. Fails closed; errors never contain the content.
+pub fn read_secret_file(path: &Path) -> anyhow::Result<String> {
+    let name = path.display();
+    let meta =
+        std::fs::metadata(path).with_context(|| format!("Cannot read secret file {name}"))?;
+    if !meta.is_file() {
+        bail!("Secret file {name} is not a regular file");
+    }
+    let mut buf = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(SECRET_MAX_BYTES + 1).read_to_end(&mut buf))
+        .with_context(|| format!("Cannot read secret file {name}"))?;
+    if buf.len() as u64 > SECRET_MAX_BYTES {
+        bail!("Secret file {name} is larger than {SECRET_MAX_BYTES} bytes");
+    }
+    let Ok(text) = String::from_utf8(buf) else {
+        bail!("Secret file {name} is not UTF-8 text")
+    };
+    let secret = text.trim_end_matches(['\r', '\n']);
+    if secret.chars().any(char::is_control) {
+        bail!("Secret file {name} must hold a single line without control characters");
+    }
+    if secret.chars().count() < SECRET_MIN_CHARS {
+        bail!("Secret in {name} is shorter than {SECRET_MIN_CHARS} characters");
+    }
+    Ok(secret.to_string())
 }
 
 #[cfg(test)]
@@ -173,5 +214,92 @@ category = "Voice-Area"
             toml::from_str("persist_state = true\ndb_path = \"/tmp/test.db\"").unwrap();
         assert!(cfg.persist_state);
         assert_eq!(cfg.db_path, "/tmp/test.db");
+    }
+
+    #[test]
+    fn secret_file_is_bounded_and_fails_closed() {
+        let dir = std::env::temp_dir().join(format!("rusttalk-secret-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, data: &[u8]| {
+            let p = dir.join(name);
+            std::fs::write(&p, data).unwrap();
+            p
+        };
+        let marker = "TOPSECRET-MARKER";
+
+        // One line, the line ending is not part of the secret (echo / Windows editors).
+        assert_eq!(
+            read_secret_file(&write("ok", b"correct horse battery\n")).unwrap(),
+            "correct horse battery"
+        );
+        assert_eq!(
+            read_secret_file(&write("crlf", b" spaces stay inside \r\n")).unwrap(),
+            " spaces stay inside "
+        );
+        let exact = "x".repeat(SECRET_MAX_BYTES as usize);
+        assert_eq!(
+            read_secret_file(&write("max", exact.as_bytes())).unwrap(),
+            exact
+        );
+
+        let bad: Vec<(std::path::PathBuf, &str)> = vec![
+            (dir.join("missing"), "Cannot read"),
+            (dir.clone(), "not a regular file"),
+            (write("empty", b""), "shorter than"),
+            (write("newline", b"\n"), "shorter than"),
+            (
+                write("short", format!("{}\n", &marker[..9]).as_bytes()),
+                "shorter than",
+            ),
+            (
+                write(
+                    "big",
+                    format!("{marker}{}", "y".repeat(SECRET_MAX_BYTES as usize)).as_bytes(),
+                ),
+                "larger than",
+            ),
+            (
+                write("twolines", format!("{marker}\nsecond line").as_bytes()),
+                "single line",
+            ),
+            (
+                write("tab", format!("{marker}\tmore").as_bytes()),
+                "single line",
+            ),
+            (
+                write(
+                    "binary",
+                    &[
+                        0xff, 0xfe, b'a', b'b', b'c', b'd', b'e', b'f', b'g', b'h', b'i', b'j',
+                        b'k', b'l', b'm', b'n',
+                    ],
+                ),
+                "not UTF-8",
+            ),
+        ];
+        for (path, want) in &bad {
+            let err = format!("{:#}", read_secret_file(path).unwrap_err());
+            assert!(err.contains(want), "{}: {err}", path.display());
+            assert!(!err.contains(&marker[..9]), "secret leaked into: {err}");
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = write("locked", format!("{marker}-long-enough").as_bytes());
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // root ignores file modes; the case only means something for a normal user.
+            if std::fs::File::open(&locked).is_err() {
+                let err = format!("{:#}", read_secret_file(&locked).unwrap_err());
+                assert!(
+                    err.contains("Cannot read") && !err.contains(marker),
+                    "{err}"
+                );
+            } else {
+                eprintln!("note: running as root, unreadable-file case not exercised");
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

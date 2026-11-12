@@ -3,8 +3,10 @@
 //! Start: `rusttalk-server [pfad/zur/server.toml]`
 //! Update: `sudo rusttalk-server update [--check] [--no-restart]` (see [`update`])
 //! Version: `rusttalk-server --version`
+//! Health: `rusttalk-server --healthcheck [pfad/zur/server.toml]` (see [`container`])
 
 mod config;
+mod container;
 mod db;
 mod gif;
 mod link;
@@ -36,6 +38,15 @@ async fn main() -> anyhow::Result<()> {
             let code = tokio::task::spawn_blocking(move || update::run_cli(&args[1..])).await?;
             std::process::exit(code);
         }
+        Some("--healthcheck") => {
+            let path = args
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| "server.toml".to_string());
+            std::process::exit(
+                tokio::task::spawn_blocking(move || container::healthcheck(&path)).await?,
+            );
+        }
         _ => {}
     }
 
@@ -46,8 +57,33 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config_path = args.first().cloned().unwrap_or_else(|| "server.toml".to_string());
-    let cfg = ServerConfig::load(&config_path)
+    let in_container = container::enabled();
+    // Read the secret before anything is created, so a bad one leaves no state behind.
+    let admin_from_file = std::env::var_os(config::ADMIN_PASSWORD_FILE_ENV)
+        .map(|path| config::read_secret_file(std::path::Path::new(&path)))
+        .transpose()
+        .with_context(|| format!("Admin password from {}", config::ADMIN_PASSWORD_FILE_ENV))?;
+    if in_container && container::write_default_config(std::path::Path::new(&config_path))? {
+        info!("Created default config {config_path}");
+    }
+    let mut cfg = ServerConfig::load(&config_path)
         .with_context(|| format!("Could not load config '{config_path}'"))?;
+    if let Some(password) = admin_from_file {
+        cfg.admin_password = Some(password);
+        info!(
+            "Admin password read from {}",
+            config::ADMIN_PASSWORD_FILE_ENV
+        );
+    }
+    if in_container {
+        // Without this, the first stranger to connect could make themselves admin.
+        anyhow::ensure!(
+            cfg.admin_password.as_deref().is_some_and(|p| !p.is_empty()),
+            "No admin password: point {} at a mounted secret file",
+            config::ADMIN_PASSWORD_FILE_ENV
+        );
+        cfg.admin_password_required = true;
+    }
 
     info!(
         "Starting RustTalk server {} '{}' (max. {} clients)",
@@ -89,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
                 tick.tick().await;
                 match tokio::task::spawn_blocking(update::check).await {
                     Ok(Ok(Some(release))) => {
-                        let notice = update::notice(&release);
+                        let notice = update::notice(&release, in_container);
                         if state.lock().unwrap().set_update_notice(notice.clone()) {
                             tracing::warn!("{notice}");
                         }
@@ -114,6 +150,32 @@ async fn main() -> anyhow::Result<()> {
     let tls = rusttalk_shared::secure::server_config(cert, key).context("TLS configuration")?;
     let tcp = tcp::run_listener(state.clone(), &cfg.bind_address, tls);
     let udp = udp::run_udp(state.clone(), &cfg.bind_address);
-    tokio::try_join!(tcp, udp)?;
-    Ok(())
+    tokio::select! {
+        res = async { tokio::try_join!(tcp, udp) } => {
+            res?;
+        }
+        res = shutdown_signal() => {
+            res.context("Signal handler")?;
+            info!("Shutting down");
+            // Waits for a running change to finish, then closes SQLite (WAL checkpoint).
+            state.lock().unwrap_or_else(|e| e.into_inner()).close_db();
+            info!("Shutdown complete");
+        }
+    }
+    // Do not wait for blocking tasks (update check, GIF search) that may still run.
+    std::process::exit(0);
+}
+
+/// SIGTERM (`docker stop`, `systemctl stop`) or Ctrl+C / SIGINT.
+async fn shutdown_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    #[cfg(unix)]
+    let terminate = term.recv();
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<Option<()>>();
+    tokio::select! {
+        _ = terminate => Ok(()),
+        res = tokio::signal::ctrl_c() => res,
+    }
 }
