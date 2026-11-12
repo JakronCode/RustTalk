@@ -26,7 +26,7 @@ Lightweight voice chat in Rust — a Discord-style client with a TeamSpeak-style
 - **SQLite persistence** (server): channels (incl. order), chat history (retention 10k per channel) and the lobby log survive restarts
 - **Client UI:** dark mode, procedural logo, saved servers, settings in a separate window, mic level meter, avatars with talking ring, per-user local mute and **per-user volume** 0–200 % (right click, remembered by name), **input volume**, UI scaling
 - **Auto-reconnect:** on connection loss the client retries with backoff (1 s … 30 s) and rejoins the last voice channel with the same mute state
-- **Video (MJPEG ~25 fps over TCP):** webcam with device selection + live preview, share a screen or a single window via a picker ("Applications" / "Entire Screen") **with computer audio** (WASAPI loopback, your RustTalk voices are filtered out); camera and screen at the same time. Click a tile for fullscreen with a member bar (green dot while talking). Quality levels "High" (1080p) and "Balanced" (720p)
+- **Video (H.264 ~25 fps over TCP, OpenH264):** webcam with device selection + live preview, share a screen or a single window via a picker ("Applications" / "Entire Screen") **with computer audio** (WASAPI loopback, your RustTalk voices are filtered out); camera and screen at the same time. Click a tile for fullscreen with a member bar (green dot while talking). Quality levels "High" (1080p, ~4 Mbit/s) and "Balanced" (720p, ~2 Mbit/s); viewers who join late or lose frames ask the sender for a keyframe
 - **Server settings** (in the app): name, icon, welcome message and rules in the lobby, **join/leave messages** in an announcement text channel, AFK notice template, message of the day, **auto AFK mover** (muted users are moved after N minutes, default 10) — roles/bans/invites as WIP
 - **Report a Bug** button that opens a pre-filled GitHub issue
 - **Server:** single binary + `server.toml`, systemd service, one port (7331 TCP+UDP), optional password, keepalive/timeouts for dead connections
@@ -160,6 +160,5 @@ bash Server/Test_Scripts/e2e_local.sh
 ## Known limitations
 
 - The server certificate is self-signed: compare the fingerprint in the server log (`TLS-Fingerprint: ...`) with Settings > Advanced on first connect if you want to rule out a man in the middle
-- Video (camera/screen) is MJPEG and not yet H.264 (see ROADMAP D4)
 - GIFs need one free GIPHY API key per server (developers.giphy.com), entered under Server Settings > Integrations
-- Video is MJPEG over TCP: "High" needs ~5–6 MB/s per screen stream and viewer — meant for LAN (pick "Balanced" on Wi-Fi). On very large monitors (3440×1440) "High" reaches ~19 fps
+- Video runs over the TCP control connection (H.264): fine in a LAN, on weak Wi-Fi pick "Balanced"

@@ -2,6 +2,16 @@
 
 > Pflichtdokumentation aller Testläufe. Neueste oben.
 
+## 2026-11-12 (23) – D4: H.264-Video statt MJPEG
+
+**Client:** `video_codec.rs` (OpenH264, aus dem Quellcode gebaut, nur C++-Compiler nötig). Sender: pro Quelle ein Encoder-Thread (H.264-Bilder hängen voneinander ab), Aufnahme übergibt höchstens ein Bild (beschäftigter Encoder verwirft statt Latenz aufzubauen), Bildschirm 1080p 4 Mbit/s bzw. 720p 2 Mbit/s, Kamera 720p 2,5 / 540p 1,2 Mbit/s (vorher MJPEG ~40–50 Mbit/s), Vollbild alle 4 s und beim Live-Gehen. Wire-Format: 4-Byte-Bildnummer + Annex-B. Empfänger: ein Decoder-Thread pro Stream, Bild als Textur (vorher JPEG-Hash + Dekodierung beim Zeichnen); Lücke in der Bildnummer, Decoder-Fehler oder ausgelasteter Decoder → `RequestKeyframe` (max. 1/s pro Stream), Server leitet als `KeyframeRequest` nur innerhalb desselben Channels an Teilende weiter. Kamera-Vorschau direkt als Bild (kein JPEG mehr).
+
+**Tests:** Client 82 ✅ (neu: Roundtrip + Größe, später Zuschauer bekommt Keyframe, Lücke erkannt, Auflösungswechsel, gerade Bildgrößen, Encoder-Thread Vorschau→Live mit Keyframe), Integration 16 ✅ (neu: `keyframe_requests_reach_the_sharer`), Server 50 ✅, Shared 16 ✅.
+**Live geprüft:** Zwei Debug-Clients am Testserver; „Sharer“ teilt das Fenster des „Viewers“ (kein Desktop), der Viewer zeigt den H.264-Stream über den Server, der Sharer seine eigene Kachel (Screenshots). Debug-Hook `share_self` startet erst im Voice-Channel (in der Lobby wird Teilen sofort beendet – im Hook war das die Ursache des ersten fehlgeschlagenen Versuchs, kein Produktfehler).
+**Nicht geprüft:** Kamera mit echter Hardware, gemessene Datenrate auf echtem Bildschirm.
+
+---
+
 ## 2026-11-11 (22) – D1–D3: Echo-Unterdrückung, Bildschirmton, Verschlüsselung (Protokoll v12, v0.6.0)
 
 **Client / Server:**

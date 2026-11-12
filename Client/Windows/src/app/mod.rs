@@ -318,6 +318,8 @@ pub struct RustTalkApp {
     screen_audio: Option<crate::audio::screen_audio::ScreenAudio>,
     /// Starting it failed: don't retry until the share stops.
     screen_audio_failed: bool,
+    /// Debug hook `share_self`: share this once we are in a voice channel.
+    dev_pending_share: Option<ShareSource>,
     cam_dialog: Option<CamDialog>,
     screen_picker: Option<ScreenPicker>,
     /// Letzter eigener Frame (auch im reinen Vorschau-Modus).
@@ -446,6 +448,7 @@ impl RustTalkApp {
             screen: None,
             screen_audio: None,
             screen_audio_failed: false,
+            dev_pending_share: None,
             cam_dialog: None,
             screen_picker: None,
             local_preview: Arc::new(Mutex::new(None)),
@@ -1230,6 +1233,12 @@ impl RustTalkApp {
             }
         }
 
+        if !self.in_lobby() {
+            if let Some(src) = self.dev_pending_share.take() {
+                self.start_screen_share(src, &cmd_tx);
+            }
+        }
+
         // Share audio follows the screen share (and the setting).
         let want_audio = self.screen.is_some() && self.config.share_screen_audio && self.audio.is_some();
         if !want_audio {
@@ -1330,9 +1339,11 @@ impl RustTalkApp {
                         "share_self" => {
                             let sources = video::list_share_sources();
                             let src = sources.into_iter().find(|e| matches!(e.source, ShareSource::Window(_)) && e.title.contains(arg)).map(|e| e.source);
-                            match (self.cmd_tx.clone(), src) {
-                                (Some(tx), Some(src)) => self.start_screen_share(src, &tx),
-                                _ => tracing::warn!("share_self: window '{arg}' not found"),
+                            // Started once we are really in the voice channel
+                            // (in the lobby a running share is stopped at once).
+                            match src {
+                                Some(src) => self.dev_pending_share = Some(src),
+                                None => tracing::warn!("share_self: window '{arg}' not found"),
                             }
                         }
                         "claim_admin" => {

@@ -1,6 +1,6 @@
 # RustTalk – Roadmap
 
-Checklist of planned features, by priority. Status as of 2026-11-11 (v0.6.0, protocol v12). Categories A, B, C done; D1-D3 done.
+Checklist of planned features, by priority. Status as of 2026-11-11 (v0.6.0, protocol v12). All categories A-D done.
 
 ## A – Quick wins (WIP spots already visible in the UI)
 
@@ -31,4 +31,4 @@ Checklist of planned features, by priority. Status as of 2026-11-11 (v0.6.0, pro
 - [x] **D1 Echo cancellation (AEC)** – WebRTC AEC3 (pure Rust port `aec3`), switchable in Voice & Audio
 - [x] **D2 Share audio with screen** – WASAPI loopback, own RustTalk playback removed by a second AEC3, Opus music mode
 - [x] **D3 Encryption** – TLS (self-signed server certificate, pinned on first use) + ChaCha20-Poly1305 for audio packets
-- [ ] **D4 More efficient video** – H.264 / hardware encoding instead of MJPEG
+- [x] **D4 More efficient video** – H.264 (OpenH264) instead of MJPEG, ~10x less bandwidth, keyframe requests
