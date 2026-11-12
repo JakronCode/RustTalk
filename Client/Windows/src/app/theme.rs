@@ -359,7 +359,8 @@ pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
         .inner
 }
 
-/// Setting row: label (+ optional description) on the left, control right.
+/// Setting row: label (+ optional description, wrapping) on the left, control
+/// right-aligned on the label's line. `wip` rows are greyed out with a badge.
 pub fn setting_row(
     ui: &mut egui::Ui,
     label: &str,
@@ -367,22 +368,50 @@ pub fn setting_row(
     wip: bool,
     control: impl FnOnce(&mut egui::Ui),
 ) {
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(label).color(HEADER));
-                if wip {
-                    wip_badge(ui);
-                }
-            });
-            if let Some(d) = desc {
-                ui.label(egui::RichText::new(d).size(12.0).color(MUTED));
-            }
+    let enabled = ui.is_enabled() && !wip;
+    let pad = dense(6.0, 3.0);
+    ui.add_space(pad);
+    let top = ui.cursor().min;
+    let width = ui.available_width();
+    let row_h = ui.spacing().interact_size.y;
+
+    // Control first (right to left), so the text knows how much room is left.
+    let mut ctrl = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(egui::Rect::from_min_size(top, egui::vec2(width, row_h)))
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    if wip {
+        ctrl.disable();
+    }
+    control(&mut ctrl);
+    let ctrl_rect = ctrl.min_rect();
+
+    let text_w = (ctrl_rect.left() - top.x - 16.0).max(120.0);
+    let mut text = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(egui::Rect::from_min_size(top, egui::vec2(text_w, row_h)))
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    text.spacing_mut().item_spacing.y = 2.0;
+    let line_h = text.text_style_height(&egui::TextStyle::Body);
+    text.add_space(((row_h - line_h) / 2.0).max(0.0));
+    let title = egui::RichText::new(label).size(14.5).color(if enabled { HEADER } else { MUTED });
+    if wip {
+        text.horizontal(|ui| {
+            ui.label(title);
+            wip_badge(ui);
         });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_enabled_ui(!wip, |ui| control(ui));
-        });
-    });
+    } else {
+        text.label(title);
+    }
+    if let Some(d) = desc {
+        text.label(egui::RichText::new(d).size(12.5).color(if enabled { MUTED } else { DISABLED }));
+    }
+
+    let bottom = text.min_rect().bottom().max(ctrl_rect.bottom()).max(top.y + row_h);
+    ui.advance_cursor_after_rect(egui::Rect::from_min_max(top, egui::pos2(top.x + width, bottom)));
+    ui.add_space(pad);
 }
 
 /// Pill-style toggle switch.
@@ -398,7 +427,7 @@ pub fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     let bg = if !enabled {
         DISABLED
     } else if *on {
-        GREEN
+        accent()
     } else {
         egui::Color32::from_rgb(0x80, 0x84, 0x8E)
     };

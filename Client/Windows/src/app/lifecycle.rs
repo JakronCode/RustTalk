@@ -223,71 +223,67 @@ impl RustTalkApp {
         });
     }
 
-    /// "Updates" card for Settings > About.
-    pub(super) fn updates_card(&mut self, ui: &mut egui::Ui) {
-        theme::card(ui, |ui| {
-            theme::caption(ui, "Updates");
-            let installed = install::mode() == Mode::Installed;
-            if let Some(r) = self.update.available.clone() {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(icons::regular::ARROW_CIRCLE_UP).size(18.0).color(theme::GREEN));
-                    ui.label(egui::RichText::new(format!("Version {} is available (you have {})", r.version, env!("CARGO_PKG_VERSION"))).strong().color(theme::HEADER));
-                });
-                if !r.notes.trim().is_empty() {
-                    let notes: String = r.notes.chars().take(600).collect();
-                    egui::ScrollArea::vertical().max_height(110.0).show(ui, |ui| {
-                        ui.label(egui::RichText::new(notes).size(12.0).color(theme::MUTED));
-                    });
-                }
-                ui.horizontal(|ui| {
-                    if self.update.installing {
-                        let p = self.update.progress.load(std::sync::atomic::Ordering::Relaxed);
-                        ui.add(egui::ProgressBar::new(p as f32 / 100.0).desired_width(220.0).text(format!("Downloading... {p} %")));
-                    } else if installed {
-                        if theme::primary_button(ui, &format!("{}  Install update & restart", icons::regular::DOWNLOAD_SIMPLE)).clicked() {
-                            self.install_update();
-                        }
-                    } else {
-                        ui.label(egui::RichText::new("Updates install automatically only in the installed version.").color(theme::MUTED));
-                    }
-                    if !r.page_url.is_empty() && ui.link("Release notes").clicked() {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(&r.page_url));
-                    }
-                });
-            } else {
-                ui.horizontal(|ui| {
-                    let text = if self.update.checking {
-                        "Checking for updates...".to_string()
-                    } else if self.update.up_to_date {
-                        format!("{}  RustTalk is up to date", icons::regular::CHECK_CIRCLE)
-                    } else {
-                        "Not checked yet".to_string()
-                    };
-                    ui.label(egui::RichText::new(text).color(theme::TEXT));
-                    if self.update.checking {
-                        ui.spinner();
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add_enabled(!self.update.checking, egui::Button::new(format!("{}  Check now", icons::regular::ARROWS_CLOCKWISE))).clicked() {
-                            self.check_for_updates();
-                        }
-                    });
-                });
-            }
-            if let Some(e) = &self.update.error {
-                ui.label(egui::RichText::new(e).color(theme::RED));
-            }
-            ui.separator();
-            theme::setting_row(ui, "Check for updates on start", Some("Asks GitHub for the latest release (no personal data is sent)"), false, |ui| {
-                theme::toggle(ui, &mut self.config.check_updates);
+    /// "Updates" section for Settings > About.
+    pub(super) fn updates_section(&mut self, ui: &mut egui::Ui) {
+        let installed = install::mode() == Mode::Installed;
+        if let Some(r) = self.update.available.clone() {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(icons::regular::ARROW_CIRCLE_UP).size(18.0).color(theme::GREEN));
+                ui.label(egui::RichText::new(format!("Version {} is available (you have {})", r.version, env!("CARGO_PKG_VERSION"))).strong().color(theme::HEADER));
             });
-            if !installed {
-                ui.label(
-                    egui::RichText::new(format!("{}  This copy runs without installation (development build).", icons::regular::INFO))
-                        .size(12.0)
-                        .color(theme::MUTED),
-                );
+            if !r.notes.trim().is_empty() {
+                let notes: String = r.notes.chars().take(600).collect();
+                egui::ScrollArea::vertical().max_height(110.0).show(ui, |ui| {
+                    ui.label(egui::RichText::new(notes).size(12.0).color(theme::MUTED));
+                });
             }
+            ui.horizontal(|ui| {
+                if self.update.installing {
+                    let p = self.update.progress.load(std::sync::atomic::Ordering::Relaxed);
+                    ui.add(egui::ProgressBar::new(p as f32 / 100.0).desired_width(220.0).text(format!("Downloading... {p} %")));
+                } else if installed {
+                    if theme::primary_button(ui, &format!("{}  Install update & restart", icons::regular::DOWNLOAD_SIMPLE)).clicked() {
+                        self.install_update();
+                    }
+                } else {
+                    ui.label(egui::RichText::new("Updates install automatically only in the installed version.").color(theme::MUTED));
+                }
+                if !r.page_url.is_empty() && ui.link("Release notes").clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(&r.page_url));
+                }
+            });
+        } else {
+            ui.horizontal(|ui| {
+                let text = if self.update.checking {
+                    "Checking for updates...".to_string()
+                } else if self.update.up_to_date {
+                    format!("{}  RustTalk is up to date", icons::regular::CHECK_CIRCLE)
+                } else {
+                    "Not checked yet".to_string()
+                };
+                ui.label(egui::RichText::new(text).color(theme::TEXT));
+                if self.update.checking {
+                    ui.spinner();
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add_enabled(!self.update.checking, egui::Button::new(format!("{}  Check now", icons::regular::ARROWS_CLOCKWISE))).clicked() {
+                        self.check_for_updates();
+                    }
+                });
+            });
+        }
+        if let Some(e) = &self.update.error {
+            ui.label(egui::RichText::new(e).color(theme::RED));
+        }
+        theme::setting_row(ui, "Check for updates on start", Some("Asks GitHub for the latest release (no personal data is sent)"), false, |ui| {
+            theme::toggle(ui, &mut self.config.check_updates);
         });
+        if !installed {
+            ui.label(
+                egui::RichText::new(format!("{}  This copy runs without installation (development build).", icons::regular::INFO))
+                    .size(12.0)
+                    .color(theme::MUTED),
+            );
+        }
     }
 }
