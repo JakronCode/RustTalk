@@ -1,0 +1,22 @@
+:root{--bg:#1e1f22;--bg2:#2b2d31;--line:#3f4147;--text:#f2f3f5;--muted:#b5bac1;--dim:#80848e;--accent:#5865f2}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,Ubuntu,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:#8b93ff}
+.wrap{max-width:820px;margin:0 auto;padding:0 20px}
+nav{border-bottom:1px solid var(--line);background:rgba(30,31,34,.9)}
+nav .wrap{display:flex;align-items:center;justify-content:space-between;height:64px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:19px;text-decoration:none;color:var(--text)}
+.lang{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.lang button{background:none;border:0;color:var(--muted);padding:5px 10px;font:inherit;font-size:13px;font-weight:600;cursor:pointer}
+.lang button.on{background:var(--accent);color:#fff}
+main{padding:48px 20px 40px}
+h1{font-size:clamp(28px,5vw,38px);margin:0 0 24px;letter-spacing:-.01em}
+h2{font-size:19px;margin:34px 0 8px}
+p{color:var(--muted);margin:0 0 12px}
+.note{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:14px 18px;color:var(--text)}
+.small{font-size:14px;color:var(--dim);margin-top:36px}
+code{font-family:ui-monospace,"Cascadia Code",Consolas,monospace;font-size:.92em;background:#111214;padding:2px 6px;border-radius:5px}
+footer{border-top:1px solid var(--line);padding:26px 0 40px;font-size:14px}
+footer .wrap{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+footer a{color:var(--muted)}
+html[lang=en] [data-l=de],html[lang=de] [data-l=en]{display:none!important}
