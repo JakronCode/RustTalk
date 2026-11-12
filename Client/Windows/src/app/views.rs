@@ -1084,8 +1084,7 @@ pub(super) fn chat_line(
                         ui.horizontal(|ui| {
                             for (icon, tip, a) in buttons {
                                 let color = if matches!(a, ChatAction::Delete(_)) { theme::RED } else { theme::MUTED };
-                                if ui
-                                    .add(egui::Button::new(egui::RichText::new(icon).size(15.0).color(color)).frame(false).min_size(egui::vec2(24.0, 22.0)))
+                                if theme::ghost_button_sized(ui, egui::RichText::new(icon).size(15.0).color(color), egui::vec2(24.0, 22.0))
                                     .on_hover_text(tip)
                                     .clicked()
                                 {
