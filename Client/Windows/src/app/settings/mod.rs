@@ -27,6 +27,15 @@ pub(super) struct SettingsNav {
     reset_scroll: bool,
 }
 
+const SEARCH_ID: &str = "settings_search";
+
+fn recorded_settings_binding(ctx: &egui::Context) -> Option<Option<String>> {
+    if ctx.memory(|m| m.has_focus(egui::Id::new(SEARCH_ID))) {
+        return Some(None);
+    }
+    ctx.input(|i| i.events.iter().find_map(hotkey::recorded_binding))
+}
+
 impl RustTalkApp {
     pub(super) fn open_settings(&mut self, page: SettingsPage) {
         self.input_devices = capture::input_device_names();
@@ -64,12 +73,12 @@ impl RustTalkApp {
                     self.recording_key = None;
                     self.config.save();
                 }
-                self.capture_keybind(ctx);
                 egui::SidePanel::left("settings_nav")
                     .exact_width(240.0)
                     .resizable(false)
                     .frame(egui::Frame::default().fill(theme::SIDEBAR).inner_margin(egui::Margin { left: 12, right: 10, top: 16, bottom: 10 }))
                     .show(ctx, |ui| self.settings_nav(ui));
+                self.capture_keybind(ctx);
                 egui::SidePanel::right("settings_close")
                     .exact_width(72.0)
                     .resizable(false)
@@ -84,7 +93,7 @@ impl RustTalkApp {
                             area = area.vertical_scroll_offset(0.0);
                         }
                         area.show(ui, |ui| {
-                            ui.set_max_width(CONTENT_MAX_WIDTH.min(ui.available_width() - 16.0));
+                            ui.set_max_width((ui.available_width() - 16.0).clamp(0.0, CONTENT_MAX_WIDTH));
                             self.settings_page_body(ui);
                         });
                     });
@@ -170,6 +179,7 @@ impl RustTalkApp {
     }
 
     /// Search box with magnifier and clear button; Escape clears it.
+    /// Its id is [`SEARCH_ID`]; focusing it cancels shortcut recording.
     fn settings_search_field(&mut self, ui: &mut egui::Ui) -> egui::Response {
         let nav = &mut self.settings_nav;
         if !nav.search.is_empty() && self.recording_key.is_none() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
@@ -187,11 +197,11 @@ impl RustTalkApp {
                     let clear_w = if nav.search.is_empty() { 0.0 } else { 26.0 };
                     let edit = ui.add(
                         egui::TextEdit::singleline(&mut nav.search)
-                            .id(egui::Id::new("settings_search"))
+                            .id(egui::Id::new(SEARCH_ID))
                             .hint_text("Search")
                             .frame(false)
                             .margin(egui::Margin::symmetric(0, 2))
-                            .desired_width(ui.available_width() - clear_w),
+                            .desired_width((ui.available_width() - clear_w).max(0.0)),
                     );
                     if !nav.search.is_empty() {
                         let clear = ui
@@ -282,9 +292,7 @@ impl RustTalkApp {
 
     fn capture_keybind(&mut self, ctx: &egui::Context) {
         let Some(action) = self.recording_key else { return; };
-        let pressed: Option<Option<String>> = ctx.input(|i| {
-            i.events.iter().find_map(hotkey::recorded_binding)
-        });
+        let pressed = recorded_settings_binding(ctx);
         if let Some(choice) = pressed {
             self.recording_key = None;
             if let Some(name) = choice {
@@ -317,7 +325,7 @@ impl RustTalkApp {
 
 /// Thin full-width line between sections.
 fn divider(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width().max(0.0), 1.0), egui::Sense::hover());
     ui.painter().rect_filled(rect, 0.0, theme::SELECTED);
 }
 
@@ -329,7 +337,7 @@ fn nav_caption(ui: &mut egui::Ui, text: &str) {
 }
 
 fn nav_page_row(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), dense(32.0, 28.0)), egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width().max(0.0), dense(32.0, 28.0)), egui::Sense::click());
     let hovered = resp.hovered();
     let bg = if selected {
         theme::SELECTED
@@ -355,7 +363,7 @@ fn nav_section_list(ui: &mut egui::Ui, sections: &[&table::Section], active: Opt
     let mut clicked = None;
     let mut rows = Vec::with_capacity(sections.len());
     for sec in sections {
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), egui::Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width().max(0.0), row_h), egui::Sense::click());
         if resp.clicked() {
             clicked = Some(sec.id);
         }
@@ -379,4 +387,33 @@ fn nav_section_list(ui: &mut egui::Ui, sections: &[&table::Section], active: Opt
         p.text(rect.left_center() + egui::vec2(34.0, 0.0), egui::Align2::LEFT_CENTER, sec.title, egui::FontId::proportional(dense(13.5, 13.0)), fg);
     }
     clicked
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    #[test]
+    fn focused_search_cancels_shortcut_capture_before_typing() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(Default::default(), |_| {});
+        assert_eq!(recorded_settings_binding(&ctx), None);
+        ctx.memory_mut(|m| m.request_focus(egui::Id::new(SEARCH_ID)));
+        assert_eq!(recorded_settings_binding(&ctx), Some(None));
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::A,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            assert_eq!(recorded_settings_binding(ctx), Some(None));
+            ctx.memory_mut(|m| m.surrender_focus(egui::Id::new(SEARCH_ID)));
+            assert_eq!(recorded_settings_binding(ctx), Some(Some("A".to_owned())));
+        });
+    }
 }
