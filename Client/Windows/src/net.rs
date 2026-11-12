@@ -155,7 +155,7 @@ async fn run(
     let verifier = secure::PinnedVerifier::new(expected.clone());
     let connector = tokio_rustls::TlsConnector::from(secure::client_config(verifier.clone()));
     let name = rustls::pki_types::ServerName::try_from(secure::TLS_SERVER_NAME)?;
-    let stream = match timeout(CONNECT_TIMEOUT, connector.connect(name, tcp)).await {
+    let mut stream = match timeout(CONNECT_TIMEOUT, connector.connect(name, tcp)).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
             let seen = verifier.seen.lock().unwrap().clone();
@@ -172,7 +172,9 @@ async fn run(
         anyhow::bail!("Secure connection failed: the server sent no certificate");
     };
     if expected.is_none() {
-        // First contact: hang up before Hello (no name, identity or password sent).
+        // Send TLS close_notify before dropping the socket; never send application data.
+        use tokio::io::AsyncWriteExt;
+        let _ = timeout(Duration::from_secs(1), stream.shutdown()).await;
         return Err(CertDecision { addr, fingerprint, changed: false }.into());
     }
     let (mut reader, mut writer) = tokio::io::split(stream);
