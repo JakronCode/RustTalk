@@ -84,8 +84,9 @@ impl RustTalkApp {
                                             );
                                         }
                                         // Streams dieses Users: Klick wechselt die Ansicht.
+                                        // Unwatched streams too: clicking one starts watching it.
                                         for k in [VideoKind::Screen, VideoKind::Camera] {
-                                            if !self.video_frames.contains_key(&(user.id, k)) {
+                                            if !self.streams_of(user).contains(&k) {
                                                 continue;
                                             }
                                             let active = (user.id, k) == key;
@@ -183,6 +184,7 @@ impl RustTalkApp {
         if leave {
             self.leave_fullscreen();
         } else if let Some(k) = switch_to {
+            self.watch(k.0, k.1);
             self.fullscreen = Some(k);
         }
     }
@@ -294,6 +296,45 @@ impl RustTalkApp {
         if kind == VideoKind::Camera {
             *self.local_preview.lock().unwrap() = None;
             self.local_preview_tex = None;
+        }
+    }
+
+    /// Streams of a user that can be shown: our own (local preview) or what
+    /// the server announced for others.
+    pub(super) fn streams_of(&self, user: &UserInfo) -> Vec<VideoKind> {
+        if user.id == self.my_id {
+            [VideoKind::Screen, VideoKind::Camera].into_iter().filter(|k| self.video_frames.contains_key(&(user.id, *k))).collect()
+        } else {
+            let mut v = user.streams.clone();
+            v.sort_by_key(|k| *k != VideoKind::Screen); // screen first
+            v
+        }
+    }
+
+    /// Start receiving a stream (the server sends it only to watchers).
+    pub(super) fn watch(&mut self, from_id: u64, kind: VideoKind) {
+        if from_id == self.my_id || !self.watching.insert((from_id, kind)) {
+            return;
+        }
+        // A stream we stopped watching a moment ago: let its frames in again.
+        self.video_stopped.remove(&(from_id, kind));
+        if let Some(tx) = &self.cmd_tx {
+            let _ = tx.send(Command::Raw(rusttalk_shared::protocol::ClientMessage::Watch { from_id, kind, watching: true }));
+        }
+    }
+
+    /// Stop receiving a stream: no more bandwidth for it, the tile goes back
+    /// to "Watch".
+    pub(super) fn unwatch(&mut self, from_id: u64, kind: VideoKind) {
+        if !self.watching.remove(&(from_id, kind)) {
+            return;
+        }
+        if let Some(tx) = &self.cmd_tx {
+            let _ = tx.send(Command::Raw(rusttalk_shared::protocol::ClientMessage::Watch { from_id, kind, watching: false }));
+        }
+        self.clear_video_of(from_id, Some(kind));
+        if self.fullscreen == Some((from_id, kind)) {
+            self.leave_fullscreen();
         }
     }
 

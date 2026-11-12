@@ -31,11 +31,14 @@
 //!     ask the sender for a keyframe (`RequestKeyframe` -> `KeyframeRequest`).
 //! v13: Poke: `Poke { target, message }` -> the target gets `Poked` (popup +
 //!     wake-up sound, like TeamSpeak).
+//! v14: Opt-in watching: the server announces running streams
+//!     (`UserInfo.streams`, `StreamsChanged`) and relays video only to
+//!     viewers who asked for it (`Watch { from_id, kind, watching }`).
 
 use serde::{Deserialize, Serialize};
 
 /// Aktuelle Protokollversion. Client und Server müssen übereinstimmen.
-pub const PROTOCOL_VERSION: u16 = 13;
+pub const PROTOCOL_VERSION: u16 = 14;
 
 /// Max. length of a poke message.
 pub const MAX_POKE_LEN: usize = 100;
@@ -235,6 +238,8 @@ pub struct UserInfo {
     /// Teilt gerade Kamera/Bildschirm.
     pub sharing: bool,
     pub role: Role,
+    /// Streams this user is sending right now (watch them with `Watch`).
+    pub streams: Vec<VideoKind>,
 }
 
 /// Role of an identity on a server.
@@ -441,6 +446,13 @@ pub enum ClientMessage {
         target: u64,
         message: String,
     },
+    /// Start / stop receiving a stream of someone in the same channel. Video
+    /// only goes to viewers who watch it (saves everyone else's bandwidth).
+    Watch {
+        from_id: u64,
+        kind: VideoKind,
+        watching: bool,
+    },
     /// Viewer: please send a full picture of this stream (joined late / frames lost).
     RequestKeyframe {
         from_id: u64,
@@ -565,6 +577,11 @@ pub enum ServerMessage {
         client_id: u64,
         sharing: bool,
     },
+    /// The running streams of a user changed (to everyone; frames only to watchers).
+    StreamsChanged {
+        client_id: u64,
+        streams: Vec<VideoKind>,
+    },
     /// Video-Frame (JPEG) eines Mitglieds des eigenen Voice-Channels.
     VideoFrame {
         from_id: u64,
@@ -667,6 +684,7 @@ mod tests {
             ClientMessage::DeleteInvite { code: "XYZ".into() },
             ClientMessage::RequestAdminData,
             ClientMessage::RequestKeyframe { from_id: 3, kind: VideoKind::Screen },
+            ClientMessage::Watch { from_id: 3, kind: VideoKind::Camera, watching: true },
             ClientMessage::SetMuteState { muted: true, deafened: false },
             ClientMessage::SetSharing { sharing: true },
             ClientMessage::VideoFrame { kind: VideoKind::Camera, data: vec![1, 2, 3] },
@@ -692,6 +710,7 @@ mod tests {
             muted: false,
             deafened: false,
             sharing: true,
+            streams: vec![VideoKind::Screen],
         };
         let channel = ChannelInfo {
             id: 1,
@@ -785,6 +804,7 @@ mod tests {
             },
             ServerMessage::MuteStateChanged { client_id: 1, muted: true, deafened: true },
             ServerMessage::SharingChanged { client_id: 1, sharing: true },
+            ServerMessage::StreamsChanged { client_id: 1, streams: vec![VideoKind::Camera, VideoKind::Screen] },
             ServerMessage::VideoFrame { from_id: 1, kind: VideoKind::Screen, data: vec![9, 8, 7] },
             ServerMessage::VideoStopped { from_id: 1, kind: VideoKind::Camera },
             ServerMessage::ServerSettingsChanged { settings: ServerSettings::default() },

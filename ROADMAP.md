@@ -42,7 +42,8 @@ Bugs:
 Improvements (priority order):
 
 - [ ] **E4 Better video quality** – webcam and screen share: higher bitrate/resolution presets, frame pacing, maybe hardware encoder
-- [ ] **E5 Focused video view** – a video/details view where you pick whose streams you watch and hide others (opt-in watching)
+- [x] **E5a Opt-in watching** – streams show as a "Watch" card; the server relays video only to viewers who clicked it, "Stop watching" per tile (protocol v14)
+- [ ] **E5b Focused video view** – a video/details view to focus one stream and hide people
 - [ ] **E6 GUI overhaul** – go through all screens for details (spacing, states, empty states, consistency)
 
 Ideas:

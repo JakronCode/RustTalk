@@ -313,6 +313,8 @@ pub struct RustTalkApp {
     /// Letzte Video-Frames pro (User, Art) als JPEG – Kamera und Bildschirm
     /// eines Users sind getrennte Kacheln.
     video_frames: HashMap<(u64, VideoKind), media_ui::VideoView>,
+    /// Streams of others we chose to watch (opt-in; the server only sends these).
+    watching: HashSet<(u64, VideoKind)>,
     /// Recently ended streams: late frames must not bring the tile back
     /// (otherwise the last picture stays frozen on screen).
     video_stopped: HashMap<(u64, VideoKind), Instant>,
@@ -466,6 +468,7 @@ impl RustTalkApp {
             textures: TextureCache::default(),
             pending_image: None,
             video_frames: HashMap::new(),
+            watching: HashSet::new(),
             video_stopped: HashMap::new(),
             video_epoch: Arc::new([std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)]),
             video_tx,
@@ -599,6 +602,7 @@ impl RustTalkApp {
         *self.local_preview.lock().unwrap() = None;
         self.local_preview_tex = None;
         self.video_frames.clear();
+        self.watching.clear();
         self.video_stopped.clear();
         for e in self.video_epoch.iter() {
             e.fetch_add(1, Ordering::Relaxed);
@@ -1039,9 +1043,11 @@ impl RustTalkApp {
                 if client_id == self.my_id {
                     // Leaving a channel ends our camera and screen share: they
                     // don't follow us into the next channel (start them again there).
+                    // What we watched there ends too (the server forgets it as well).
                     let old_channel = self.users.get(&self.my_id).map(|u| u.channel_id);
                     if old_channel.is_some_and(|old| old != channel_id) {
                         self.stop_own_sources();
+                        self.watching.clear();
                     }
                     // Our own move: chime when we enter a voice channel, the
                     // leave sound when we go back to the lobby (no spoken name).
@@ -1212,6 +1218,20 @@ impl RustTalkApp {
                     u.deafened = deafened;
                 }
             }
+            ServerMessage::StreamsChanged { client_id, streams } => {
+                // Ended streams: their tile and our watching go away.
+                for kind in [VideoKind::Camera, VideoKind::Screen] {
+                    if client_id != self.my_id && !streams.contains(&kind) {
+                        self.watching.remove(&(client_id, kind));
+                        if self.video_frames.contains_key(&(client_id, kind)) {
+                            self.clear_video_of(client_id, Some(kind));
+                        }
+                    }
+                }
+                if let Some(u) = self.users.get_mut(&client_id) {
+                    u.streams = streams;
+                }
+            }
             ServerMessage::SharingChanged { client_id, sharing } => {
                 if let Some(u) = self.users.get_mut(&client_id) {
                     u.sharing = sharing;
@@ -1229,7 +1249,8 @@ impl RustTalkApp {
                         VideoKind::Screen => self.screen.is_some(),
                     }
                 } else {
-                    self.users.get(&from_id).is_some_and(|u| u.sharing)
+                    // Only streams we chose to watch.
+                    self.watching.contains(&(from_id, kind))
                 };
                 if live {
                     self.feed_video((from_id, kind), data);
@@ -1395,9 +1416,12 @@ impl RustTalkApp {
             }
         }
 
-        // Fullscreen: only the stream + member bar. Ends when the stream is gone.
+        // Fullscreen: only the stream + member bar. Ends when the stream is gone
+        // (a stream just picked to watch counts while its first frame is on the way).
         if let Some(key) = self.fullscreen {
-            if self.video_frames.contains_key(&key) {
+            let live = self.video_frames.contains_key(&key)
+                || (self.watching.contains(&key) && self.users.get(&key.0).is_some_and(|u| u.streams.contains(&key.1)));
+            if live {
                 self.ui_fullscreen(ctx, key);
                 return;
             }

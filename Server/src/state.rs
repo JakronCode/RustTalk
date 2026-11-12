@@ -3,14 +3,14 @@
 //! Alle Methoden sind synchron (kein `.await` im Lock), damit ein
 //! einfacher `std::sync::Mutex` reicht.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusttalk_shared::protocol::{AuditEntry, BanInfo, InviteInfo, Role, RoleEntry,
-    ChannelInfo, ChannelKind, ChannelPlacement, ChatRecord, LogEntry, ServerMessage, UserInfo,
+    ChannelInfo, ChannelKind, ChannelPlacement, ChatRecord, LogEntry, ServerMessage, UserInfo, VideoKind,
     ServerSettings, MAX_CHAT_LEN, MAX_ICON_BYTES, MAX_NAME_LEN, MAX_SERVER_MESSAGE_LEN, MAX_WELCOME_LEN,
     SPAWN_LOG_CAP, DEFAULT_AFK_NOTICE, fill_template, MAX_POKE_LEN,
 };
@@ -41,6 +41,10 @@ pub struct Client {
     pub deafened: bool,
     /// Teilt gerade Kamera/Bildschirm.
     pub sharing: bool,
+    /// Streams this client is sending (known from its first frame of each kind).
+    pub streams: BTreeSet<VideoKind>,
+    /// Streams this client watches: (sender, kind). Only these frames reach it.
+    pub watching: HashSet<(u64, VideoKind)>,
     pub udp_token: u64,
     pub udp_addr: Option<SocketAddr>,
     /// Seit wann stumm (fuer den AFK-Mover). None = nicht stumm.
@@ -69,6 +73,7 @@ impl Client {
             deafened: self.deafened,
             sharing: self.sharing,
             role: self.role,
+            streams: self.streams.iter().copied().collect(),
         }
     }
 }
@@ -497,13 +502,80 @@ impl State {
 
     /// Camera/screen sharing ends when someone leaves their channel (it does
     /// not follow them into the next one). Tells everyone.
+    /// Also: what they watched in the old channel is no longer theirs.
     fn end_sharing(&mut self, ids: &[u64]) {
         for id in ids {
+            if let Some(c) = self.clients.get_mut(id) {
+                c.watching.clear();
+            }
+            self.clear_streams(*id);
             if let Some(c) = self.clients.get_mut(id).filter(|c| c.sharing) {
                 c.sharing = false;
                 self.broadcast(&ServerMessage::SharingChanged { client_id: *id, sharing: false });
             }
         }
+    }
+
+    /// A video frame from `sender`: registers the stream on its first frame
+    /// (announced to everyone) and returns who gets it - members of the same
+    /// voice channel who watch it.
+    pub fn stream_frame(&mut self, sender: u64, kind: VideoKind) -> Vec<(mpsc::UnboundedSender<ServerMessage>, Arc<AtomicUsize>)> {
+        let Some(c) = self.clients.get(&sender) else { return Vec::new() };
+        let in_voice = self.channels.get(&c.channel_id).is_some_and(|ch| ch.kind == ChannelKind::Voice);
+        if !c.sharing || !in_voice {
+            return Vec::new();
+        }
+        if let Some(c) = self.clients.get_mut(&sender) {
+            if c.streams.insert(kind) {
+                let streams = c.streams.iter().copied().collect();
+                self.broadcast(&ServerMessage::StreamsChanged { client_id: sender, streams });
+            }
+        }
+        self.video_targets(sender, kind)
+    }
+
+    /// `sender` ended one stream: watchers get `VideoStopped`, everyone the new list.
+    pub fn stop_stream(&mut self, sender: u64, kind: VideoKind) {
+        for (tx, _) in self.video_targets(sender, kind) {
+            let _ = tx.send(ServerMessage::VideoStopped { from_id: sender, kind });
+        }
+        for c in self.clients.values_mut() {
+            c.watching.remove(&(sender, kind));
+        }
+        if let Some(c) = self.clients.get_mut(&sender) {
+            if c.streams.remove(&kind) {
+                let streams = c.streams.iter().copied().collect();
+                self.broadcast(&ServerMessage::StreamsChanged { client_id: sender, streams });
+            }
+        }
+    }
+
+    /// All streams of `sender` end (sharing off, left the channel).
+    fn clear_streams(&mut self, sender: u64) {
+        let kinds: Vec<VideoKind> = self.clients.get(&sender).map(|c| c.streams.iter().copied().collect()).unwrap_or_default();
+        for kind in kinds {
+            self.stop_stream(sender, kind);
+        }
+    }
+
+    /// `viewer` starts/stops watching a stream of `from`. Only within the same
+    /// voice channel. Ok(true) = the sender should send a keyframe now.
+    pub fn set_watching(&mut self, viewer: u64, from: u64, kind: VideoKind, watching: bool) -> Result<bool, String> {
+        if !watching {
+            if let Some(v) = self.clients.get_mut(&viewer) {
+                v.watching.remove(&(from, kind));
+            }
+            return Ok(false);
+        }
+        let v = self.clients.get(&viewer).ok_or("Client does not exist")?;
+        let s = self.clients.get(&from).ok_or("User is not online")?;
+        if viewer == from || v.channel_id != s.channel_id || !s.sharing {
+            return Err("That stream is not available".to_string());
+        }
+        if let Some(v) = self.clients.get_mut(&viewer) {
+            v.watching.insert((from, kind));
+        }
+        Ok(true)
     }
 
     /// Geschwister (gleicher Parent, ohne Spawn) in Anzeige-Reihenfolge.
@@ -750,6 +822,8 @@ impl State {
                 muted: false,
                 deafened: false,
                 sharing: false,
+                streams: BTreeSet::new(),
+                watching: HashSet::new(),
                 udp_token: token,
                 udp_addr: None,
                 muted_since: None,
@@ -979,6 +1053,9 @@ impl State {
     pub fn remove_client(&mut self, id: u64) -> Option<Client> {
         let client = self.clients.remove(&id)?;
         self.token_index.remove(&client.udp_token);
+        for c in self.clients.values_mut() {
+            c.watching.retain(|(from, _)| *from != id);
+        }
         Some(client)
     }
 
@@ -1163,29 +1240,18 @@ impl State {
             return false;
         }
         client.sharing = sharing;
+        if !sharing {
+            self.clear_streams(client_id);
+        }
         true
     }
 
-    /// Relay-Ziele fuer Video-Frames: Mitglieder desselben Voice-Channels
-    /// (ausser dem Sender selbst). Leer, wenn der Sender nicht teilt.
-    pub fn video_targets(
-        &self,
-        client_id: u64,
-    ) -> Vec<(mpsc::UnboundedSender<ServerMessage>, Arc<AtomicUsize>)> {
-        let Some(sender) = self.clients.get(&client_id) else { return Vec::new() };
-        if !sender.sharing {
-            return Vec::new();
-        }
-        let in_voice = self
-            .channels
-            .get(&sender.channel_id)
-            .is_some_and(|ch| ch.kind == ChannelKind::Voice);
-        if !in_voice {
-            return Vec::new();
-        }
+    /// Who gets a stream: members of the sender's channel who watch it.
+    pub fn video_targets(&self, sender: u64, kind: VideoKind) -> Vec<(mpsc::UnboundedSender<ServerMessage>, Arc<AtomicUsize>)> {
+        let Some(s) = self.clients.get(&sender) else { return Vec::new() };
         self.clients
             .values()
-            .filter(|c| c.id != client_id && c.channel_id == sender.channel_id)
+            .filter(|c| c.id != sender && c.channel_id == s.channel_id && c.watching.contains(&(sender, kind)))
             .map(|c| (c.tx.clone(), c.video_backlog.clone()))
             .collect()
     }
@@ -1549,33 +1615,50 @@ kind = "spawn"
     #[test]
     fn sharing_nur_in_voice_und_video_targets() {
         let mut state = test_state();
-        let (tx1, _r1) = mpsc::unbounded_channel();
-        let (tx2, _r2) = mpsc::unbounded_channel();
+        let (tx1, mut r1) = mpsc::unbounded_channel();
+        let (tx2, mut r2) = mpsc::unbounded_channel();
         let (tx3, _r3) = mpsc::unbounded_channel();
         let (id_a, _) = state.add_client("a".into(), tx1);
         let (id_b, _) = state.add_client("b".into(), tx2);
         let (id_c, _) = state.add_client("c".into(), tx3);
         let voice = state.all_channels().iter().find(|c| c.kind == ChannelKind::Voice).unwrap().id;
+        let screen = VideoKind::Screen;
 
         // Im Spawn: Sharing verboten.
         assert!(!state.set_sharing(id_a, true));
-        assert!(state.video_targets(id_a).is_empty());
+        assert!(state.stream_frame(id_a, screen).is_empty());
 
-        // In Voice: Sharing ok; Ziele = andere Mitglieder.
+        // In Voice: sharing ok, the first frame announces the stream - but
+        // nobody gets video before they watch it.
         state.move_client(id_a, voice).unwrap();
         state.move_client(id_b, voice).unwrap();
-        assert!(state.set_sharing(id_a, true));
-        let targets = state.video_targets(id_a);
-        assert_eq!(targets.len(), 1, "nur b ist im Voice-Channel");
-
-        // b teilt nicht -> keine Ziele; c im Spawn bekommt nie was.
-        assert!(state.video_targets(id_b).is_empty());
         state.move_client(id_c, voice).unwrap();
-        assert_eq!(state.video_targets(id_a).len(), 2);
+        assert!(state.set_sharing(id_a, true));
+        while r2.try_recv().is_ok() {}
+        assert!(state.stream_frame(id_a, screen).is_empty(), "opt-in: no viewer yet");
+        assert!(matches!(r2.try_recv(), Ok(ServerMessage::StreamsChanged { streams, .. }) if streams == vec![screen]), "stream announced");
+        assert_eq!(state.client(id_a).unwrap().info().streams, vec![screen], "late joiners see it too");
 
-        // Sharing aus -> keine Ziele.
+        // b watches -> only b gets frames; c (not watching) never.
+        assert_eq!(state.set_watching(id_b, id_a, screen, true), Ok(true));
+        assert_eq!(state.stream_frame(id_a, screen).len(), 1);
+        assert!(state.stream_frame(id_a, VideoKind::Camera).is_empty(), "watching the screen is not the camera");
+        assert!(state.set_watching(id_b, id_b, screen, true).is_err(), "not yourself");
+        assert!(state.set_watching(id_b, id_c, screen, true).is_err(), "c does not share");
+        state.set_watching(id_b, id_a, screen, false).unwrap();
+        assert!(state.stream_frame(id_a, screen).is_empty(), "stopped watching");
+
+        // Stream ends -> watchers are told and forget it.
+        state.set_watching(id_b, id_a, screen, true).unwrap();
+        while r2.try_recv().is_ok() {}
+        state.stop_stream(id_a, screen);
+        assert!(matches!(r2.try_recv(), Ok(ServerMessage::VideoStopped { .. })));
+        assert!(!state.client(id_b).unwrap().watching.contains(&(id_a, screen)));
+        assert!(!state.client(id_a).unwrap().streams.contains(&screen), "screen gone");
+        assert!(state.client(id_a).unwrap().streams.contains(&VideoKind::Camera), "camera still running");
         state.set_sharing(id_a, false);
-        assert!(state.video_targets(id_a).is_empty());
+        assert!(state.client(id_a).unwrap().streams.is_empty(), "sharing off ends all streams");
+        while r1.try_recv().is_ok() {}
     }
 
     #[test]
@@ -1595,7 +1678,7 @@ kind = "spawn"
         state.move_client(id_a, other).unwrap();
         assert!(!state.client(id_a).unwrap().sharing, "stream does not follow into the next channel");
         assert!(matches!(r1.try_recv(), Ok(ServerMessage::SharingChanged { sharing: false, .. })), "everyone is told");
-        assert!(state.video_targets(id_a).is_empty());
+        assert!(state.stream_frame(id_a, VideoKind::Screen).is_empty());
     }
 
     #[test]

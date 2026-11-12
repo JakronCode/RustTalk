@@ -170,9 +170,7 @@ impl RustTalkApp {
 
         // Stage (top, dark): all tiles in one centered grid that scales with
         // the available space.
-        let has_video = members
-            .iter()
-            .any(|u| [VideoKind::Screen, VideoKind::Camera].iter().any(|k| self.video_frames.contains_key(&(u.id, *k))));
+        let has_video = members.iter().any(|u| !self.streams_of(u).is_empty());
         // With video the stage takes most of the height (big streams), the
         // chat below stays usable; without video it stays compact.
         let full = ui.available_height();
@@ -199,14 +197,16 @@ impl RustTalkApp {
                     talking.get(&u.id).is_some_and(|t| t.elapsed() < Duration::from_millis(250))
                         || (u.id == my_id && self_tx)
                 };
+                // Streams of others only arrive once watched (opt-in): until
+                // then their tile is a "Watch" card.
                 let mut tiles: Vec<(UserInfo, Option<VideoKind>)> = Vec::new();
                 for user in &members {
-                    if self.video_frames.contains_key(&(user.id, VideoKind::Screen)) {
+                    if self.streams_of(user).contains(&VideoKind::Screen) {
                         tiles.push((user.clone(), Some(VideoKind::Screen)));
                     }
                 }
                 for user in &members {
-                    let cam = self.video_frames.contains_key(&(user.id, VideoKind::Camera));
+                    let cam = self.streams_of(user).contains(&VideoKind::Camera);
                     tiles.push((user.clone(), cam.then_some(VideoKind::Camera)));
                 }
 
@@ -219,6 +219,14 @@ impl RustTalkApp {
                     let (user, kind) = &tiles[i];
                     let me = user.id == self.my_id;
                     let resp = match kind {
+                        Some(kind) if !me && !self.watching.contains(&(user.id, *kind)) => {
+                            let speaking = *kind == VideoKind::Camera && speaking_of(user);
+                            let resp = watch_tile(ui, rect, user, *kind, speaking);
+                            if resp.clicked() {
+                                self.watch(user.id, *kind);
+                            }
+                            resp
+                        }
                         Some(kind) => {
                             let tex = self.video_frames.get(&(user.id, *kind)).and_then(|v| v.tex.clone());
                             // Speaking ring only on the person's camera, not on screen shares.
@@ -226,6 +234,16 @@ impl RustTalkApp {
                             let resp = video_tile(ui, rect, tex.as_ref(), user, *kind, speaking, me);
                             if resp.clicked() {
                                 open_fs = Some((user.id, *kind));
+                            }
+                            // Watching someone else: "stop watching" in the top right corner.
+                            if !me && (resp.hovered() || ui.rect_contains_pointer(rect)) {
+                                let b = egui::Rect::from_center_size(rect.right_top() + egui::vec2(-22.0, 22.0), egui::vec2(30.0, 30.0));
+                                let stop = ui
+                                    .put(b, egui::Button::new(egui::RichText::new(icons::regular::EYE_SLASH).size(16.0).color(egui::Color32::WHITE)).fill(egui::Color32::from_black_alpha(160)).corner_radius(15.0))
+                                    .on_hover_text("Stop watching");
+                                if stop.clicked() {
+                                    self.unwatch(user.id, *kind);
+                                }
                             }
                             resp
                         }
@@ -756,6 +774,41 @@ fn member_card(ui: &mut egui::Ui, rect: egui::Rect, user: &UserInfo, speaking: b
 
 /// Camera or screen tile (click = fullscreen). The camera replaces the
 /// avatar card: green frame while the person speaks, no avatar.
+/// A stream we don't receive yet: avatar, what is shared and a "Watch" button
+/// (the whole tile is the button).
+fn watch_tile(ui: &mut egui::Ui, rect: egui::Rect, user: &UserInfo, kind: VideoKind, speaking: bool) -> egui::Response {
+    let resp = ui.interact(rect, ui.id().with(("watch_tile", user.id, kind)), egui::Sense::click());
+    let p = ui.painter();
+    p.rect_filled(rect, 10.0, egui::Color32::from_rgb(0x11, 0x12, 0x14));
+    p.rect_filled(rect, 10.0, theme::avatar_color(&user.name).linear_multiply(0.18));
+    if speaking {
+        p.rect_stroke(rect, 10.0, egui::Stroke::new(3.0_f32, theme::GREEN), egui::StrokeKind::Inside);
+    } else if resp.hovered() {
+        p.rect_stroke(rect, 10.0, egui::Stroke::new(2.0_f32, theme::ACCENT), egui::StrokeKind::Inside);
+    }
+    let d = (rect.height() * 0.30).clamp(32.0, 96.0);
+    let av = egui::Rect::from_center_size(rect.center() - egui::vec2(0.0, rect.height() * 0.16), egui::vec2(d, d));
+    theme::paint_avatar(p, av, &user.name, speaking);
+    // LIVE badge top left.
+    let live = p.layout_no_wrap("LIVE".into(), egui::FontId::proportional(11.0), egui::Color32::WHITE);
+    let badge = egui::Rect::from_min_size(rect.left_top() + egui::vec2(10.0, 10.0), live.size() + egui::vec2(12.0, 6.0));
+    p.rect_filled(badge, 4.0, theme::RED);
+    p.galley(badge.min + egui::vec2(6.0, 3.0), live, egui::Color32::WHITE);
+    let what = match kind {
+        VideoKind::Screen => format!("{} is sharing their screen", user.name),
+        VideoKind::Camera => format!("{} turned on their camera", user.name),
+    };
+    let text_y = av.bottom() + 16.0;
+    p.text(egui::pos2(rect.center().x, text_y), egui::Align2::CENTER_TOP, what, egui::FontId::proportional((rect.height() * 0.065).clamp(12.0, 15.0)), theme::HEADER);
+    // Button look (the click is the whole tile).
+    let label = p.layout_no_wrap(format!("{}  Watch {}", icons::regular::EYE, if kind == VideoKind::Screen { "Stream" } else { "Camera" }), egui::FontId::proportional(14.0), egui::Color32::WHITE);
+    let btn = egui::Rect::from_center_size(egui::pos2(rect.center().x, text_y + 44.0), label.size() + egui::vec2(28.0, 14.0));
+    p.rect_filled(btn, 8.0, if resp.hovered() { theme::ACCENT.gamma_multiply(1.15) } else { theme::ACCENT });
+    p.galley(btn.center() - label.size() / 2.0, label, egui::Color32::WHITE);
+    status_badges(p, rect, user);
+    resp.on_hover_text("Click to watch - nothing is downloaded until you do").on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 fn video_tile(
     ui: &mut egui::Ui,
     rect: egui::Rect,

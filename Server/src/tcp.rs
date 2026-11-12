@@ -426,7 +426,8 @@ async fn message_loop(
                     // Uebergrosse Frames verwerfen (kein Fehler-Spam pro Frame).
                     continue;
                 }
-                let targets = st.video_targets(client_id);
+                // Only to viewers who watch this stream (opt-in, saves bandwidth).
+                let targets = st.stream_frame(client_id, kind);
                 if !targets.is_empty() {
                     let len = data.len();
                     let msg = ServerMessage::VideoFrame { from_id: client_id, kind, data };
@@ -449,13 +450,13 @@ async fn message_loop(
                     st.send_to(from_id, &ServerMessage::KeyframeRequest { kind });
                 }
             }
-            ClientMessage::StopVideo { kind } => {
-                // Kommt vor einem evtl. SetSharing(false) -> Ziele noch gueltig.
-                let msg = ServerMessage::VideoStopped { from_id: client_id, kind };
-                for (tx, _) in st.video_targets(client_id) {
-                    let _ = tx.send(msg.clone());
-                }
-            }
+            ClientMessage::StopVideo { kind } => st.stop_stream(client_id, kind),
+            ClientMessage::Watch { from_id, kind, watching } => match st.set_watching(client_id, from_id, kind, watching) {
+                // New viewer: the sender sends a full picture right away.
+                Ok(true) => st.send_to(from_id, &ServerMessage::KeyframeRequest { kind }),
+                Ok(false) => {}
+                Err(e) => st.send_to(client_id, &ServerMessage::Error { message: e }),
+            },
             ClientMessage::Poke { target, message } => {
                 match st.poke(client_id, target, &message, std::time::Instant::now()) {
                     Ok(poked) => st.send_to(target, &poked),

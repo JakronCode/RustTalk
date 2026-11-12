@@ -1104,10 +1104,23 @@ async fn video_relay_und_sharing() {
         }
     }
 
-    // Video-Frame von a kommt bei b an (nicht bei a selbst).
+    // Opt-in: the first frame only announces the stream - b gets no video yet.
     let frame = vec![0xFF, 0xD8, 0xFF, 1, 2, 3, 4, 5];
-    // Kamera und Bildschirm gleichzeitig: beide Arten kommen getrennt an.
     for kind in [VideoKind::Camera, VideoKind::Screen] {
+        send(&mut a, &ClientMessage::VideoFrame { kind, data: frame.clone() }).await;
+    }
+    let b_msgs = drain(&mut b, 500).await;
+    assert!(!b_msgs.iter().any(|m| matches!(m, ServerMessage::VideoFrame { .. })), "no video before Watch: {b_msgs:?}");
+    assert!(
+        b_msgs.iter().any(|m| matches!(m, ServerMessage::StreamsChanged { client_id, streams } if *client_id == wa.client_id && streams.len() == 2)),
+        "streams announced: {b_msgs:?}"
+    );
+    drain(&mut a, 300).await;
+
+    // b watches both -> a is asked for a keyframe, then frames reach b (not a itself).
+    for kind in [VideoKind::Camera, VideoKind::Screen] {
+        send(&mut b, &ClientMessage::Watch { from_id: wa.client_id, kind, watching: true }).await;
+        expect(&mut a, "KeyframeRequest", |m| matches!(m, ServerMessage::KeyframeRequest { kind: k } if *k == kind)).await;
         send(&mut a, &ClientMessage::VideoFrame { kind, data: frame.clone() }).await;
         match recv(&mut b, 2000).await {
             Some(ServerMessage::VideoFrame { from_id, kind: got, data }) => {
@@ -1120,7 +1133,7 @@ async fn video_relay_und_sharing() {
     }
     assert!(recv(&mut a, 400).await.is_none(), "Sender bekommt kein Echo");
 
-    // Einzelnen Stream beenden -> b bekommt VideoStopped.
+    // Einzelnen Stream beenden -> b bekommt VideoStopped (and the shorter list).
     send(&mut a, &ClientMessage::StopVideo { kind: VideoKind::Camera }).await;
     match recv(&mut b, 2000).await {
         Some(ServerMessage::VideoStopped { from_id, kind }) => {
@@ -1129,6 +1142,13 @@ async fn video_relay_und_sharing() {
         }
         other => panic!("VideoStopped erwartet, bekam: {other:?}"),
     }
+    expect(&mut b, "StreamsChanged", |m| matches!(m, ServerMessage::StreamsChanged { streams, .. } if streams == &vec![VideoKind::Screen])).await;
+    // b stops watching the screen -> no more frames for b.
+    send(&mut b, &ClientMessage::Watch { from_id: wa.client_id, kind: VideoKind::Screen, watching: false }).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    send(&mut a, &ClientMessage::VideoFrame { kind: VideoKind::Screen, data: frame.clone() }).await;
+    assert!(recv(&mut b, 400).await.is_none(), "unwatched: no frames");
+    drain(&mut a, 200).await;
 
     // b teilt nicht -> Frame von b erreicht niemanden.
     send(&mut b, &ClientMessage::VideoFrame { kind: VideoKind::Camera, data: frame }).await;

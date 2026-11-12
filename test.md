@@ -2,6 +2,20 @@
 
 > Pflichtdokumentation aller Testläufe. Neueste oben.
 
+## 2026-11-12 (29) – Streams nur auf Klick (Opt-in), Protokoll v14
+
+**Wunsch:** Wer einem Kanal beitritt, in dem jemand streamt, bekam das Video sofort (erzwungene Bandbreite). Jetzt nur auf Klick.
+
+**Protokoll v14:** `UserInfo.streams` + `StreamsChanged` (welche Streams laufen – an alle, ohne Video), `Watch { from_id, kind, watching }`.
+**Server:** Ein Stream wird beim ersten Frame angemeldet; Frames gehen nur an Mitglieder desselben Kanals, die ihn schauen. „Watch“ → der Sender bekommt sofort eine Keyframe-Anforderung (Bild ohne Wartezeit). Stream-Ende, Teilen aus, Kanalwechsel, Verbindungsende räumen Streams und Zuschauer auf; wer den Kanal verlässt, schaut dort nichts mehr.
+**Client:** Fremde Streams als Karte „LIVE · X is sharing their screen · Watch Stream“ (bzw. Kamera); Klick → Video; Auge-Symbol oben rechts „Stop watching“ → zurück zur Karte (Bandbreite wieder frei). Vollbild-Leiste bietet auch ungeschaute Streams an (Klick = schauen).
+
+**Tests:** Server 54 (Opt-in-Regeln: keine Frames ohne Watch, nicht sich selbst, nur Teilende, Stop/Teilen-aus räumt auf), Integration 18 (Video erst nach Watch, Keyframe-Anforderung, nach „Stop watching“ keine Frames), Client 93, shared 18 ✅.
+**Live (2 Debug-Clients):** Viewer sieht die Watch-Karte, kein Video; Klick → Bild; „Stop watching“ → Karte; sofort wieder schauen → Bild ✅.
+**Achtung:** Protokoll v14 – Server und alle Clients müssen zusammen aktualisiert werden.
+
+---
+
 ## 2026-11-12 (28) – Feedback-Bugs: Streams, Voice-Kanäle, Audiogeräte
 
 **E1 Streams beim Verlassen:** Eigene Kamera/Bildschirmübertragung liefen beim Wechsel in einen anderen Sprachkanal weiter (nur die Lobby stoppte sie). Jetzt stoppt jeder Kanalwechsel sie, auch der Server beendet „sharing“ bei jedem Wechsel (auch AFK-Verschieben, Kanal gelöscht). Zusätzlich: Frames, die nach dem Stopp noch in der Warteschlange lagen, erzeugten eine hängende Kachel „Connecting…“ – Frames von nicht (mehr) teilenden Nutzern werden jetzt verworfen.
