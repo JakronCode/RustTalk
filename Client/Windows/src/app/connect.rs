@@ -173,7 +173,11 @@ impl RustTalkApp {
     /// Error panel for a failed join: icon, title, explanation, actions, raw details.
     fn join_error_panel(&mut self, ui: &mut egui::Ui, width: f32) {
         let Some(err) = self.join_error.clone() else { return };
-        let color = if err.is_fatal() { theme::RED } else { theme::YELLOW };
+        let color = match err.kind {
+            super::join_error::Kind::UnknownServer => theme::accent(),
+            _ if err.is_fatal() => theme::RED,
+            _ => theme::YELLOW,
+        };
         egui::Frame::default()
             .fill(color.gamma_multiply(0.12))
             .stroke(egui::Stroke::new(1.0_f32, color.gamma_multiply(0.7)))
@@ -190,13 +194,13 @@ impl RustTalkApp {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if theme::ghost_button(ui, egui::RichText::new(icons::regular::X).color(theme::MUTED)).on_hover_text("Dismiss").clicked() {
                                     self.join_error = None;
-                                    self.cert_warning = None;
+                                    self.cert_check = None;
                                 }
                             });
                         });
                         ui.label(egui::RichText::new(err.explanation()).color(theme::TEXT));
                         ui.label(egui::RichText::new(err.suggestion()).size(12.5).color(theme::MUTED));
-                        if err.kind == super::join_error::Kind::CertChanged {
+                        if matches!(err.kind, super::join_error::Kind::CertChanged | super::join_error::Kind::UnknownServer) {
                             self.cert_actions(ui);
                         }
                         ui.add_space(4.0);
@@ -221,20 +225,37 @@ impl RustTalkApp {
             });
     }
 
-    /// Changed certificate: the only way on is an explicit trust decision.
+    /// New or changed certificate: the only way on is an explicit trust decision.
     fn cert_actions(&mut self, ui: &mut egui::Ui) {
-        let Some((addr, fp)) = self.cert_warning.clone() else { return };
-        ui.label(egui::RichText::new(format!("{addr}  {fp}")).monospace().size(11.0).color(theme::MUTED));
+        let Some(check) = self.cert_check.clone() else { return };
+        ui.add_space(6.0);
+        egui::Frame::default()
+            .fill(theme::DARK)
+            .corner_radius(6.0)
+            .inner_margin(egui::Margin::symmetric(10, 8))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(egui::RichText::new(&check.addr).strong().color(theme::HEADER));
+                theme::caption(ui, "SHA-256 fingerprint");
+                ui.label(egui::RichText::new(super::join_error::group_fingerprint(&check.fingerprint)).monospace().size(12.0).color(theme::TEXT));
+            });
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if theme::danger_button(ui, "Trust the new identity and connect").clicked() {
-                self.config.known_servers.insert(addr.clone(), fp.clone());
+            let trust = if check.changed {
+                theme::danger_button(ui, "Trust the new identity and connect")
+            } else {
+                theme::primary_button(ui, "Trust and connect")
+            };
+            if trust.clicked() {
+                check.trust(&mut self.config);
                 self.config.save();
-                self.cert_warning = None;
+                self.cert_check = None;
                 self.start_connect();
             }
-            if ui.button("Cancel").clicked() {
-                self.cert_warning = None;
+            if theme::ghost_button(ui, "Cancel").clicked() {
+                self.cert_check = None;
                 self.join_error = None;
+                self.set_status("");
             }
         });
     }
@@ -244,10 +265,15 @@ impl RustTalkApp {
         match action {
             Action::Retry => self.start_connect(),
             Action::EditPassword => {
+                // A stale invite would be refused before the password is checked.
+                self.config.invite = None;
                 self.config.server_password = None;
                 self.focus_password = true;
             }
-            Action::ShowUpdate => self.open_settings(SettingsPage::About),
+            Action::ShowUpdate => {
+                self.check_for_updates();
+                self.open_settings(SettingsPage::About);
+            }
             Action::OpenReleases => {
                 ctx.open_url(egui::OpenUrl::new_tab(format!("https://github.com/{}/releases/latest", crate::update::REPO)));
             }

@@ -372,8 +372,8 @@ pub struct RustTalkApp {
     connect_on_start: bool,
     /// TLS fingerprint of the connected server.
     server_fingerprint: String,
-    /// The server's certificate changed: (address, new fingerprint).
-    cert_warning: Option<(String, String)>,
+    /// Certificate waiting for the user's trust decision (new or changed).
+    cert_check: Option<join_error::CertCheck>,
     /// Last failed join, shown as a panel on the connect screen.
     join_error: Option<join_error::JoinError>,
     /// Focus the password field on the next frame.
@@ -512,7 +512,7 @@ impl RustTalkApp {
             removed: None,
             connect_on_start,
             server_fingerprint: String::new(),
-            cert_warning: None,
+            cert_check: None,
             join_error: None,
             focus_password: false,
             renaming_bookmark: None,
@@ -672,18 +672,21 @@ impl RustTalkApp {
         }
     }
 
+    /// Unknown or changed certificate: never go on by ourselves - the user decides.
+    fn on_cert_check(&mut self, check: join_error::CertCheck) {
+        if self.cmd_tx.is_none() {
+            return; // attempt was cancelled meanwhile
+        }
+        self.reconnect = None;
+        self.disconnect();
+        self.join_error = Some(join_error::JoinError::cert_check(&check.fingerprint, check.changed));
+        self.set_error(if check.changed { "The server's identity changed" } else { "New server - trust it to connect" });
+        self.cert_check = Some(check);
+    }
+
     /// Network thread ended. After a successful login this starts the
     /// automatic reconnect; a failed reconnect attempt schedules the next one.
     fn on_connection_lost(&mut self, reason: String) {
-        // Certificate changed: never reconnect on our own - the user decides.
-        if let Some(fp) = reason.strip_prefix(rusttalk_shared::secure::CERT_CHANGED).map(|r| r.trim_start_matches(':').trim().to_string()) {
-            self.reconnect = None;
-            self.disconnect();
-            self.cert_warning = Some((net::normalize_addr(&self.config.server_address), fp));
-            self.join_error = Some(join_error::JoinError::classify(&reason));
-            self.set_error("The server's identity changed");
-            return;
-        }
         // Kicked or banned: no automatic reconnect.
         if let Some(why) = self.removed.take() {
             self.reconnect = None;
@@ -959,14 +962,9 @@ impl RustTalkApp {
                 }
                 self.connected = true;
                 self.gif_available = gif_search;
-                // Trust on first use: remember the server's certificate.
-                let key = net::normalize_addr(&self.config.server_address);
-                if !fingerprint.is_empty() && !self.config.known_servers.contains_key(&key) {
-                    self.config.known_servers.insert(key, fingerprint.clone());
-                    self.config.save();
-                }
+                // Pinned before Hello (the user trusted it), nothing to learn here.
                 self.server_fingerprint = fingerprint;
-                self.cert_warning = None;
+                self.cert_check = None;
                 self.join_error = None;
                 self.open_permissions = open_permissions;
                 self.config.invite = None; // used
@@ -1028,6 +1026,9 @@ impl RustTalkApp {
             NetEvent::Message(msg) => self.handle_server_message(msg),
             NetEvent::Status(text) => self.set_error(text),
             NetEvent::Disconnected { reason } => self.on_connection_lost(reason),
+            NetEvent::CertCheck { addr, fingerprint, changed } => {
+                self.on_cert_check(join_error::CertCheck { addr, fingerprint, changed })
+            }
         }
     }
 

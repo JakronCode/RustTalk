@@ -68,7 +68,28 @@ pub enum NetEvent {
     /// Fehler/Infos aus lokalen Hintergrund-Threads (z. B. Kamera).
     Status(String),
     Disconnected { reason: String },
+    /// The user must decide about the server's certificate: unknown address
+    /// (nothing was sent yet) or a pinned fingerprint that no longer matches.
+    /// Only raised by our own TLS check, never from server-supplied text.
+    CertCheck { addr: String, fingerprint: String, changed: bool },
 }
+
+/// Typed so a server error message can never pose as a certificate decision.
+#[derive(Debug)]
+struct CertDecision {
+    addr: String,
+    fingerprint: String,
+    changed: bool,
+}
+
+impl std::fmt::Display for CertDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = if self.changed { secure::CERT_CHANGED } else { "UNKNOWN CERTIFICATE" };
+        write!(f, "{what}: {}", self.fingerprint)
+    }
+}
+
+impl std::error::Error for CertDecision {}
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -95,7 +116,11 @@ pub fn connect(
             rt.block_on(async move {
                 let mut cmd_rx = cmd_rx;
                 if let Err(e) = run(cfg, &mut cmd_rx, &event_tx, &ctx, &upload_backlog).await {
-                    let _ = event_tx.send(NetEvent::Disconnected { reason: format!("{e:#}") });
+                    let event = match e.downcast::<CertDecision>() {
+                        Ok(CertDecision { addr, fingerprint, changed }) => NetEvent::CertCheck { addr, fingerprint, changed },
+                        Err(e) => NetEvent::Disconnected { reason: format!("{e:#}") },
+                    };
+                    let _ = event_tx.send(event);
                 }
             });
         })
@@ -125,7 +150,7 @@ async fn run(
     tcp.set_nodelay(true).ok();
     let peer = tcp.peer_addr()?;
 
-    // TLS with the server certificate pinned on first use (like SSH).
+    // TLS with the server certificate pinned; an unknown server needs the user's OK first.
     let expected = cfg.known_servers.get(&addr).cloned();
     let verifier = secure::PinnedVerifier::new(expected.clone());
     let connector = tokio_rustls::TlsConnector::from(secure::client_config(verifier.clone()));
@@ -136,14 +161,20 @@ async fn run(
             let seen = verifier.seen.lock().unwrap().clone();
             if let (Some(seen), Some(want)) = (seen, expected) {
                 if !seen.eq_ignore_ascii_case(&want) {
-                    anyhow::bail!("{}: {seen}", secure::CERT_CHANGED);
+                    return Err(CertDecision { addr, fingerprint: seen, changed: true }.into());
                 }
             }
             anyhow::bail!("Secure connection failed: {e} (old server version?)");
         }
         Err(_) => anyhow::bail!("Timeout during the secure handshake with {addr}"),
     };
-    let fingerprint = verifier.seen.lock().unwrap().clone().unwrap_or_default();
+    let Some(fingerprint) = verifier.seen.lock().unwrap().clone() else {
+        anyhow::bail!("Secure connection failed: the server sent no certificate");
+    };
+    if expected.is_none() {
+        // First contact: hang up before Hello (no name, identity or password sent).
+        return Err(CertDecision { addr, fingerprint, changed: false }.into());
+    }
     let (mut reader, mut writer) = tokio::io::split(stream);
 
     write_frame(
@@ -342,7 +373,8 @@ mod tests {
             });
         });
 
-        let cfg = ClientConfig { server_address: addr.to_string(), ..ClientConfig::default() };
+        let mut cfg = ClientConfig { server_address: addr.to_string(), ..ClientConfig::default() };
+        cfg.known_servers.insert(addr.to_string(), secure::fingerprint(&rcgen_free_cert().0));
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let backlog = Arc::new(AtomicUsize::new(0));
         let cmd_tx = connect(cfg, event_tx, eframe::egui::Context::default(), backlog.clone());
@@ -401,12 +433,62 @@ mod tests {
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let _tx = connect(cfg, event_tx, eframe::egui::Context::default(), Arc::new(AtomicUsize::new(0)));
         match event_rx.recv_timeout(Duration::from_secs(10)) {
-            Ok(NetEvent::Disconnected { reason }) => {
-                assert!(reason.starts_with(secure::CERT_CHANGED), "{reason}");
-                let real = secure::fingerprint(&rcgen_free_cert().0);
-                assert!(reason.contains(&real), "new fingerprint is reported: {reason}");
+            Ok(NetEvent::CertCheck { addr: reported, fingerprint, changed }) => {
+                assert!(changed);
+                assert_eq!(reported, addr.to_string());
+                assert_eq!(fingerprint, secure::fingerprint(&rcgen_free_cert().0), "new fingerprint is reported");
             }
             other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// First contact: the client stops after the TLS handshake and sends no Hello
+    /// until the user trusted the fingerprint; then it logs in with it pinned.
+    #[test]
+    fn unknown_server_gets_no_hello_until_trusted() {
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        std_listener.set_nonblocking(true).unwrap();
+        let addr = std_listener.local_addr().unwrap();
+        // What the server read on each connection: Some(true) = a Hello arrived.
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel::<bool>();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(async move {
+                let listener = TcpListener::from_std(std_listener).unwrap();
+                let (c, k) = rcgen_free_cert();
+                let tls = tokio_rustls::TlsAcceptor::from(rusttalk_shared::secure::server_config(c, k).unwrap());
+                for _ in 0..2 {
+                    let (tcp, _) = listener.accept().await.unwrap();
+                    let stream = tls.accept(tcp).await.unwrap();
+                    let (mut r, mut w) = tokio::io::split(stream);
+                    let first = timeout(Duration::from_secs(5), read_frame::<_, ClientMessage>(&mut r)).await;
+                    let hello = matches!(first, Ok(Ok(Some(ClientMessage::Hello { .. }))));
+                    seen_tx.send(hello).unwrap();
+                    if hello {
+                        let _ = write_frame(&mut w, &ServerMessage::Error { message: "test done".into() }).await;
+                    }
+                }
+            });
+        });
+
+        let mut cfg = ClientConfig { server_address: addr.to_string(), server_password: Some("pw".into()), ..ClientConfig::default() };
+        cfg.identity = "ab".repeat(32);
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let _tx = connect(cfg.clone(), event_tx.clone(), eframe::egui::Context::default(), Arc::new(AtomicUsize::new(0)));
+        let (pinned_addr, fp) = match event_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(NetEvent::CertCheck { addr: a, fingerprint, changed: false }) => (a, fingerprint),
+            other => panic!("expected a trust question, got {other:?}"),
+        };
+        assert_eq!(pinned_addr, addr.to_string());
+        assert_eq!(fp, secure::fingerprint(&rcgen_free_cert().0));
+        assert!(!seen_rx.recv_timeout(Duration::from_secs(10)).unwrap(), "no Hello before the user trusts the server");
+
+        cfg.known_servers.insert(pinned_addr, fp);
+        let _tx2 = connect(cfg, event_tx, eframe::egui::Context::default(), Arc::new(AtomicUsize::new(0)));
+        assert!(seen_rx.recv_timeout(Duration::from_secs(10)).unwrap(), "Hello once the fingerprint is pinned");
+        match event_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(NetEvent::Disconnected { reason }) => assert_eq!(reason, "test done"),
+            other => panic!("expected the server's answer, got {other:?}"),
         }
     }
 

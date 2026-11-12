@@ -2,8 +2,9 @@
 //! UDP audio packets.
 //!
 //! **TLS:** the server has its own self-signed certificate (no CA, LAN).
-//! The client trusts it on first use and remembers the certificate's SHA-256
-//! fingerprint per server (like SSH); a different certificate later is
+//! On first connect the client stops after the handshake and asks the user to
+//! trust the certificate's SHA-256 fingerprint (like SSH); once trusted it is
+//! pinned per server and a different certificate later is
 //! refused ([`PinnedVerifier`]). The TLS handshake still proves that the
 //! server owns the certificate's key.
 //!
@@ -44,13 +45,14 @@ pub fn fingerprint(cert_der: &[u8]) -> String {
     Sha256::digest(cert_der).iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":")
 }
 
-/// Error text when the pinned certificate does not match (the client detects it by this prefix).
+/// Error text when the pinned certificate does not match (the client reports it by type, not by this text).
 pub const CERT_CHANGED: &str = "CERTIFICATE CHANGED";
 
 /// Trust-on-first-use certificate check.
 #[derive(Debug)]
 pub struct PinnedVerifier {
-    /// Fingerprint remembered for this server (`None` = first connect: accept and learn).
+    /// Fingerprint remembered for this server (`None` = first connect: the
+    /// handshake completes so the caller can ask the user before logging in).
     expected: Option<String>,
     /// Fingerprint the server presented (read it after the handshake).
     pub seen: Arc<Mutex<Option<String>>>,

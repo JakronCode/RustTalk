@@ -28,6 +28,8 @@ pub enum Kind {
     ConnectionLost,
     /// Pinned certificate mismatch: hard stop, the user decides.
     CertChanged,
+    /// First connect to this address: trust its certificate? Nothing was sent yet.
+    UnknownServer,
     Other,
 }
 
@@ -51,9 +53,13 @@ impl JoinError {
         let raw: String = raw.trim().chars().take(MAX_RAW_CHARS).collect();
         let l = raw.to_lowercase();
         let has = |needles: &[&str]| needles.iter().any(|n| l.contains(n));
-        let kind = if raw.starts_with(rusttalk_shared::secure::CERT_CHANGED) {
-            Kind::CertChanged
-        } else if l.contains("protocol version not supported") {
+        // Server refusals are matched as prefixes, ban/kick first: their
+        // free-text reason must not decide the kind.
+        let kind = if l.starts_with("you are banned") || l.starts_with("banned ") {
+            Kind::Banned
+        } else if l.starts_with("kicked by") {
+            Kind::Kicked
+        } else if l.starts_with("protocol version not supported") {
             match parse_versions(&l) {
                 Some((client, server)) if client > server => {
                     Kind::ServerOutdated { client, server }
@@ -63,16 +69,12 @@ impl JoinError {
                     server: v.map(|v| v.1),
                 },
             }
-        } else if l.contains("wrong or missing server password") {
+        } else if l.starts_with("wrong or missing server password") {
             Kind::WrongPassword
-        } else if l.contains("invalid or expired invite") {
+        } else if l.starts_with("invalid or expired invite") {
             Kind::InvalidInvite
-        } else if l.contains("server is full") {
+        } else if l.starts_with("server is full") {
             Kind::Full
-        } else if l.starts_with("you are banned") || l.starts_with("banned ") {
-            Kind::Banned
-        } else if l.starts_with("kicked by") {
-            Kind::Kicked
         } else if has(&[
             "timeout while connecting",
             "connection refused",
@@ -108,6 +110,21 @@ impl JoinError {
         }
     }
 
+    /// Only from the client's own TLS pin check, never from message text.
+    pub fn cert_check(fingerprint: &str, changed: bool) -> Self {
+        let (kind, what) = if changed {
+            (Kind::CertChanged, rusttalk_shared::secure::CERT_CHANGED)
+        } else {
+            (Kind::UnknownServer, "UNKNOWN CERTIFICATE")
+        };
+        let raw = format!("{what}: {fingerprint}");
+        Self {
+            kind,
+            raw: raw.chars().take(MAX_RAW_CHARS).collect(),
+            details_open: false,
+        }
+    }
+
     /// Retrying won't help: stop automatic reconnects and show the panel.
     pub fn is_fatal(&self) -> bool {
         matches!(
@@ -119,6 +136,7 @@ impl JoinError {
                 | Kind::Banned
                 | Kind::Kicked
                 | Kind::CertChanged
+                | Kind::UnknownServer
         )
     }
 
@@ -132,6 +150,7 @@ impl JoinError {
             Kind::Unreachable => icons::regular::WIFI_SLASH,
             Kind::NoAnswer => icons::regular::HOURGLASS,
             Kind::SecureFailed | Kind::CertChanged => icons::regular::SHIELD_WARNING,
+            Kind::UnknownServer => icons::regular::SHIELD_CHECK,
             Kind::ConnectionLost => icons::regular::LINK_BREAK,
             Kind::Other => icons::regular::WARNING_CIRCLE,
         }
@@ -151,6 +170,7 @@ impl JoinError {
             Kind::SecureFailed => "Secure connection failed",
             Kind::ConnectionLost => "Connection lost",
             Kind::CertChanged => "Server identity changed",
+            Kind::UnknownServer => "Trust this server?",
             Kind::Other => "Could not connect",
         }
     }
@@ -177,6 +197,7 @@ impl JoinError {
             Kind::CertChanged => "Its encryption certificate is not the one RustTalk saw before. That is expected after the \
                                    server was reinstalled or its data folder was reset. Otherwise someone may be listening in."
                 .into(),
+            Kind::UnknownServer => "RustTalk hasn't seen this server before. Nothing has been sent to it yet.".into(),
             Kind::Other => "The server refused the connection or something went wrong on the way.".into(),
         }
     }
@@ -195,6 +216,7 @@ impl JoinError {
             Kind::SecureFailed => "Check that this address points to a RustTalk server. Very old servers are not supported.",
             Kind::ConnectionLost => "Check your internet connection and try again.",
             Kind::CertChanged => "Ask the server owner whether the fingerprint below matches the one in the server log.",
+            Kind::UnknownServer => "Compare the fingerprint below with the \"TLS fingerprint\" line in the server log, or ask the server owner.",
             Kind::Other => "Try again, or show the details to the server owner.",
         }
     }
@@ -204,7 +226,7 @@ impl JoinError {
             Kind::ServerOutdated { .. } => &[Action::OpenReleases],
             Kind::ClientOutdated { .. } => &[Action::ShowUpdate, Action::OpenReleases],
             Kind::WrongPassword | Kind::InvalidInvite => &[Action::EditPassword],
-            Kind::Banned | Kind::CertChanged => &[],
+            Kind::Banned | Kind::CertChanged | Kind::UnknownServer => &[],
             Kind::Full
             | Kind::Kicked
             | Kind::Unreachable
@@ -240,6 +262,35 @@ fn parse_versions(lower: &str) -> Option<(u32, u32)> {
         digits.parse().ok()
     };
     Some((num_after("client:")?, num_after("server:")?))
+}
+
+/// A certificate the user has to accept before RustTalk logs in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertCheck {
+    /// Normalized "host:port" the fingerprint was seen at (the `known_servers` key).
+    pub addr: String,
+    pub fingerprint: String,
+    /// `true` = a different fingerprint was pinned before (hard stop).
+    pub changed: bool,
+}
+
+impl CertCheck {
+    /// Pins exactly the shown fingerprint for exactly the address that presented it.
+    pub fn trust(&self, config: &mut crate::config::ClientConfig) {
+        config
+            .known_servers
+            .insert(self.addr.clone(), self.fingerprint.clone());
+    }
+}
+
+/// "AB:CD:..." as rows of 8 bytes, easier to compare by eye.
+pub fn group_fingerprint(fp: &str) -> String {
+    let bytes: Vec<&str> = fp.split(':').collect();
+    bytes
+        .chunks(8)
+        .map(|row| row.join(":"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn sentence(raw: &str) -> String {
@@ -361,15 +412,96 @@ mod tests {
 
     #[test]
     fn changed_certificate_is_a_hard_stop() {
-        let e = JoinError::classify(&format!(
-            "{}: AB:CD:EF",
-            rusttalk_shared::secure::CERT_CHANGED
-        ));
+        let e = JoinError::cert_check("AB:CD:EF", true);
         assert_eq!(e.kind, Kind::CertChanged);
+        assert!(e.raw.ends_with("AB:CD:EF"));
         assert!(e.is_fatal());
         assert!(
             !e.actions().contains(&Action::Retry),
             "never offer a plain retry past a changed certificate"
+        );
+        // Text from a server must never pose as a certificate change.
+        let spoof =
+            JoinError::classify(&format!("{}: 00:11", rusttalk_shared::secure::CERT_CHANGED));
+        assert_ne!(spoof.kind, Kind::CertChanged);
+        let spoof = JoinError::classify("UNKNOWN CERTIFICATE: 00:11");
+        assert_ne!(spoof.kind, Kind::UnknownServer);
+    }
+
+    #[test]
+    fn unknown_server_asks_first() {
+        let e = JoinError::cert_check("AB:CD", false);
+        assert_eq!(e.kind, Kind::UnknownServer);
+        assert!(e.is_fatal(), "no automatic reconnect past the question");
+        assert!(e.actions().is_empty(), "only the explicit trust buttons");
+    }
+
+    #[test]
+    fn trusting_pins_exactly_the_shown_fingerprint() {
+        let fp = rusttalk_shared::secure::fingerprint(b"some certificate");
+        let check = CertCheck {
+            addr: "example.org:7331".into(),
+            fingerprint: fp.clone(),
+            changed: false,
+        };
+        let mut cfg = crate::config::ClientConfig::default();
+        cfg.known_servers
+            .insert("other.org:7331".into(), "11:22".into());
+        let before = cfg.known_servers.clone();
+
+        // Cancel = the check is dropped: nothing stored.
+        drop(check.clone());
+        assert_eq!(cfg.known_servers, before);
+
+        check.trust(&mut cfg);
+        assert_eq!(cfg.known_servers.get("example.org:7331"), Some(&fp));
+        assert_eq!(
+            cfg.known_servers.len(),
+            2,
+            "only that one address is touched"
+        );
+        let changed = CertCheck {
+            fingerprint: "AA:BB".into(),
+            changed: true,
+            ..check
+        };
+        changed.trust(&mut cfg);
+        assert_eq!(
+            cfg.known_servers
+                .get("example.org:7331")
+                .map(String::as_str),
+            Some("AA:BB")
+        );
+    }
+
+    #[test]
+    fn fingerprint_rows() {
+        let fp = rusttalk_shared::secure::fingerprint(b"x");
+        let grouped = group_fingerprint(&fp);
+        assert_eq!(grouped.lines().count(), 4);
+        assert!(grouped.lines().all(|l| l.split(':').count() == 8));
+        assert_eq!(grouped.replace('\n', ":"), fp);
+    }
+
+    #[test]
+    fn ban_and_kick_reasons_do_not_change_the_kind() {
+        for reason in [
+            "server is full",
+            "Wrong or missing server password",
+            "Protocol version not supported (client: 1, server: 9)",
+            "connection refused",
+        ] {
+            let ban = JoinError::classify(&format!(
+                "You are banned from this server permanently: {reason}"
+            ));
+            assert_eq!(ban.kind, Kind::Banned, "{reason}");
+            assert!(ban.is_fatal());
+            let kick = JoinError::classify(&format!("Kicked by anna: {reason}"));
+            assert_eq!(kick.kind, Kind::Kicked, "{reason}");
+        }
+        assert_eq!(
+            JoinError::classify("Server is full (gave up reconnecting)").kind,
+            Kind::Full
         );
     }
 
