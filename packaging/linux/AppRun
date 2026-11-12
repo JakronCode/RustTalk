@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+APPDIR="${APPDIR:-$(cd -- "$(dirname -- "$0")" && pwd)}"
+export APPDIR
+for key in LD_LIBRARY_PATH GST_PLUGIN_PATH GST_PLUGIN_SYSTEM_PATH GST_PLUGIN_SCANNER XDG_DATA_DIRS SPA_PLUGIN_DIR ALSA_PLUGIN_DIR; do
+    export "RUSTTALK_ORIGINAL_$key=${!key-}"
+done
+export LD_LIBRARY_PATH="$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export GST_PLUGIN_PATH="$APPDIR/usr/lib/gstreamer-1.0"
+export GST_PLUGIN_SYSTEM_PATH=""
+export GST_PLUGIN_SCANNER="$APPDIR/usr/libexec/gstreamer-1.0/gst-plugin-scanner"
+export SPA_PLUGIN_DIR="$APPDIR/usr/lib/spa-0.2"
+export ALSA_PLUGIN_DIR="$APPDIR/usr/lib/alsa-lib"
+export XDG_DATA_DIRS="$APPDIR/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+exec "$APPDIR/usr/bin/rusttalk" "$@"

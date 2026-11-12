@@ -78,6 +78,12 @@ impl AudioControl {
         }
     }
 
+    pub fn should_transmit(&self, vad_speech: bool) -> bool {
+        !self.self_muted.load(Ordering::Relaxed)
+            && !self.self_deafened.load(Ordering::Relaxed)
+            && (self.ptt_pressed.load(Ordering::Relaxed) || vad_speech)
+    }
+
     pub fn mic_level(&self) -> f32 {
         f32::from_bits(self.mic_level.load(Ordering::Relaxed))
     }
@@ -312,5 +318,22 @@ fn recv_loop(udp: UdpSocket, mixer: SharedMixer, talking: TalkingMap, stop: Arc<
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod shortcut_audio_tests {
+    use super::*;
+    #[test]
+    fn deafen_blocks_transmission_even_when_mute_flag_is_cleared() {
+        let control = AudioControl::new(false, 0.02);
+        control.ptt_pressed.store(true, Ordering::Relaxed);
+        assert!(control.should_transmit(false));
+        control.self_deafened.store(true, Ordering::Relaxed);
+        assert!(!control.should_transmit(false));
+        assert!(!control.should_transmit(true));
+        control.self_deafened.store(false, Ordering::Relaxed);
+        control.self_muted.store(true, Ordering::Relaxed);
+        assert!(!control.should_transmit(true));
     }
 }

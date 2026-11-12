@@ -112,11 +112,21 @@ pub fn language_for(tag: &str) -> &'static str {
 }
 
 /// "de" when Windows' first display language is German, else "en".
+#[cfg(windows)]
 pub fn system_language() -> &'static str {
     windows::System::UserProfile::GlobalizationPreferences::Languages()
         .ok()
         .and_then(|list| list.GetAt(0).ok())
         .map(|tag| language_for(&tag.to_string()))
+        .unwrap_or("en")
+}
+
+#[cfg(not(windows))]
+pub fn system_language() -> &'static str {
+    ["LC_ALL", "LC_MESSAGES", "LANG"].into_iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .find(|value| !value.is_empty())
+        .map(|tag| language_for(&tag))
         .unwrap_or("en")
 }
 

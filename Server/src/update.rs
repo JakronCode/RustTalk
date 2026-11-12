@@ -32,6 +32,10 @@ pub fn asset_name() -> Option<&'static str> {
         Some("rusttalk-server-linux-x86_64")
     } else if cfg!(all(windows, target_arch = "x86_64")) {
         Some("rusttalk-server-windows.exe")
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        Some("rusttalk-server-linux-aarch64")
+    } else if cfg!(all(windows, target_arch = "aarch64")) {
+        Some("rusttalk-server-windows-arm64.exe")
     } else {
         None
     }

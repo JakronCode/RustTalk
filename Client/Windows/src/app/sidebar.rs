@@ -794,6 +794,10 @@ impl RustTalkApp {
     }
 
     pub(super) fn toggle_mute(&mut self, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>) {
+        if self.control.self_deafened.load(Ordering::Relaxed) {
+            self.set_status("Undeafen before unmuting");
+            return;
+        }
         let muted = !self.control.self_muted.load(Ordering::Relaxed);
         let deafened = self.control.self_deafened.load(Ordering::Relaxed);
         self.control.self_muted.store(muted, Ordering::Relaxed);

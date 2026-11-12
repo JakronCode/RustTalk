@@ -799,7 +799,13 @@ fn fake_github() -> u16 {
             while reader.read_line(&mut line).map(|n| n > 2).unwrap_or(false) {
                 line.clear();
             }
-            let asset = if cfg!(windows) { "rusttalk-server-windows.exe" } else { "rusttalk-server-linux-x86_64" };
+            let asset = match (std::env::consts::OS, std::env::consts::ARCH) {
+                ("windows", "x86_64") => "rusttalk-server-windows.exe",
+                ("windows", "aarch64") => "rusttalk-server-windows-arm64.exe",
+                ("linux", "x86_64") => "rusttalk-server-linux-x86_64",
+                ("linux", "aarch64") => "rusttalk-server-linux-aarch64",
+                target => panic!("Unsupported update-test target: {target:?}"),
+            };
             let body = format!(
                 r#"{{"tag_name":"v99.0.0","html_url":"http://x/v99","assets":[{{"name":"{asset}","browser_download_url":"http://x/bin"}},{{"name":"{asset}.sha256","browser_download_url":"http://x/sha"}}]}}"#
             );
