@@ -42,6 +42,9 @@ jobs:
         run: |
           choco install nasm -y --no-progress
           "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: AppImage audio packaging regression
+        if: runner.os == 'Linux'
+        run: make test-packaging
       - name: Test
         run: cargo test --locked --workspace -- --test-threads=1
       # Warnings are shown but do not fail the job (the tree is not clippy-clean yet).

@@ -303,7 +303,11 @@ When the minor version changes, also update the image tag in
 Linux clients are `rusttalk-linux-x86_64.AppImage` and
 `rusttalk-linux-aarch64.AppImage`, with checksums. Built on Ubuntu 24.04, they bundle
 capture plugins and libraries, but require a compatible host (glibc 2.39 or newer),
-Wayland, PipeWire, a desktop portal backend, and host GPU drivers. Packaging runs
+Wayland, PipeWire, a desktop portal backend, and host GPU drivers. ALSA and
+PipeWire libraries, plugins and configuration come from the host as one stack;
+install the host ALSA bridge for your audio service (for example `pipewire-alsa`
+on Arch). The image does not override `ALSA_PLUGIN_DIR` or `SPA_PLUGIN_DIR`.
+Packaging rejects bundled ALSA/PipeWire libraries or plugins and runs
 `--check-runtime` inside the image to verify the capture elements load, then tests
 bad-checksum rejection, self-replacement, and relaunch against a local release server.
 
@@ -314,7 +318,9 @@ and `rusttalk-windows-arm64.exe`. Bare servers use
 also include configuration and deployment scripts. `rusttalk-server update`
 selects the matching OS and architecture.
 
-To package a locally built Linux release, run `bash scripts/package-linux.sh`.
+To package a locally built Linux release, run `make appimage`.
+Run `make test-packaging` for audio packaging and launcher regression checks
+without audio hardware. These checks do not verify microphone or speaker operation.
 Artifacts go into `dist/`. Packaging tools use versioned releases and verified
 GitHub asset digests; the AppImage runtime is pinned too. Images built on newer
 local distributions inherit that distribution's minimum glibc requirement.
