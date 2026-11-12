@@ -129,7 +129,8 @@ docker compose up -d
 docker compose logs rusttalk        # shows the TLS fingerprint for your users
 ```
 
-- **Admin password:** the container refuses to start without it. It is read from the file named by `RUSTTALK_ADMIN_PASSWORD_FILE` (the compose secret above): one line, 16 to 1024 bytes. It never goes into `server.toml` or the logs. Compose mounts the file as it is (it ignores `uid`/`mode` outside Swarm), so the container user 65532 must be able to read it: the `chown` above, or keep it yours and grant read access with `setfacl -m u:65532:r admin_password.txt`. Read it back with `sudo cat admin_password.txt`.
+- **Admin password:** the container refuses to start without it. It is read from the file named by `RUSTTALK_ADMIN_PASSWORD_FILE` (the compose secret above): one line, at least 16 characters and at most 1024 bytes. It never goes into `server.toml` or the logs. Compose mounts the file as it is (it ignores `uid`/`mode` outside Swarm), so the container user 65532 must be able to read it: the `chown` above, or keep it yours and grant read access with `setfacl -m u:65532:r admin_password.txt`. Read it back with `sudo cat admin_password.txt`.
+- **Admin login limits:** failed password claims back off per source IP (1 second up to 60 seconds), including reconnects. At most 1024 sources are remembered for five minutes, with a global budget of ten attempts per second. Successful login clears that source's failures. Users behind the same NAT share the limit.
 - **No open mode in Docker:** unlike a bare server, a container never lets the first visitor take over. Nobody is admin until someone enters the admin password under Server Settings > Roles.
 - **Ports:** publish 7331 **TCP and UDP**. TCP carries login and chat, UDP carries voice: without the UDP mapping (or with UDP blocked by a firewall) people can log in but nobody hears anyone.
 - **Hardening:** the example runs with a read-only root filesystem, `cap_drop: [ALL]`, `no-new-privileges` and a small `/tmp` tmpfs. Never mount the Docker socket into the RustTalk container.
@@ -147,7 +148,7 @@ Back up the whole volume while the server is stopped (the archive contains the p
 
 ```bash
 docker compose stop rusttalk
-docker run --rm -v rusttalk_rusttalk-data:/data:ro -v $PWD:/backup debian:trixie-slim tar -czf /backup/rusttalk-data.tgz -C /data .
+docker run --rm -v rusttalk_rusttalk-data:/data:ro -v $PWD:/backup debian:trixie-slim sh -c 'set -eu; umask 077; archive=$(mktemp /backup/.rusttalk-backup.XXXXXX); tar -czf "$archive" -C /data .; mv -f "$archive" /backup/rusttalk-data.tgz'
 docker compose start rusttalk
 ```
 

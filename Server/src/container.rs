@@ -1,8 +1,7 @@
 //! Running in the official container image (`RUSTTALK_CONTAINER=1`, see `Server/Dockerfile`):
 //! default config on first start, and the `--healthcheck` probe.
 
-use std::io::Write;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::time::Duration;
 
@@ -29,19 +28,8 @@ pub fn write_default_config(path: &Path) -> Result<bool> {
     let db_path = toml::Value::String(db_path.to_string_lossy().into_owned()).to_string();
     let text = DEFAULT_CONFIG.replace("{db_path}", &db_path);
 
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = match options.open(path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
-        Err(e) => return Err(e).with_context(|| format!("Could not create {}", path.display())),
-    };
-    file.write_all(text.as_bytes())
-        .and_then(|()| file.sync_all())
-        .with_context(|| format!("Could not write {}", path.display()))?;
-    Ok(true)
+    crate::private_file::create(path, text.as_bytes())
+        .with_context(|| format!("Could not create {}", path.display()))
 }
 
 const DEFAULT_CONFIG: &str = r#"# RustTalk server configuration, created on the first start of the container.
@@ -82,28 +70,33 @@ category = "Voice Channels"
 
 /// `--healthcheck [config]`: exit code 0 if the TCP listener accepts a connection.
 /// Only connects and closes again: no TLS, no login, nothing that needs a secret.
-pub fn healthcheck(config_path: &str) -> i32 {
-    let probe = || -> Result<()> {
+pub async fn healthcheck(config_path: &str) -> i32 {
+    let probe = async {
         let cfg = ServerConfig::load(config_path)
             .with_context(|| format!("Could not load config '{config_path}'"))?;
-        let addr = probe_addr(&cfg.bind_address)?;
-        TcpStream::connect_timeout(&addr, PROBE_TIMEOUT)
+        let addr = probe_addr(&cfg.bind_address).await?;
+        tokio::net::TcpStream::connect(addr)
+            .await
             .with_context(|| format!("{addr} does not accept connections"))?;
-        Ok(())
+        Ok::<(), anyhow::Error>(())
     };
-    match probe() {
-        Ok(()) => 0,
-        Err(e) => {
+    match tokio::time::timeout(PROBE_TIMEOUT, probe).await {
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) => {
             eprintln!("unhealthy: {e:#}");
+            1
+        }
+        Err(_) => {
+            eprintln!("unhealthy: probe timed out");
             1
         }
     }
 }
 
 /// Where to reach a listener bound to `bind` from the same host (wildcard -> loopback).
-fn probe_addr(bind: &str) -> Result<SocketAddr> {
-    let mut addr = bind
-        .to_socket_addrs()
+async fn probe_addr(bind: &str) -> Result<SocketAddr> {
+    let mut addr = tokio::net::lookup_host(bind)
+        .await
         .with_context(|| format!("Invalid bind_address '{bind}'"))?
         .next()
         .with_context(|| format!("bind_address '{bind}' has no address"))?;
@@ -169,20 +162,20 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn probe_maps_wildcards_to_loopback() {
+    #[tokio::test]
+    async fn probe_maps_wildcards_to_loopback() {
         assert_eq!(
-            probe_addr("0.0.0.0:7331").unwrap(),
+            probe_addr("0.0.0.0:7331").await.unwrap(),
             "127.0.0.1:7331".parse().unwrap()
         );
         assert_eq!(
-            probe_addr("[::]:7331").unwrap(),
+            probe_addr("[::]:7331").await.unwrap(),
             "[::1]:7331".parse().unwrap()
         );
         assert_eq!(
-            probe_addr("192.0.2.5:9000").unwrap(),
+            probe_addr("192.0.2.5:9000").await.unwrap(),
             "192.0.2.5:9000".parse().unwrap()
         );
-        assert!(probe_addr("no-port").is_err());
+        assert!(probe_addr("no-port").await.is_err());
     }
 }

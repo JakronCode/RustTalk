@@ -123,7 +123,15 @@ fn default_db_path() -> String {
 impl ServerConfig {
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)?;
-        let cfg: ServerConfig = toml::from_str(&text)?;
+        let cfg: ServerConfig = toml::from_str(&text).map_err(|e: toml::de::Error| {
+            let offset = e.span().map(|s| s.start).unwrap_or(0).min(text.len());
+            let line = text.as_bytes()[..offset]
+                .iter()
+                .filter(|&&b| b == b'\n')
+                .count()
+                + 1;
+            anyhow::anyhow!("Invalid server configuration near line {line}")
+        })?;
         Ok(cfg)
     }
 }

@@ -785,6 +785,15 @@ admin_password = \"boss\"
     drain(&mut e, 300).await;
     send(&mut e, &ClientMessage::ClaimAdmin { password: Some("wrong".into()) }).await;
     expect(&mut e, "Error", |m| matches!(m, ServerMessage::Error { .. })).await;
+    // A reconnect with a new identity from the same IP must not reset the guessing limit.
+    let (mut retry, _) = connect(port, "retry", Some("pw".into())).await;
+    drain(&mut retry, 50).await;
+    send(&mut retry, &ClientMessage::ClaimAdmin { password: Some("boss".into()) }).await;
+    match expect(&mut retry, "throttled", |m| matches!(m, ServerMessage::Error { .. })).await {
+        ServerMessage::Error { message } => assert!(message.contains("Too many admin attempts")),
+        _ => unreachable!(),
+    }
+    tokio::time::sleep(Duration::from_millis(1100)).await;
     send(&mut e, &ClientMessage::ClaimAdmin { password: Some("boss".into()) }).await;
     expect(&mut e, "erin admin", |m| matches!(m, ServerMessage::UserRoleChanged { client_id, role: Role::Admin } if *client_id == we.client_id)).await;
 }
@@ -1482,6 +1491,8 @@ async fn container_mode_is_closed_until_the_admin_logs_in() {
     send(&mut b, &ClientMessage::CreateChannel { name: "x".into(), kind: ChannelKind::Text, parent: None }).await;
     expect(&mut b, "Error", |m| matches!(m, ServerMessage::Error { .. })).await;
 
+    // Both test clients share an IP; failed guesses back off across reconnects/identities.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
     send(&mut a, &ClientMessage::ClaimAdmin { password: Some(ADMIN_SECRET.into()) }).await;
     expect(&mut a, "alice admin", |m| matches!(m, ServerMessage::UserRoleChanged { client_id, role: Role::Admin } if *client_id == wa.client_id)).await;
     send(&mut a, &ClientMessage::CreateChannel { name: "ops".into(), kind: ChannelKind::Text, parent: None }).await;
@@ -1549,3 +1560,98 @@ async fn sigterm_shuts_down_cleanly() {
     std::fs::remove_dir_all(&dir).ok();
 }
 // wdac-dice: 2
+
+#[test]
+fn config_errors_never_print_secret_values() {
+    let dir = data_dir("config-redaction");
+    let config = dir.join("server.toml");
+    let marker = "PRIVATE_CONFIG_VALUE_0123456789";
+    for text in [
+        format!("password = [\"{marker}\"]"),
+        format!("admin_password = \"{marker}"),
+    ] {
+        std::fs::write(&config, text).unwrap();
+        for args in [
+            vec![config.to_str().unwrap()],
+            vec!["--healthcheck", config.to_str().unwrap()],
+        ] {
+            let (ok, out, err) = run_to_exit(&args, &[]);
+            assert!(!ok);
+            assert!(
+                err.contains("Invalid server configuration near line"),
+                "{err}"
+            );
+            assert!(!out.contains(marker) && !err.contains(marker));
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn concurrent_writes_acknowledged_during_shutdown_are_persisted() {
+    let dir = data_dir("shutdown-writes");
+    let port = free_port();
+    let db = dir.join("rusttalk.db");
+    let extra = format!(
+        "persist_state = true\ndb_path = {:?}\n",
+        db.to_string_lossy()
+    );
+    let mut server = spawn_server(port, &extra);
+    wait_for_port(port);
+    let ((mut reader, mut writer), _) = connect(port, "writer", None).await;
+    let writing = tokio::spawn(async move {
+        for i in 0..100 {
+            let msg = ClientMessage::CreateChannel {
+                name: format!("concurrent-{i}"),
+                kind: ChannelKind::Text,
+                parent: None,
+            };
+            if write_frame(&mut writer, &msg).await.is_err() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    });
+    let mut acknowledged = Vec::new();
+    let mut signalled = false;
+    loop {
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            read_frame::<_, ServerMessage>(&mut reader),
+        )
+        .await
+        {
+            Ok(Ok(Some(ServerMessage::ChannelCreated { channel }))) => {
+                acknowledged.push(channel.name);
+                if acknowledged.len() == 5 {
+                    assert!(Command::new("kill")
+                        .args(["-TERM", &server.0.id().to_string()])
+                        .status()
+                        .unwrap()
+                        .success());
+                    signalled = true;
+                }
+            }
+            Ok(Ok(Some(_))) => {}
+            Ok(_) => break,
+            Err(_) => panic!("shutdown did not close the writer connection"),
+        }
+    }
+    writing.await.unwrap();
+    assert!(signalled);
+    assert!(server.0.wait().unwrap().success());
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    for name in acknowledged {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM channels WHERE name = ?1",
+                [&name],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "acknowledged channel {name} was lost");
+    }
+    drop(conn);
+    std::fs::remove_dir_all(dir).unwrap();
+}

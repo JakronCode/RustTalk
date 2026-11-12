@@ -5,12 +5,14 @@
 //! Version: `rusttalk-server --version`
 //! Health: `rusttalk-server --healthcheck [pfad/zur/server.toml]` (see [`container`])
 
+mod admin_auth;
 mod config;
 mod container;
 mod db;
 mod gif;
 mod link;
 mod moderation;
+mod private_file;
 mod state;
 mod tls;
 mod tcp;
@@ -43,9 +45,7 @@ async fn main() -> anyhow::Result<()> {
                 .get(1)
                 .cloned()
                 .unwrap_or_else(|| "server.toml".to_string());
-            std::process::exit(
-                tokio::task::spawn_blocking(move || container::healthcheck(&path)).await?,
-            );
+            std::process::exit(container::healthcheck(&path).await);
         }
         _ => {}
     }
@@ -158,8 +158,11 @@ async fn main() -> anyhow::Result<()> {
             res.context("Signal handler")?;
             info!("Shutting down");
             // Waits for a running change to finish, then closes SQLite (WAL checkpoint).
-            state.lock().unwrap_or_else(|e| e.into_inner()).close_db();
+            let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+            guard.close_db();
             info!("Shutdown complete");
+            // Keep the lock until exit: no worker may acknowledge memory-only mutations.
+            std::process::exit(0);
         }
     }
     // Do not wait for blocking tasks (update check, GIF search) that may still run.

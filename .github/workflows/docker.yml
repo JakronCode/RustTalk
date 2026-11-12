@@ -12,6 +12,7 @@ on:
       - ".dockerignore"
       - "Makefile"
       - ".github/workflows/docker.yml"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
 permissions:
   contents: read
