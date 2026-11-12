@@ -262,6 +262,7 @@ pub struct RustTalkApp {
     new_channel_focus: bool,
     show_settings: bool,
     settings_page: SettingsPage,
+    settings_nav: settings::SettingsNav,
     /// Settings: waiting for a key press to bind push-to-talk.
     recording_key: Option<hotkey::Action>,
     keybind_error: Option<String>,
@@ -456,6 +457,7 @@ impl RustTalkApp {
             new_channel_focus: false,
             show_settings: false,
             settings_page: SettingsPage::Voice,
+            settings_nav: Default::default(),
             recording_key: None,
             keybind_error: None,
             cameras: None,
