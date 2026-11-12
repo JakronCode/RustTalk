@@ -22,6 +22,7 @@ mod dev_input;
 mod join_error;
 mod lifecycle;
 mod media_ui;
+mod markdown;
 mod moderation_ui;
 mod poke;
 mod server_settings;
@@ -240,6 +241,7 @@ pub struct RustTalkApp {
 
     // UI-State
     chat_input: String,
+    markdown: markdown::Cache,
     /// Composer answers this message.
     reply_to: Option<u64>,
     /// Own message being edited inline (text in `edit_text`).
@@ -443,6 +445,7 @@ impl RustTalkApp {
             selected_channel: None,
             collapsed: HashMap::new(),
             chat_input: String::new(),
+            markdown: markdown::Cache::default(),
             reply_to: None,
             editing: None,
             edit_text: String::new(),

@@ -367,7 +367,7 @@ impl RustTalkApp {
                             replying: replying == Some(line.id) && line.id != 0,
                         };
                         let edit = is_edit.then_some(EditBox { text: &mut self.edit_text, focus: &mut self.focus_edit });
-                        if let Some(a) = chat_line(ui, line, &mut self.textures, &ctx, edit) {
+                        if let Some(a) = chat_line(ui, line, &mut self.textures, &ctx, edit, &mut self.markdown) {
                             action = Some(a);
                         }
                         prev = match &line.kind {
@@ -428,8 +428,12 @@ impl RustTalkApp {
                         self.pick_image();
                     }
                     let right_w = 76.0;
+                    let mut layouter = super::markdown::composer;
                     let resp = ui.add(
                         egui::TextEdit::multiline(&mut self.chat_input)
+                            .layouter(&mut layouter)
+                            .char_limit(rusttalk_shared::protocol::MAX_CHAT_LEN)
+                            .return_key(egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, egui::Key::Enter))
                             .id(composer_id(ch_id))
                             .hint_text(format!("Message {name}"))
                             .desired_rows(1)
@@ -459,10 +463,6 @@ impl RustTalkApp {
                         }
                     }
                     if enter {
-                        // Strip the newline egui already inserted.
-                        while self.chat_input.ends_with('\n') {
-                            self.chat_input.pop();
-                        }
                         resp.request_focus();
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -884,7 +884,8 @@ pub(super) struct EditBox<'a> {
 
 /// Short one-line preview of a message.
 pub(super) fn snippet(text: &str, has_image: bool) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let plain = super::markdown::plain(text);
+    let flat = plain.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut s: String = flat.chars().take(70).collect();
     if flat.chars().count() > 70 {
         s.push_str("...");
@@ -903,6 +904,7 @@ pub(super) fn chat_line(
     textures: &mut TextureCache,
     c: &LineCtx,
     edit: Option<EditBox>,
+    markdown: &mut super::markdown::Cache,
 ) -> Option<ChatAction> {
     let (from, own) = match &line.kind {
         ChatKind::System => {
@@ -930,8 +932,10 @@ pub(super) fn chat_line(
     let mut action = None;
     // Background (mention / reply target) is painted below the content afterwards.
     let bg = ui.painter().add(egui::Shape::Noop);
-    let row = ui
-        .horizontal(|ui| {
+    // Reserve a stable interaction before children; updating its rect keeps their click priority.
+    let row_id = ui.id().with(("chat-line", line.id));
+    ui.interact(egui::Rect::from_min_size(ui.next_widget_position(), egui::Vec2::ZERO), row_id, egui::Sense::click());
+    let row = ui.horizontal(|ui| {
             ui.set_width(ui.available_width());
             if compact {
             } else if c.grouped {
@@ -976,7 +980,7 @@ pub(super) fn chat_line(
                         }
                         ui.label(egui::RichText::new(from).strong().color(name_color));
                         if !line.text.is_empty() {
-                            ui.add(egui::Label::new(egui::RichText::new(&line.text).color(theme::TEXT)).wrap());
+                            markdown.show(ui, line.id, &line.text);
                         }
                         if line.edited {
                             ui.label(egui::RichText::new("(edited)").size(11.0).color(theme::DISABLED));
@@ -985,7 +989,7 @@ pub(super) fn chat_line(
                 } else if !line.text.is_empty() {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
-                        ui.add(egui::Label::new(egui::RichText::new(&line.text).color(theme::TEXT)).wrap());
+                        markdown.show(ui, line.id, &line.text);
                         if line.edited {
                             ui.label(egui::RichText::new("(edited)").size(11.0).color(theme::DISABLED));
                         }
@@ -1002,9 +1006,7 @@ pub(super) fn chat_line(
                     }
                 }
             });
-        })
-        .response
-        .rect;
+        }).response.rect;
 
     let tint = if c.replying || editing {
         Some((theme::accent().gamma_multiply(0.22), theme::accent()))
@@ -1035,7 +1037,13 @@ pub(super) fn chat_line(
     let shift = ui.input(|i| i.modifiers.shift);
     let delete = |id| if shift { ChatAction::DeleteNow(id) } else { ChatAction::Delete(id) };
     // Right click: same actions as the hover buttons.
-    let resp = ui.interact(row, ui.id().with(("chat-line", line.id)), egui::Sense::click());
+    let mut resp = ui.interact(row, row_id, egui::Sense::click());
+    // Selectable labels own their clicks; forward only secondary clicks to the row menu.
+    if ui.rect_contains_pointer(row)
+        && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary))
+    {
+        resp.flags.insert(egui::response::Flags::HOVERED | egui::response::Flags::CLICKED);
+    }
     resp.context_menu(|ui| {
         ui.set_width(180.0);
         ui.spacing_mut().item_spacing.y = 2.0;
@@ -1165,6 +1173,104 @@ fn inline_editor(ui: &mut egui::Ui, id: u64, edit: EditBox) -> Option<ChatAction
 mod tests {
     use super::*;
 
+
+
+    #[test]
+    fn context_menu_stays_with_message_after_preceding_deletion() {
+        let ctx = egui::Context::default();
+        let mut textures = TextureCache::default();
+        let mut markdown = super::super::markdown::Cache::default();
+        let mut lines: Vec<_> = (1..=3).map(|id| ChatLine {
+            id, kind: ChatKind::Message { from: "me".into(), own: true },
+            text: "hello".into(), timestamp: 0, image: None, reply_to: None, edited: false,
+        }).collect();
+        let mut draw = |lines: &[ChatLine], events| {
+            let mut responses = Vec::new();
+            let output = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 480.0))),
+                events, ..Default::default()
+            }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let c = LineCtx { lines, me: "me", grouped: false, show_ts: true, animate: false, replying: false };
+                    for line in lines {
+                        let id = ui.id().with(("chat-line", line.id));
+                        chat_line(ui, line, &mut textures, &c, None, &mut markdown);
+                        responses.push(ctx.read_response(id).unwrap());
+                    }
+                });
+            });
+            let text_positions: Vec<_> = output.shapes.iter().filter_map(|shape| {
+                if let egui::Shape::Text(text) = &shape.shape {
+                    (text.galley.job.text == "hello").then(|| text.pos + text.galley.size() / 2.0)
+                } else { None }
+            }).collect();
+            (responses, text_positions)
+        };
+        draw(&lines, vec![]);
+        let (_, positions) = draw(&lines, vec![]);
+        let pos = positions[1];
+        draw(&lines, vec![egui::Event::PointerMoved(pos)]);
+        let button = |pressed| egui::Event::PointerButton {
+            pos, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default(),
+        };
+        draw(&lines, vec![button(true)]);
+        let (responses, _) = draw(&lines, vec![button(false)]);
+        assert!(responses[1].context_menu_opened());
+        lines.remove(0);
+        let (responses, _) = draw(&lines, vec![]);
+        assert!(responses[0].context_menu_opened(), "message 2 lost its menu");
+        assert!(!responses[1].context_menu_opened(), "menu moved to message 3");
+    }
+
+    #[test]
+    fn code_copy_receives_click_inside_message_row() {
+        let ctx = egui::Context::default();
+        let mut textures = TextureCache::default();
+        let mut markdown = super::super::markdown::Cache::default();
+        let lines = vec![ChatLine {
+            id: 7,
+            kind: ChatKind::Message { from: "alice".into(), own: false },
+            text: "```unknown\nlet n = 42;\n```".into(),
+            timestamp: 0,
+            image: None,
+            reply_to: None,
+            edited: false,
+        }];
+        let mut frame = |events| {
+            ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 480.0))),
+                events,
+                ..Default::default()
+            }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let c = LineCtx { lines: &lines, me: "me", grouped: false, show_ts: true, animate: false, replying: false };
+                    chat_line(ui, &lines[0], &mut textures, &c, None, &mut markdown);
+                });
+            })
+        };
+        frame(vec![]);
+        let output = frame(vec![]);
+        let pos = output.shapes.iter().find_map(|shape| {
+            if let egui::Shape::Text(text) = &shape.shape {
+                (text.galley.job.text == "Copy").then(|| text.pos + text.galley.size() / 2.0)
+            } else {
+                None
+            }
+        }).expect("copy button is visible");
+        frame(vec![egui::Event::PointerMoved(pos)]);
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(vec![button(true)]);
+        let output = frame(vec![button(false)]);
+        assert!(output.platform_output.commands.iter().any(|command| {
+            matches!(command, egui::OutputCommand::CopyText(text) if text == "let n = 42;\n")
+        }), "row swallowed the copy click");
+    }
+
     #[test]
     fn stage_grid_uses_space_and_keeps_16_9() {
         // One tile in a wide stage: limited by the height, full 16:9.
@@ -1212,7 +1318,7 @@ mod tests {
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let c = LineCtx { lines, me: "me", grouped: false, show_ts: true, animate: false, replying: false };
-                action = chat_line(ui, &lines[0], textures, &c, None);
+                action = chat_line(ui, &lines[0], textures, &c, None, &mut super::super::markdown::Cache::default());
             });
         });
         action
