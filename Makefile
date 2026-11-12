@@ -119,6 +119,25 @@ test-client: ## Client tests
 e2e: ## Local end-to-end smoke test (server + two test clients)
 	@bash Server/Test_Scripts/e2e_local.sh
 
+##@ Docker
+
+DOCKER_IMAGE ?= rusttalk-server:dev
+COMPOSE_DIR  := Server/deploy
+
+.PHONY: docker-build
+docker-build: ## Build the server image for this machine (DOCKER_IMAGE=rusttalk-server:dev)
+	@docker build -f Server/Dockerfile -t $(DOCKER_IMAGE) .
+
+.PHONY: docker-test
+docker-test: docker-build ## Smoke test the image (fresh volume, read-only, no caps, SIGTERM)
+	@bash Server/Test_Scripts/docker_smoke.sh $(DOCKER_IMAGE)
+
+.PHONY: compose-check
+compose-check: ## Validate the compose examples
+	@docker compose -f $(COMPOSE_DIR)/docker-compose.yml config -q
+	@docker compose -f $(COMPOSE_DIR)/docker-compose.yml -f $(COMPOSE_DIR)/docker-compose.watchtower.yml config -q
+	$(call ok,compose files valid)
+
 ##@ Quality
 
 .PHONY: lint

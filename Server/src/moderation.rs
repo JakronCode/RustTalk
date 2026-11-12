@@ -34,6 +34,8 @@ pub struct Moderation {
     next_ban_id: u64,
     invites: Vec<InviteInfo>,
     audit: VecDeque<AuditEntry>,
+    /// Never open, even before the first admin (admin password required).
+    closed: bool,
 }
 
 impl Moderation {
@@ -45,7 +47,12 @@ impl Moderation {
             next_ban_id,
             invites,
             audit: audit.into_iter().collect(),
+            closed: false,
         }
+    }
+
+    pub fn set_closed(&mut self, closed: bool) {
+        self.closed = closed;
     }
 
     // --- roles ---
@@ -58,9 +65,9 @@ impl Moderation {
         self.roles.values().any(|r| r.role == Role::Admin)
     }
 
-    /// No admin yet: everyone may do everything.
+    /// No admin yet (and not closed): everyone may do everything.
     pub fn is_open(&self) -> bool {
-        !self.has_admin()
+        !self.closed && !self.has_admin()
     }
 
     /// May someone with `role` do something that needs `need`?
@@ -236,6 +243,17 @@ mod tests {
         assert_eq!(m.roles().len(), 1, "members are not stored");
         assert_eq!(m.touch_name("u2", "Ben").map(|e| e.name), Some("Ben".into()));
         assert_eq!(m.touch_name("u2", "Ben"), None, "unchanged");
+    }
+
+    #[test]
+    fn closed_is_never_open() {
+        let mut m = Moderation::default();
+        m.set_closed(true);
+        assert!(!m.is_open(), "no admin yet, still closed");
+        assert!(!m.allowed(Role::Member, Role::Moderator));
+        m.set_role("u1", "anna", Role::Admin).unwrap();
+        assert!(!m.is_open());
+        assert!(m.allowed(Role::Admin, Role::Admin));
     }
 
     #[test]

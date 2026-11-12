@@ -1,0 +1,36 @@
+# RustTalk server with Docker Compose. Setup and updates: README.md, section "Docker".
+#
+#   touch admin_password.txt && chmod 600 admin_password.txt && openssl rand -base64 32 > admin_password.txt
+#   sudo chown 65532:65532 admin_password.txt && sudo chmod 0400 admin_password.txt
+#   docker compose up -d
+#
+# No automatic updates: run "docker compose pull && docker compose up -d" when you
+# choose to. Opt-in auto-updates: docker-compose.watchtower.yml (read the trade-offs).
+name: rusttalk
+
+services:
+  rusttalk:
+    # Minor tag: gets patch releases of this version line when you pull. Pin a
+    # digest (ghcr.io/rusttalkcrew/rusttalk-server:0.10@sha256:...) to freeze it.
+    image: ghcr.io/rusttalkcrew/rusttalk-server:0.10
+    restart: unless-stopped
+    ports:
+      - "7331:7331/tcp"   # control channel (TLS)
+      - "7331:7331/udp"   # voice - without UDP nobody hears anyone
+    volumes:
+      - rusttalk-data:/data   # server.toml, database, TLS key: back this up
+    secrets:
+      - rusttalk_admin_password   # read via RUSTTALK_ADMIN_PASSWORD_FILE (set in the image)
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:size=16m
+    # Never mount the Docker socket here.
+
+volumes:
+  rusttalk-data:
+
+secrets:
+  rusttalk_admin_password:
+    file: ./admin_password.txt   # not in git (.gitignore)

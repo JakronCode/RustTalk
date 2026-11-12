@@ -1,0 +1,23 @@
+# OPT-IN automatic updates with Watchtower. Read "Automatic updates" in README.md
+# first: whatever the tag below points to is installed without review.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.watchtower.yml up -d
+#
+# This is the maintained fork (github.com/nicholas-fedor/watchtower). The original
+# containrrr/watchtower is archived (last release 2023) and broke with Docker Engine 29.
+services:
+  rusttalk:
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"   # this container opts in
+
+  watchtower:
+    image: ghcr.io/nicholas-fedor/watchtower:1.24.0@sha256:e96976bcbeaf0a9adeddc9016a539c27a2245ef6bb7d3ca97ed106783350d387
+    restart: unless-stopped
+    environment:
+      WATCHTOWER_LABEL_ENABLE: "true"    # only touch containers with the label above
+      WATCHTOWER_SCHEDULE: "0 0 4 * * *" # daily at 04:00 (UTC unless TZ is set)
+      WATCHTOWER_CLEANUP: "true"         # remove the replaced image
+    volumes:
+      # Root-equivalent control of the host. Only Watchtower gets it, never RustTalk.
+      - /var/run/docker.sock:/var/run/docker.sock
+    security_opt: ["no-new-privileges:true"]

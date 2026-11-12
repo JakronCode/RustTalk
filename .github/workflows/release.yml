@@ -9,19 +9,81 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Tag must match every workspace package
+      - name: Tag must match every workspace package and the compose example
         run: |
           python3 - <<'PY'
-          import os, pathlib, tomllib
+          import os, pathlib, re, tomllib
           tag = os.environ['GITHUB_REF_NAME'].removeprefix('v')
           for name in ['Client/Windows', 'Server', 'shared']:
               path = pathlib.Path(name) / 'Cargo.toml'
               version = tomllib.loads(path.read_text())['package']['version']
               assert version == tag, f'{path}: {version} does not match tag {tag}'
+          if '-' not in tag:
+              compose = pathlib.Path('Server/deploy/docker-compose.yml')
+              found = re.search(r'ghcr\.io/rusttalkcrew/rusttalk-server:([^\s@]+)', compose.read_text())
+              minor = '.'.join(tag.split('.')[:2])
+              assert found and found.group(1) == minor, f'{compose}: image tag should be {minor}'
           PY
   build:
     needs: check-version
     uses: ./.github/workflows/build.yml
+  # Server image on ghcr.io: upstream only, after the version check and all builds and tests passed.
+  image:
+    needs: build
+    if: github.repository == 'rusttalkcrew/RustTalk'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build linux/amd64 for the smoke test
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Server/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: rusttalk-server:release-test
+      - name: Smoke test
+        run: bash Server/Test_Scripts/docker_smoke.sh rusttalk-server:release-test
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/rusttalkcrew/rusttalk-server
+          # vX.Y.Z, X.Y.Z, X.Y and latest; pre-releases only get version aliases.
+          tags: |
+            type=semver,pattern=v{{version}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          flavor: latest=auto
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: push
+        name: Build and push linux/amd64 + linux/arm64
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Server/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: mode=max
+          sbom: true
+      - name: Image digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          echo "Server image: ghcr.io/rusttalkcrew/rusttalk-server@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
   publish:
     needs: build
     runs-on: ubuntu-24.04
