@@ -37,7 +37,11 @@ pub fn build_input_stream(
     producer: HeapProd<f32>,
     level_sink: Option<Arc<AtomicU32>>,
     gain: Option<Arc<AtomicU32>>,
-) -> Result<cpal::Stream> {
+) -> Result<super::DeviceStream> {
+    #[cfg(test)]
+    if let Some(stream) = super::test_devices::open(super::test_devices::Kind::Input, device_name) {
+        return stream;
+    }
     let device = pick_input_device(device_name)?;
     let supported = device.default_input_config().context("default_input_config")?;
     let config = supported.config();
@@ -59,6 +63,8 @@ pub fn build_input_stream(
         }
         other => return Err(anyhow!("Unsupported sample format: {other:?}")),
     };
+    #[cfg(test)]
+    let stream = super::DeviceStream::Hardware { _stream: stream };
     Ok(stream)
 }
 
@@ -78,7 +84,7 @@ pub fn build_stream_for(device: &cpal::Device, supported: &cpal::SupportedStream
 /// Hält einen Input-Stream offen und verwirft die Samples; der Pegel fließt
 /// über die Level-Sink.
 pub struct MicMonitor {
-    stream: Option<cpal::Stream>,
+    stream: Option<super::DeviceStream>,
     level: Arc<AtomicU32>,
     stop: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,

@@ -149,6 +149,17 @@ pub type UserVolumeMap = Arc<Mutex<HashMap<u64, f32>>>;
 /// Allowed range for per-user and input volume.
 pub const MAX_VOLUME: f32 = 2.0;
 
+// Tests replace only device creation; lifecycle and network workers still run.
+#[cfg(not(test))]
+pub type DeviceStream = cpal::Stream;
+#[cfg(test)]
+pub enum DeviceStream {
+    Hardware { _stream: cpal::Stream },
+    Fake { _stream: test_devices::Stream },
+}
+#[cfg(test)]
+pub(crate) mod test_devices;
+
 /// Connection-owned transport. Keep it when voice stops: the cipher owns the nonce counter.
 pub struct AudioSession {
     pub udp: UdpSocket,
@@ -158,8 +169,9 @@ pub struct AudioSession {
 
 /// Laufende Audio-Pipeline. Beim Drop werden die Threads gestoppt.
 pub struct AudioEngine {
-    input: Option<cpal::Stream>,
-    output: Option<cpal::Stream>,
+    pub voice_channel: Option<u64>,
+    input: Option<DeviceStream>,
+    output: Option<DeviceStream>,
     workers: AudioWorkers,
     /// For "share audio": own UDP socket clone + token, playback tap.
     udp: UdpSocket,
@@ -181,7 +193,7 @@ struct Shared {
 }
 
 impl AudioEngine {
-    /// Startet die komplette Pipeline.
+    /// Starts playback and the receiver; capture exists only for a confirmed voice channel.
     ///
     /// `udp`: verbundener UDP-Socket (connect() auf die Server-Adresse).
     /// `token`: UDP-Token aus dem Welcome (Identifikation beim Server).
@@ -196,6 +208,7 @@ impl AudioEngine {
         sfx: sfx::SfxQueue,
         input_device: Option<&str>,
         output_device: Option<&str>,
+        voice_channel: Option<u64>,
     ) -> Result<Self> {
         let shared = Shared {
             control: control.clone(),
@@ -224,51 +237,87 @@ impl AudioEngine {
                 let stop = stop.clone();
                 let cipher = cipher.clone();
                 let link = control.link.clone();
-                move || recv_loop(recv_udp, token, mixer, talking, stop, cipher, link, session)
+                move || recv_loop(recv_udp, token, mixer, talking, stop, cipher, link, session, voice_channel.is_some())
             })
             .context("Empfangsthread starten")?);
 
-        // Capture: Mikro -> Ring-Puffer (mit Pegel-Sink fuer die UI).
-        let rb = HeapRb::<f32>::new((SAMPLE_RATE * 2) as usize); // 2 s Puffer
-        let (prod, cons) = rb.split();
-        // Render reference for the echo canceller: playback -> encoder thread (1 s).
         let (render_prod, render_cons) = HeapRb::<f32>::new(SAMPLE_RATE as usize).split();
-        let input = capture::build_input_stream(input_device, prod, Some(control.mic_level_sink()), Some(control.input_volume_handle()))
+        // Output-only startup must never construct capture or an encoder.
+        let input = if voice_channel.is_some() {
+            let (prod, cons) = HeapRb::<f32>::new((SAMPLE_RATE * 2) as usize).split();
+            let input = capture::build_input_stream(
+                input_device,
+                prod,
+                Some(control.mic_level_sink()),
+                Some(control.input_volume_handle()),
+            )
             .context("Could not start audio input")?;
-
-        // Encoder-Thread: Ring-Puffer -> Opus -> UDP.
-        workers.handles.push(std::thread::Builder::new()
-            .name("audio-enc".to_string())
-            .spawn({
-                let stop = stop.clone();
-                let control = control.clone();
-                let cipher = cipher.clone();
-                move || encoder::run(cons, udp, token, cipher, control, stop, render_cons)
-            })
-            .context("Encoder-Thread starten")?);
+            workers.handles.push(
+                std::thread::Builder::new()
+                    .name("audio-enc".to_string())
+                    .spawn({
+                        let stop = stop.clone();
+                        let control = control.clone();
+                        let cipher = cipher.clone();
+                        move || encoder::run(cons, udp, token, cipher, control, stop, render_cons)
+                    })
+                    .context("Encoder-Thread starten")?,
+            );
+            Some(input)
+        } else {
+            None
+        };
 
         // Wiedergabe: Mixer -> Lautsprecher.
         let output = playback::build_output_stream(output_device, mixer, control, local_muted, user_volumes, sfx, render_prod, render_tap.clone())
             .context("Audio-Ausgabe konnte nicht gestartet werden")?;
 
-        Ok(Self { input: Some(input), output: Some(output), workers, udp: share_udp, token, cipher, render_tap, shared })
+        Ok(Self {
+            voice_channel,
+            input,
+            output: Some(output),
+            workers,
+            udp: share_udp,
+            token,
+            cipher,
+            render_tap,
+            shared,
+        })
     }
 
     /// Starts the pipeline again with other devices (same socket, token and
     /// key - the server notices nothing but a few ms without audio). The old
     /// threads stop first so only one encoder sends; on an error the caller
     /// restarts with the previous devices.
-    pub fn restart(&mut self, input_device: Option<&str>, output_device: Option<&str>) -> Result<()> {
+    pub fn restart(
+        &mut self,
+        input_device: Option<&str>,
+        output_device: Option<&str>,
+        voice_channel: Option<u64>,
+    ) -> Result<()> {
         let udp = self.udp.try_clone().context("UDP-Socket klonen")?;
         let s = self.shared.clone();
         self.stop();
-        let new = Self::start(udp, self.token, self.cipher.clone(), s.control, s.talking, s.local_muted, s.user_volumes, s.sfx, input_device, output_device)?;
+        let new = Self::start(
+            udp,
+            self.token,
+            self.cipher.clone(),
+            s.control,
+            s.talking,
+            s.local_muted,
+            s.user_volumes,
+            s.sfx,
+            input_device,
+            output_device,
+            voice_channel,
+        )?;
         *self = new; // drops the old streams
         Ok(())
     }
 
     /// Starts sending the computer audio (screen share with sound).
     pub fn start_screen_audio(&self, output_device: Option<&str>) -> Result<screen_audio::ScreenAudio> {
+        anyhow::ensure!(self.voice_channel.is_some(), "Join a voice channel before sharing audio");
         let udp = self.udp.try_clone().context("UDP-Socket klonen")?;
         screen_audio::ScreenAudio::start(udp, self.token, self.cipher.clone(), self.shared.control.link.clone(), output_device, self.render_tap.clone())
     }
@@ -336,12 +385,31 @@ fn recv_loop(
     cipher: Arc<rusttalk_shared::secure::PacketCipher>,
     link: Arc<link::LinkStats>,
     session: u64,
+    in_voice: bool,
 ) {
     let mut buf = [0u8; rusttalk_shared::audio_packet::MAX_PACKET_LEN];
     let mut pinger = link::Pinger::default();
+    // Drain on the receiver, not the UI thread. Under a flood stay fail-closed
+    // until the socket is empty, yielding every bounded batch.
+    if udp
+        .set_read_timeout(Some(std::time::Duration::from_millis(1)))
+        .is_err()
+    {
+        return;
+    }
+    let mut draining = true;
+    let mut batch = 0;
+
     // Also ends when a newer session starts, even if nothing arrives (no orphaned pinger).
     while !stop.load(Ordering::Relaxed) && link.session() == session {
-        send_ping(&udp, token, &cipher, &link, &mut pinger);
+        if !draining {
+            send_ping(&udp, token, &cipher, &link, &mut pinger);
+        }
+        batch += 1;
+        if batch == 256 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            batch = 0;
+        }
         match udp.recv(&mut buf) {
             Ok(n) => {
                 if stop.load(Ordering::Relaxed) { break; }
@@ -362,6 +430,12 @@ fn recv_loop(
                             link.record(session, sample);
                         }
                     }
+                    continue;
+                }
+                // Authenticate and advance replay state even when discarding.
+                // shortcut: late packets after this drain have no channel epoch;
+                // strict attribution across joins requires a protocol change.
+                if draining || !in_voice {
                     continue;
                 }
                 let payload = payload.as_slice();
@@ -398,6 +472,15 @@ fn recv_loop(
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut =>
             {
+                if draining {
+                    if udp
+                        .set_read_timeout(Some(std::time::Duration::from_millis(50)))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    draining = false;
+                }
                 continue; // Read-Timeout -> Stop-Flag pruefen
             }
             Err(e) => {
@@ -439,7 +522,17 @@ mod session_tests {
         let stop = Arc::new(AtomicBool::new(false));
         std::thread::spawn(move || {
             let _peer = peer;
-            recv_loop(udp, 1, Arc::default(), Arc::default(), stop, cipher, link, session)
+            recv_loop(
+                udp,
+                1,
+                Arc::default(),
+                Arc::default(),
+                stop,
+                cipher,
+                link,
+                session,
+                true,
+            )
         })
     }
 
@@ -478,7 +571,7 @@ mod session_tests {
             let stats = link.clone();
             let stopped = stop.clone();
             let worker = std::thread::spawn(move || recv_loop(
-                recv, 42, Arc::default(), Arc::default(), stopped, cipher, stats, session,
+                recv, 42, Arc::default(), Arc::default(), stopped, cipher, stats, session, true,
             ));
             let workers = AudioWorkers { stop, handles: vec![worker] };
             let mut buf = [0; 2048];
@@ -508,6 +601,159 @@ mod session_tests {
         link.reset(); // reconnect is the only replay reset
         assert_eq!(link.accept(session, 3), None);
         assert_eq!(link.accept(link.session(), 1), Some(true));
+    }
+
+    #[test]
+    fn inactive_receiver_and_join_drain_discard_unseen_audio_without_resetting_replay() {
+        use rusttalk_shared::secure::{PacketCipher, DIR_TO_CLIENT};
+        use std::time::Duration;
+
+        let devices = test_devices::Devices::new();
+        let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+        udp.connect(peer.local_addr().unwrap()).unwrap();
+        peer.connect(udp.local_addr().unwrap()).unwrap();
+        let cipher = Arc::new(PacketCipher::new(&[7; 32]).unwrap());
+        let server = PacketCipher::new(&[7; 32]).unwrap();
+        let control = Arc::new(AudioControl::new(false, 0.02));
+        let talking: TalkingMap = Arc::default();
+        let start = |channel| {
+            AudioEngine::start(
+                udp.try_clone().unwrap(),
+                42,
+                cipher.clone(),
+                control.clone(),
+                talking.clone(),
+                Arc::default(),
+                Arc::default(),
+                Arc::default(),
+                None,
+                None,
+                channel,
+            )
+            .unwrap()
+        };
+        let ping = || {
+            let mut buf = [0; 2048];
+            loop {
+                let n = peer.recv(&mut buf).unwrap();
+                let (header, _) = decode(&buf[..n]).unwrap();
+                if header.flags & FLAG_CONTROL != 0 {
+                    return header;
+                }
+            }
+        };
+        let encoder = audiopus::coder::Encoder::new(
+            audiopus::SampleRate::Hz48000,
+            audiopus::Channels::Mono,
+            audiopus::Application::Voip,
+        )
+        .unwrap();
+        let mut opus = [0; 1275];
+        let len = encoder
+            .encode_float(
+                &[0.0; rusttalk_shared::audio_packet::FRAME_SAMPLES],
+                &mut opus,
+            )
+            .unwrap();
+        let packet = |speaker| {
+            seal_packet(
+                &AudioHeader::new(speaker, 1, 0),
+                &server,
+                DIR_TO_CLIENT,
+                &opus[..len],
+            )
+        };
+        let wait = |condition: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !condition() {
+                assert!(
+                    Instant::now() < deadline,
+                    "receiver did not process barrier"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+
+        let lobby = start(None);
+        let first_ping = ping();
+        assert_eq!(devices.0.borrow().input_starts, 0);
+        let inactive = packet(10);
+        peer.send(&inactive).unwrap();
+        // A matched pong is a barrier after the inactive packet on this local socket.
+        let mut header = AudioHeader::new(0, first_ping.sequence, 0);
+        header.flags = FLAG_CONTROL;
+        peer.send(&seal_packet(
+            &header,
+            &server,
+            DIR_TO_CLIENT,
+            &Control::Pong {
+                audio_received: 0,
+                audio_relayed: 0,
+            }
+            .encode(),
+        ))
+        .unwrap();
+        wait(&|| !control.link.view(Instant::now()).0.is_empty());
+        assert!(talking.lock().unwrap().is_empty());
+        drop(lobby);
+
+        // Packets queued during a transition (or a failed output start) must be drained too.
+        let queued = packet(11);
+        peer.send(&queued).unwrap();
+        let valid_after_forgery = packet(12);
+        let mut forged = valid_after_forgery.clone();
+        *forged.last_mut().unwrap() ^= 1;
+        peer.send(&forged).unwrap();
+        peer.send(&[0; 3]).unwrap();
+        peer.send(&[0; 2048]).unwrap();
+        let voice = start(Some(2));
+        let second_ping = ping(); // sent only once the startup drain finishes
+        assert!(second_ping.counter > first_ping.counter);
+        assert!(talking.lock().unwrap().is_empty());
+        assert_eq!(control.link.audio_received.load(Ordering::Relaxed), 0);
+        peer.send(&inactive).unwrap(); // inactive packet advanced the replay window
+        peer.send(&queued).unwrap(); // so did the startup drain
+        peer.send(&valid_after_forgery).unwrap(); // forged tag did not consume its counter
+        wait(&|| talking.lock().unwrap().contains_key(&12));
+        assert_eq!(talking.lock().unwrap().len(), 1);
+        assert_eq!(control.link.audio_received.load(Ordering::Relaxed), 1);
+        drop(voice);
+        assert_eq!(devices.0.borrow().inputs, 0);
+    }
+
+    #[test]
+    fn draining_a_large_queue_remains_stoppable() {
+        use rusttalk_shared::secure::PacketCipher;
+        use std::time::Duration;
+        let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+        udp.connect(peer.local_addr().unwrap()).unwrap();
+        peer.connect(udp.local_addr().unwrap()).unwrap();
+        for _ in 0..512 {
+            peer.send(&[0; 3]).unwrap();
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let link = Arc::new(link::LinkStats::default());
+        let session = link.session();
+        let worker = std::thread::spawn(move || {
+            recv_loop(
+                udp,
+                42,
+                Arc::default(),
+                Arc::default(),
+                stopped,
+                Arc::new(PacketCipher::new(&[7; 32]).unwrap()),
+                link,
+                session,
+                true,
+            )
+        });
+        std::thread::sleep(Duration::from_millis(1));
+        stop.store(true, Ordering::Relaxed);
+        assert!(joins_soon(worker));
     }
 
     #[test]

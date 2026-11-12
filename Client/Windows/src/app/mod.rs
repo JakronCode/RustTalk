@@ -421,10 +421,18 @@ impl RustTalkApp {
             config.server_address = addr;
             config.invite = code;
         }
+        Self::with_config(cc.egui_ctx.clone(), config, connect_on_start)
+    }
+
+    fn with_config(ctx: egui::Context, config: ClientConfig, connect_on_start: bool) -> Self {
         let control = Arc::new(AudioControl::new(config.voice_activation, config.vad_threshold));
         control.set_output_volume(config.output_volume);
         control.set_input_volume(config.input_volume);
-        let (global_ptt, hotkey_events) = hotkey::spawn_global_ptt(control.clone());
+        let (global_ptt, hotkey_events) = if cfg!(test) {
+            (Default::default(), std::sync::mpsc::channel().1)
+        } else {
+            hotkey::spawn_global_ptt(control.clone())
+        };
         let (toast_tx, toast_rx) = std::sync::mpsc::channel::<u64>();
         let (video_tx, video_rx) = std::sync::mpsc::channel::<media_ui::DecodeMsg>();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -506,7 +514,7 @@ impl RustTalkApp {
             screen_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             upload_backlog: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             fullscreen: None,
-            ctx: cc.egui_ctx.clone(),
+            ctx,
             cam: None,
             screen: None,
             screen_audio: None,
@@ -1029,6 +1037,8 @@ impl RustTalkApp {
                 if let Some(rc) = self.reconnect.take() {
                     self.restore_after_reconnect(rc);
                 }
+                self.screen_audio = None;
+                self.audio = None;
                 self.audio_session = match (udp_socket, udp_cipher) {
                     (Some(udp), Some(cipher)) => Some(AudioSession { udp, token: udp_token, cipher }),
                     _ => None,
@@ -1114,6 +1124,8 @@ impl RustTalkApp {
                     self.sync_voice_audio();
                     if self.my_voice_channel().is_some() && previous_voice != self.my_voice_channel() {
                         self.notify(Sound::Join);
+                    } else if previous_voice.is_some() && self.my_voice_channel().is_none() {
+                        self.notify(Sound::Leave);
                     }
                 }
                 for ch in self.channels.values_mut() {
@@ -1465,7 +1477,13 @@ impl RustTalkApp {
         }
 
         // Share audio follows the screen share (and the setting).
-        let want_audio = cfg!(windows) && self.screen.is_some() && self.config.share_screen_audio && self.audio.is_some();
+        let want_audio = cfg!(windows)
+            && self.screen.is_some()
+            && self.config.share_screen_audio
+            && self
+                .audio
+                .as_ref()
+                .is_some_and(|audio| audio.voice_channel.is_some());
         if !want_audio {
             self.screen_audio = None;
             if self.screen.is_none() {

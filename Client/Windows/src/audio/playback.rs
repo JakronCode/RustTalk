@@ -105,7 +105,11 @@ pub fn build_output_stream(
     sfx: SfxQueue,
     render_ref: HeapProd<f32>,
     render_tap: super::screen_audio::RenderTap,
-) -> Result<cpal::Stream> {
+) -> Result<super::DeviceStream> {
+    #[cfg(test)]
+    if let Some(stream) = super::test_devices::open(super::test_devices::Kind::Output, device_name) {
+        return stream;
+    }
     let device = pick_output_device(device_name)?;
     let supported = pick_output_config(&device)?;
     let config = supported.config();
@@ -127,6 +131,8 @@ pub fn build_output_stream(
         }
         other => return Err(anyhow!("Unsupported sample format: {other:?}")),
     };
+    #[cfg(test)]
+    let stream = super::DeviceStream::Hardware { _stream: stream };
     Ok(stream)
 }
 
