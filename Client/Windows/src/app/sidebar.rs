@@ -626,39 +626,52 @@ impl RustTalkApp {
         }
 
         if !me {
-            resp.context_menu(|ui| {
-                ui.set_min_width(200.0);
-                ui.label(egui::RichText::new(&user.name).strong().color(theme::HEADER));
-                ui.separator();
-                let label = if locally_muted {
-                    format!("{}  Unmute for Me", icons::regular::SPEAKER_HIGH)
-                } else {
-                    format!("{}  Mute for Me", icons::regular::SPEAKER_SLASH)
-                };
-                if ui.button(label).clicked() {
-                    let mut set = self.local_muted.lock().unwrap();
-                    if locally_muted {
-                        set.remove(&user.id);
-                    } else {
-                        set.insert(user.id);
-                    }
-                    ui.close_menu();
-                }
-                ui.separator();
-                ui.label(format!("{}  User Volume", icons::regular::SPEAKER_HIGH));
-                let mut pct = (self.user_volume(user.id) * 100.0).round();
-                let slider = egui::Slider::new(&mut pct, 0.0..=crate::audio::MAX_VOLUME * 100.0)
-                    .suffix(" %")
-                    .step_by(5.0);
-                if ui.add(slider).changed() {
-                    self.set_user_volume(user.id, &user.name, pct / 100.0);
-                }
-                if (pct - 100.0).abs() > 0.5 && ui.small_button("Reset to 100 %").clicked() {
-                    self.set_user_volume(user.id, &user.name, 1.0);
-                }
-                self.moderation_menu(ui, user);
-            });
+            resp.context_menu(|ui| self.user_menu(ui, user));
         }
+    }
+
+    /// Context menu of another user (sidebar, voice stage tiles, "..." button):
+    /// poke, local mute, per-user volume, moderation.
+    pub(super) fn user_menu(&mut self, ui: &mut egui::Ui, user: &UserInfo) {
+        ui.set_min_width(210.0);
+        ui.label(egui::RichText::new(&user.name).strong().color(theme::HEADER));
+        ui.separator();
+        if ui
+            .button(format!("{}  Poke...", icons::regular::HAND_WAVING))
+            .on_hover_text("Plays a wake-up sound for them and shows your message in a popup")
+            .clicked()
+        {
+            self.open_poke(user);
+            ui.close_menu();
+        }
+        let locally_muted = self.local_muted.lock().unwrap().contains(&user.id);
+        let label = if locally_muted {
+            format!("{}  Unmute for Me", icons::regular::SPEAKER_HIGH)
+        } else {
+            format!("{}  Mute for Me", icons::regular::SPEAKER_SLASH)
+        };
+        if ui.button(label).clicked() {
+            let mut set = self.local_muted.lock().unwrap();
+            if locally_muted {
+                set.remove(&user.id);
+            } else {
+                set.insert(user.id);
+            }
+            ui.close_menu();
+        }
+        ui.separator();
+        ui.label(format!("{}  User Volume", icons::regular::SPEAKER_HIGH));
+        let mut pct = (self.user_volume(user.id) * 100.0).round();
+        let slider = egui::Slider::new(&mut pct, 0.0..=crate::audio::MAX_VOLUME * 100.0)
+            .suffix(" %")
+            .step_by(5.0);
+        if ui.add(slider).changed() {
+            self.set_user_volume(user.id, &user.name, pct / 100.0);
+        }
+        if (pct - 100.0).abs() > 0.5 && ui.small_button("Reset to 100 %").clicked() {
+            self.set_user_volume(user.id, &user.name, 1.0);
+        }
+        self.moderation_menu(ui, user);
     }
 
     /// "Voice Connected" panel above the user panel; in the lobby it explains

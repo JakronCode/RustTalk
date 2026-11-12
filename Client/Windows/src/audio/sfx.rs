@@ -49,13 +49,15 @@ pub enum Sound {
     Mention,
     /// You muted yourself: low, falling.
     Mute,
+    /// Someone poked you: a short alarm-clock ring ("wake up!").
+    Poke,
     /// You unmuted yourself: low, rising.
     Unmute,
 }
 
 #[cfg(test)]
 impl Sound {
-    pub const ALL: [Sound; 6] = [Sound::Join, Sound::Leave, Sound::Message, Sound::Mention, Sound::Mute, Sound::Unmute];
+    pub const ALL: [Sound; 7] = [Sound::Join, Sound::Leave, Sound::Message, Sound::Mention, Sound::Mute, Sound::Unmute, Sound::Poke];
 }
 
 /// One note of a sound.
@@ -92,6 +94,15 @@ impl Sound {
             Sound::Mention => vec![note(A5, 0.0, 260.0, 0.8, 0.8), note(CS6, 80.0, 280.0, 0.9, 0.8), note(E6, 160.0, 340.0, 1.0, 0.8)],
             Sound::Mute => vec![note(E4, 0.0, 110.0, 1.0, 0.25), note(C4, 55.0, 150.0, 1.0, 0.25)],
             Sound::Unmute => vec![note(C4, 0.0, 110.0, 1.0, 0.25), note(E4, 55.0, 150.0, 1.0, 0.25)],
+            // Two quick bursts of a ringing bell, like an alarm clock.
+            Sound::Poke => (0..2)
+                .flat_map(|burst| {
+                    (0..5).map(move |i| {
+                        let f = if i % 2 == 0 { E6 } else { CS6 };
+                        note(f, burst as f32 * 470.0 + i as f32 * 62.0, 140.0, 1.0, 0.9)
+                    })
+                })
+                .collect(),
         }
     }
 }
@@ -208,7 +219,9 @@ mod tests {
         for s in Sound::ALL {
             let v = render(s);
             let ms = v.len() as f32 / SAMPLE_RATE as f32 * 1000.0;
-            assert!((150.0..=550.0).contains(&ms), "{s:?}: {ms} ms");
+            // The poke ring is meant to wake you up, so it may ring a bit longer.
+            let max_ms = if s == Sound::Poke { 1000.0 } else { 550.0 };
+            assert!((150.0..=max_ms).contains(&ms), "{s:?}: {ms} ms");
             let peak = v.iter().fold(0.0f32, |m, x| m.max(x.abs()));
             assert!((peak - LEVEL).abs() < 1e-4, "{s:?} peak {peak}");
             assert!(v[0].abs() < 0.01 && v[v.len() - 1].abs() < 0.001, "{s:?} starts/ends quietly");

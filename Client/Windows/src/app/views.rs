@@ -5,7 +5,39 @@ use super::sidebar::channel_icon;
 use super::theme;
 use super::*;
 
+/// Debug builds only: user whose tile menu the `tile_menu:<name>` dev hook opens.
+#[cfg(debug_assertions)]
+pub(super) static DEV_TILE_MENU: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 impl RustTalkApp {
+    /// "..." button in the bottom right corner of a stage tile (visible on
+    /// hover or while its menu is open): opens the user menu.
+    fn tile_menu_button(&mut self, ui: &mut egui::Ui, tile: egui::Rect, tile_hovered: bool, user: &UserInfo, kind: Option<VideoKind>) {
+        let popup_id = ui.make_persistent_id(("tile_menu", user.id, kind));
+        let open = ui.memory(|m| m.is_popup_open(popup_id));
+        let rect = egui::Rect::from_center_size(tile.right_bottom() + egui::vec2(-22.0, -20.0), egui::vec2(30.0, 24.0));
+        let resp = ui.interact(rect, popup_id.with("btn"), egui::Sense::click());
+        if tile_hovered || resp.hovered() || open {
+            let p = ui.painter();
+            p.rect_filled(rect, 8.0, if resp.hovered() || open { theme::SELECTED } else { egui::Color32::from_black_alpha(160) });
+            p.text(rect.center(), egui::Align2::CENTER_CENTER, icons::regular::DOTS_THREE, egui::FontId::proportional(18.0), egui::Color32::WHITE);
+        }
+        #[cfg(debug_assertions)]
+        let dev_open = {
+            let mut want = DEV_TILE_MENU.lock().unwrap();
+            want.as_deref() == Some(user.name.as_str()) && want.take().is_some()
+        };
+        #[cfg(not(debug_assertions))]
+        let dev_open = false;
+        if resp.clicked() || dev_open {
+            ui.memory_mut(|m| m.toggle_popup(popup_id));
+        }
+        let resp = resp.on_hover_text("More options");
+        egui::popup_below_widget(ui, popup_id, &resp, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+            self.user_menu(ui, user);
+        });
+    }
+
     pub(super) fn ui_main(
         &mut self,
         ctx: &egui::Context,
@@ -162,9 +194,10 @@ impl RustTalkApp {
                 }
                 // Tiles: screen shares first, then everyone else - with the
                 // camera instead of the avatar card when it is on.
+                let my_id = self.my_id;
                 let speaking_of = |u: &UserInfo| {
                     talking.get(&u.id).is_some_and(|t| t.elapsed() < Duration::from_millis(250))
-                        || (u.id == self.my_id && self_tx)
+                        || (u.id == my_id && self_tx)
                 };
                 let mut tiles: Vec<(UserInfo, Option<VideoKind>)> = Vec::new();
                 for user in &members {
@@ -185,16 +218,23 @@ impl RustTalkApp {
                 for (i, rect) in grid_rects(tiles.len(), cols, tile, gap, area).into_iter().enumerate() {
                     let (user, kind) = &tiles[i];
                     let me = user.id == self.my_id;
-                    match kind {
+                    let resp = match kind {
                         Some(kind) => {
                             let tex = self.video_frames.get(&(user.id, *kind)).and_then(|v| v.tex.clone());
                             // Speaking ring only on the person's camera, not on screen shares.
                             let speaking = *kind == VideoKind::Camera && speaking_of(user);
-                            if video_tile(ui, rect, tex.as_ref(), user, *kind, speaking, me).clicked() {
+                            let resp = video_tile(ui, rect, tex.as_ref(), user, *kind, speaking, me);
+                            if resp.clicked() {
                                 open_fs = Some((user.id, *kind));
                             }
+                            resp
                         }
                         None => member_card(ui, rect, user, speaking_of(user), me),
+                    };
+                    // Right click / "..." button: same menu as in the sidebar.
+                    if !me {
+                        resp.context_menu(|ui| self.user_menu(ui, user));
+                        self.tile_menu_button(ui, rect, resp.hovered(), user, *kind);
                     }
                 }
                 if let Some(key) = open_fs {
@@ -692,7 +732,8 @@ fn name_pill(p: &egui::Painter, rect: egui::Rect, text: String) {
 }
 
 /// Member without camera: avatar + name, scales with the tile.
-fn member_card(ui: &mut egui::Ui, rect: egui::Rect, user: &UserInfo, speaking: bool, me: bool) {
+fn member_card(ui: &mut egui::Ui, rect: egui::Rect, user: &UserInfo, speaking: bool, me: bool) -> egui::Response {
+    let resp = ui.interact(rect, ui.id().with(("member_tile", user.id)), egui::Sense::click());
     let p = ui.painter();
     p.rect_filled(rect, 10.0, theme::avatar_color(&user.name).linear_multiply(0.35));
     if speaking {
@@ -710,6 +751,7 @@ fn member_card(ui: &mut egui::Ui, rect: egui::Rect, user: &UserInfo, speaking: b
         theme::HEADER,
     );
     status_badges(p, rect, user);
+    resp
 }
 
 /// Camera or screen tile (click = fullscreen). The camera replaces the
@@ -753,7 +795,8 @@ fn video_tile(
         p.rect_stroke(rect, 10.0, egui::Stroke::new(2.0_f32, theme::ACCENT), egui::StrokeKind::Inside);
     }
     if resp.hovered() {
-        let c = rect.right_bottom() + egui::vec2(-20.0, -20.0);
+        // Bottom right belongs to the "..." menu button; fullscreen hint next to it.
+        let c = rect.right_bottom() + egui::vec2(if me { -20.0 } else { -56.0 }, -20.0);
         p.circle_filled(c, 14.0, egui::Color32::from_black_alpha(150));
         p.text(c, egui::Align2::CENTER_CENTER, icons::regular::CORNERS_OUT, egui::FontId::proportional(16.0), egui::Color32::WHITE);
     }
