@@ -1035,7 +1035,13 @@ pub(super) fn chat_line(
     let shift = ui.input(|i| i.modifiers.shift);
     let delete = |id| if shift { ChatAction::DeleteNow(id) } else { ChatAction::Delete(id) };
     // Right click: same actions as the hover buttons.
-    let resp = ui.interact(row, row_id, egui::Sense::click());
+    let mut resp = ui.interact(row, row_id, egui::Sense::click());
+    // Selectable labels own their clicks; forward only secondary clicks to the row menu.
+    if ui.rect_contains_pointer(row)
+        && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary))
+    {
+        resp.flags.insert(egui::response::Flags::HOVERED | egui::response::Flags::CLICKED);
+    }
     resp.context_menu(|ui| {
         ui.set_width(180.0);
         ui.spacing_mut().item_spacing.y = 2.0;
@@ -1178,7 +1184,7 @@ mod tests {
         }).collect();
         let mut draw = |lines: &[ChatLine], events| {
             let mut responses = Vec::new();
-            let _ = ctx.run(egui::RawInput {
+            let output = ctx.run(egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 480.0))),
                 events, ..Default::default()
             }, |ctx| {
@@ -1191,20 +1197,25 @@ mod tests {
                     }
                 });
             });
-            responses
+            let text_positions: Vec<_> = output.shapes.iter().filter_map(|shape| {
+                if let egui::Shape::Text(text) = &shape.shape {
+                    (text.galley.job.text == "hello").then(|| text.pos + text.galley.size() / 2.0)
+                } else { None }
+            }).collect();
+            (responses, text_positions)
         };
         draw(&lines, vec![]);
-        let responses = draw(&lines, vec![]);
-        let pos = responses[1].rect.center();
+        let (_, positions) = draw(&lines, vec![]);
+        let pos = positions[1];
         draw(&lines, vec![egui::Event::PointerMoved(pos)]);
         let button = |pressed| egui::Event::PointerButton {
             pos, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default(),
         };
         draw(&lines, vec![button(true)]);
-        let responses = draw(&lines, vec![button(false)]);
+        let (responses, _) = draw(&lines, vec![button(false)]);
         assert!(responses[1].context_menu_opened());
         lines.remove(0);
-        let responses = draw(&lines, vec![]);
+        let (responses, _) = draw(&lines, vec![]);
         assert!(responses[0].context_menu_opened(), "message 2 lost its menu");
         assert!(!responses[1].context_menu_opened(), "menu moved to message 3");
     }
