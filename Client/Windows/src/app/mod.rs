@@ -15,6 +15,8 @@
 
 mod channel_settings;
 mod connect;
+#[cfg(debug_assertions)]
+mod dev_input;
 mod lifecycle;
 mod media_ui;
 mod moderation_ui;
@@ -252,6 +254,8 @@ pub struct RustTalkApp {
     new_channel_kind: ChannelKind,
     new_channel_parent: Option<u64>,
     show_new_channel: bool,
+    /// Put the cursor in the name field (once, when the dialog opens).
+    new_channel_focus: bool,
     show_settings: bool,
     settings_page: SettingsPage,
     /// Settings: waiting for a key press to bind push-to-talk.
@@ -324,6 +328,9 @@ pub struct RustTalkApp {
     screen_audio_failed: bool,
     /// Debug hook `share_self`: share this once we are in a voice channel.
     dev_pending_share: Option<ShareSource>,
+    /// Debug builds: scripted input (`RUSTTALK_DEV_INPUT`).
+    #[cfg(debug_assertions)]
+    dev_input: dev_input::DevInput,
     cam_dialog: Option<CamDialog>,
     screen_picker: Option<ScreenPicker>,
     /// Letzter eigener Frame (auch im reinen Vorschau-Modus).
@@ -415,6 +422,7 @@ impl RustTalkApp {
             new_channel_kind: ChannelKind::Text,
             new_channel_parent: None,
             show_new_channel: false,
+            new_channel_focus: false,
             show_settings: false,
             settings_page: SettingsPage::Voice,
             recording_key: false,
@@ -456,6 +464,8 @@ impl RustTalkApp {
             screen_audio: None,
             screen_audio_failed: false,
             dev_pending_share: None,
+            #[cfg(debug_assertions)]
+            dev_input: Default::default(),
             cam_dialog: None,
             screen_picker: None,
             local_preview: Arc::new(Mutex::new(None)),
@@ -717,6 +727,19 @@ impl RustTalkApp {
             }
         }
         self.set_status(format!("Reconnected to {}", self.server_settings.name));
+    }
+
+    /// Ends our camera (when it is live) and screen share.
+    fn stop_own_sources(&mut self) {
+        let Some(cmd_tx) = self.cmd_tx.clone() else { return };
+        if self.cam.as_ref().is_some_and(|c| c.is_sending()) {
+            self.cam = None;
+            self.after_source_stopped(VideoKind::Camera, &cmd_tx);
+        }
+        if self.screen.is_some() {
+            self.screen = None;
+            self.after_source_stopped(VideoKind::Screen, &cmd_tx);
+        }
     }
 
     /// Our voice channel (None in the lobby or when not in a voice channel).
@@ -992,6 +1015,12 @@ impl RustTalkApp {
                 }
                 let name = self.users.get(&client_id).map(|u| u.name.clone());
                 if client_id == self.my_id {
+                    // Leaving a channel ends our camera and screen share: they
+                    // don't follow us into the next channel (start them again there).
+                    let old_channel = self.users.get(&self.my_id).map(|u| u.channel_id);
+                    if old_channel.is_some_and(|old| old != channel_id) {
+                        self.stop_own_sources();
+                    }
                     // Our own move: chime when we enter a voice channel, the
                     // leave sound when we go back to the lobby (no spoken name).
                     let old = self.my_voice_channel();
@@ -1169,7 +1198,21 @@ impl RustTalkApp {
                     self.clear_video_of(client_id, None);
                 }
             }
-            ServerMessage::VideoFrame { from_id, kind, data } => self.feed_video((from_id, kind), data),
+            ServerMessage::VideoFrame { from_id, kind, data } => {
+                // Frames still queued after a stream ended must not bring its
+                // tile back ("Connecting..." forever).
+                let live = if from_id == self.my_id {
+                    match kind {
+                        VideoKind::Camera => self.cam.as_ref().is_some_and(|c| c.is_sending()),
+                        VideoKind::Screen => self.screen.is_some(),
+                    }
+                } else {
+                    self.users.get(&from_id).is_some_and(|u| u.sharing)
+                };
+                if live {
+                    self.feed_video((from_id, kind), data);
+                }
+            }
             ServerMessage::KeyframeRequest { kind } => {
                 let src = match kind {
                     VideoKind::Camera => self.cam.as_ref(),
@@ -1196,6 +1239,11 @@ impl RustTalkApp {
 }
 
 impl eframe::App for RustTalkApp {
+    #[cfg(debug_assertions)]
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.dev_input.feed(ctx, raw_input);
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.install_screen.is_some() {
             self.ui_install(ctx);
@@ -1292,16 +1340,9 @@ impl RustTalkApp {
             self.screen = None;
             self.after_source_stopped(VideoKind::Screen, &cmd_tx);
         }
-        // No talking/sharing in the lobby: stop running sources when we land there.
+        // No talking/sharing in the lobby (e.g. after a reconnect landed us there).
         if self.in_lobby() {
-            if self.cam.as_ref().is_some_and(|c| c.is_sending()) {
-                self.cam = None;
-                self.after_source_stopped(VideoKind::Camera, &cmd_tx);
-            }
-            if self.screen.is_some() {
-                self.screen = None;
-                self.after_source_stopped(VideoKind::Screen, &cmd_tx);
-            }
+            self.stop_own_sources();
         }
 
         if !self.in_lobby() {
@@ -1356,7 +1397,7 @@ impl RustTalkApp {
 
     /// Debug builds only: env-controlled shortcuts for UI screenshots/tests.
     /// `RUSTTALK_DEV_AUTOCONNECT=1` connects at start,
-    /// `RUSTTALK_DEV_OPEN=settings:<page>|channel:<name>|new_channel|select:<name>`.
+    /// `RUSTTALK_DEV_OPEN=settings:<page>|channel:<name>|new_channel|select:<name>|join:<name>|input:#<n>`.
     #[cfg(debug_assertions)]
     fn dev_hooks(&mut self, _ctx: &egui::Context) {
         use std::sync::atomic::AtomicU8;
@@ -1415,6 +1456,15 @@ impl RustTalkApp {
                             match src {
                                 Some(src) => self.dev_pending_share = Some(src),
                                 None => tracing::warn!("share_self: window '{arg}' not found"),
+                            }
+                        }
+                        // Pick the n-th input device, as the settings dropdown does.
+                        "input" => {
+                            let n: usize = arg.trim_start_matches('#').parse().unwrap_or(0);
+                            if let Some(name) = capture::input_device_names().into_iter().nth(n) {
+                                let before = (self.config.input_device.clone(), self.config.output_device.clone());
+                                self.config.input_device = Some(name);
+                                self.apply_devices(before);
                             }
                         }
                         "claim_admin" => {

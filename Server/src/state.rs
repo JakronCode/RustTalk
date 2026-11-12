@@ -461,7 +461,20 @@ impl State {
                 moved.push((c.id, target));
             }
         }
+        let ids: Vec<u64> = moved.iter().map(|(id, _)| *id).collect();
+        self.end_sharing(&ids);
         moved
+    }
+
+    /// Camera/screen sharing ends when someone leaves their channel (it does
+    /// not follow them into the next one). Tells everyone.
+    fn end_sharing(&mut self, ids: &[u64]) {
+        for id in ids {
+            if let Some(c) = self.clients.get_mut(id).filter(|c| c.sharing) {
+                c.sharing = false;
+                self.broadcast(&ServerMessage::SharingChanged { client_id: *id, sharing: false });
+            }
+        }
     }
 
     /// Geschwister (gleicher Parent, ohne Spawn) in Anzeige-Reihenfolge.
@@ -1050,6 +1063,7 @@ impl State {
                 moved.push(client.id);
             }
         }
+        self.end_sharing(&moved);
         if let Some(db) = &self.db {
             if let Err(e) = db.delete_channel(id) {
                 tracing::warn!("Channel-Loesch-Persistenz fehlgeschlagen: {e}");
@@ -1087,7 +1101,11 @@ impl State {
             });
         }
         let client = self.clients.get_mut(&client_id).ok_or("Client does not exist")?;
+        let left = client.channel_id != channel_id;
         client.channel_id = channel_id;
+        if left {
+            self.end_sharing(&[client_id]);
+        }
         Ok(())
     }
 
@@ -1504,6 +1522,26 @@ kind = "spawn"
 
         // Sharing aus -> keine Ziele.
         state.set_sharing(id_a, false);
+        assert!(state.video_targets(id_a).is_empty());
+    }
+
+    #[test]
+    fn sharing_ends_when_leaving_the_channel() {
+        let mut state = test_state();
+        let (tx1, mut r1) = mpsc::unbounded_channel();
+        let (id_a, _) = state.add_client("a".into(), tx1);
+        let voice = state.all_channels().iter().find(|c| c.kind == ChannelKind::Voice).unwrap().id;
+        let other = state.create_channel("Zweiter", ChannelKind::Voice, None).unwrap().id;
+
+        state.move_client(id_a, voice).unwrap();
+        assert!(state.set_sharing(id_a, true));
+        state.move_client(id_a, voice).unwrap();
+        assert!(state.client(id_a).unwrap().sharing, "joining the same channel again changes nothing");
+        while r1.try_recv().is_ok() {}
+
+        state.move_client(id_a, other).unwrap();
+        assert!(!state.client(id_a).unwrap().sharing, "stream does not follow into the next channel");
+        assert!(matches!(r1.try_recv(), Ok(ServerMessage::SharingChanged { sharing: false, .. })), "everyone is told");
         assert!(state.video_targets(id_a).is_empty());
     }
 

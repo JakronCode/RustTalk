@@ -348,6 +348,9 @@ impl RustTalkApp {
             egui::Sense::click_and_drag(),
         );
         let hovered = resp.hovered() || resp.dragged();
+        // The "+"/gear stay while the pointer is on the row - also during the
+        // click itself, when egui no longer counts the (draggable) row as hovered.
+        let show_actions = !is_dragged && pointer_on(ui, rect);
         let has_unread = self
             .channels
             .values()
@@ -377,10 +380,11 @@ impl RustTalkApp {
 
         // Hover actions: "+" (new channel in this category), gear (settings).
         let mut action_hit = false;
-        if hovered && !is_dragged {
+        let admin = self.can(rusttalk_shared::protocol::Role::Admin);
+        if show_actions {
             let plus = egui::Rect::from_center_size(rect.right_center() - egui::vec2(12.0, 0.0), egui::vec2(22.0, 22.0));
             let gear = egui::Rect::from_center_size(rect.right_center() - egui::vec2(36.0, 0.0), egui::vec2(22.0, 22.0));
-            if small_icon(ui, plus, icons::regular::PLUS, "Create channel in this category").clicked() {
+            if admin && small_icon(ui, plus, icons::regular::PLUS, "Create channel in this category").clicked() {
                 self.open_new_channel(Some(cat.id), ChannelKind::Text);
                 action_hit = true;
             }
@@ -396,7 +400,7 @@ impl RustTalkApp {
             egui::DragAndDrop::set_payload(ui.ctx(), ChannelDrag { id: cat.id, is_category: true });
         }
         resp.context_menu(|ui| {
-            if ui.button(format!("{}  Create Channel Here", icons::regular::PLUS_CIRCLE)).clicked() {
+            if admin && ui.button(format!("{}  Create Channel Here", icons::regular::PLUS_CIRCLE)).clicked() {
                 self.open_new_channel(Some(cat.id), ChannelKind::Text);
                 ui.close_menu();
             }
@@ -482,9 +486,9 @@ impl RustTalkApp {
             if has_unread { theme::HEADER } else { fg },
         );
 
-        // Hover: gear (channel settings).
+        // Hover: gear (channel settings) - by pointer position, see the category row.
         let mut action_hit = false;
-        if hovered {
+        if !is_dragged && pointer_on(ui, rect) {
             let gear = egui::Rect::from_center_size(rect.right_center() - egui::vec2(14.0, 0.0), egui::vec2(22.0, 22.0));
             if small_icon(ui, gear, icons::regular::GEAR_SIX, "Channel settings").clicked() {
                 self.open_channel_settings(ch.id);
@@ -855,4 +859,12 @@ pub(super) fn elide(ui: &egui::Ui, text: &str, font: &egui::FontId, max_w: f32) 
         }
     }
     "...".to_string()
+}
+
+/// The pointer is over `rect` (hovering or pressed there), and no popup or
+/// window lies on top of it.
+fn pointer_on(ui: &egui::Ui, rect: egui::Rect) -> bool {
+    let ctx = ui.ctx();
+    let Some(p) = ctx.pointer_hover_pos().or_else(|| ctx.pointer_interact_pos()) else { return false };
+    rect.contains(p) && ctx.layer_id_at(p).is_none_or(|l| l == ui.layer_id())
 }

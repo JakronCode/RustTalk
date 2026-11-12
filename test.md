@@ -2,6 +2,19 @@
 
 > Pflichtdokumentation aller Testläufe. Neueste oben.
 
+## 2026-11-12 (28) – Feedback-Bugs: Streams, Voice-Kanäle, Audiogeräte
+
+**E1 Streams beim Verlassen:** Eigene Kamera/Bildschirmübertragung liefen beim Wechsel in einen anderen Sprachkanal weiter (nur die Lobby stoppte sie). Jetzt stoppt jeder Kanalwechsel sie, auch der Server beendet „sharing“ bei jedem Wechsel (auch AFK-Verschieben, Kanal gelöscht). Zusätzlich: Frames, die nach dem Stopp noch in der Warteschlange lagen, erzeugten eine hängende Kachel „Connecting…“ – Frames von nicht (mehr) teilenden Nutzern werden jetzt verworfen.
+**E2 Voice-Kanal anlegen:** Das „+“ neben einer Kategorie reagierte nicht auf Klicks (wurde nur bei egui-Hover gezeichnet, der beim Drücken auf der ziehbaren Zeile wegfällt) → Anzeige nach Zeigerposition. Dialog wählt den Typ, der schon in der Kategorie ist (unter „Voice Channels“ → Voice; vorher immer Text). Namensfeld holt den Fokus nur noch einmal beim Öffnen. „+“ / „Create Channel Here“ nur für Admins.
+**E3 Audiogeräte:** Wechsel wirkte erst beim nächsten Verbinden, der Pegel in den Einstellungen blieb am alten Gerät. Jetzt startet die Audio-Pipeline sofort mit dem neuen Gerät neu (gleicher Socket/Schlüssel), bei Fehler zurück zum vorherigen; Pegelanzeige folgt; Bildschirmton folgt dem Ausgabegerät.
+**Testwerkzeug:** `RUSTTALK_DEV_INPUT=<datei>` (nur Debug) spielt Klicks/Tippen/Tasten direkt in egui ein – unabhängig von der echten Maus; Dev-Hook `input:#n`.
+
+**Tests:** Client 91 (neu: Kanaltyp nach Kategorie), Server 53 (neu: Sharing endet beim Kanalwechsel), Integration 17, shared 18 ✅.
+**Live (2 Debug-Clients, Testserver):** „+“ an „Voice Channels“ → Dialog mit Voice vorausgewählt → „Neuer Voice“ als Sprachkanal angelegt ✅. Sharer teilt (Viewer sieht das Bild), Doppelklick auf anderen Kanal → Teilen aus, Viewer-Kachel weg, keine hängende Kachel beim Sharer, zurück in den Kanal → bleibt aus ✅. Eingabegerät im verbundenen Zustand gewechselt → Pipeline neu mit anderem Gerät, Ausgabe unverändert, Config gespeichert ✅.
+**Nicht geprüft:** Gerätewechsel über das Dropdown mit der echten Maus (gleicher Code-Pfad wie der Dev-Hook), Kamera (nur Bildschirm getestet).
+
+---
+
 ## 2026-11-12 (27) – Update-Funktion für den Server
 
 **Entscheidung:** Prüfen + Hinweis, Installieren per Befehl (kein Selbst-Update, der Service-User darf sein Programm nicht überschreiben).

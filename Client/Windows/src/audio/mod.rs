@@ -148,6 +148,18 @@ pub struct AudioEngine {
     token: u64,
     cipher: Arc<rusttalk_shared::secure::PacketCipher>,
     render_tap: screen_audio::RenderTap,
+    /// Everything else `start` needs, for [`AudioEngine::restart`].
+    shared: Shared,
+}
+
+/// Handles the engine shares with the app (cheap clones).
+#[derive(Clone)]
+struct Shared {
+    control: Arc<AudioControl>,
+    talking: TalkingMap,
+    local_muted: LocalMuteSet,
+    user_volumes: UserVolumeMap,
+    sfx: sfx::SfxQueue,
 }
 
 impl AudioEngine {
@@ -167,6 +179,13 @@ impl AudioEngine {
         input_device: Option<&str>,
         output_device: Option<&str>,
     ) -> Result<Self> {
+        let shared = Shared {
+            control: control.clone(),
+            talking: talking.clone(),
+            local_muted: local_muted.clone(),
+            user_volumes: user_volumes.clone(),
+            sfx: sfx.clone(),
+        };
         let stop = Arc::new(AtomicBool::new(false));
         let share_udp = udp.try_clone().context("UDP-Socket klonen")?;
         let render_tap: screen_audio::RenderTap = Arc::new(Mutex::new(None));
@@ -209,7 +228,20 @@ impl AudioEngine {
         let output = playback::build_output_stream(output_device, mixer, control, local_muted, user_volumes, sfx, render_prod, render_tap.clone())
             .context("Audio-Ausgabe konnte nicht gestartet werden")?;
 
-        Ok(Self { _input: input, _output: output, stop, udp: share_udp, token, cipher, render_tap })
+        Ok(Self { _input: input, _output: output, stop, udp: share_udp, token, cipher, render_tap, shared })
+    }
+
+    /// Starts the pipeline again with other devices (same socket, token and
+    /// key - the server notices nothing but a few ms without audio). The old
+    /// threads stop first so only one encoder sends; on an error the caller
+    /// restarts with the previous devices.
+    pub fn restart(&mut self, input_device: Option<&str>, output_device: Option<&str>) -> Result<()> {
+        let udp = self.udp.try_clone().context("UDP-Socket klonen")?;
+        let s = self.shared.clone();
+        self.stop();
+        let new = Self::start(udp, self.token, self.cipher.clone(), s.control, s.talking, s.local_muted, s.user_volumes, s.sfx, input_device, output_device)?;
+        *self = new; // drops the old streams
+        Ok(())
     }
 
     /// Starts sending the computer audio (screen share with sound).

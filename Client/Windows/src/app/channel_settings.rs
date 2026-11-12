@@ -38,8 +38,12 @@ impl RustTalkApp {
 
     pub(super) fn open_new_channel(&mut self, parent: Option<u64>, kind: ChannelKind) {
         self.new_channel_parent = parent;
-        self.new_channel_kind = kind;
+        self.new_channel_kind = match kind {
+            ChannelKind::Category => kind,
+            _ => default_kind_in(&self.sorted_children(parent), kind),
+        };
         self.new_channel_name.clear();
+        self.new_channel_focus = true;
         self.show_new_channel = true;
     }
 
@@ -289,7 +293,7 @@ impl RustTalkApp {
                         .hint_text(if is_cat { "New Category" } else { "new-channel" })
                         .desired_width(f32::INFINITY),
                 );
-                if !resp.has_focus() && self.new_channel_name.is_empty() {
+                if std::mem::take(&mut self.new_channel_focus) {
                     resp.request_focus();
                 }
                 ui.add_space(4.0);
@@ -419,4 +423,32 @@ fn channel_invites(ui: &mut egui::Ui) {
             ui.add_enabled(false, egui::Button::new(format!("{}  Copy", icons::regular::COPY)));
         });
     });
+}
+
+/// Type a new channel in this place most likely gets: "+" next to a category
+/// that only holds voice channels makes a voice channel (and the other way round).
+fn default_kind_in(siblings: &[ChannelInfo], fallback: ChannelKind) -> ChannelKind {
+    let has = |k: ChannelKind| siblings.iter().any(|c| c.kind == k);
+    match (has(ChannelKind::Voice), has(ChannelKind::Text)) {
+        (true, false) => ChannelKind::Voice,
+        (false, true) => ChannelKind::Text,
+        _ => fallback,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ch(kind: ChannelKind) -> ChannelInfo {
+        ChannelInfo { id: 1, name: "x".into(), kind, parent: Some(9), position: 0, user_ids: Vec::new() }
+    }
+
+    #[test]
+    fn new_channel_type_follows_the_category() {
+        assert_eq!(default_kind_in(&[ch(ChannelKind::Voice), ch(ChannelKind::Voice)], ChannelKind::Text), ChannelKind::Voice);
+        assert_eq!(default_kind_in(&[ch(ChannelKind::Text)], ChannelKind::Voice), ChannelKind::Text);
+        assert_eq!(default_kind_in(&[ch(ChannelKind::Text), ch(ChannelKind::Voice)], ChannelKind::Text), ChannelKind::Text, "mixed: as asked");
+        assert_eq!(default_kind_in(&[], ChannelKind::Text), ChannelKind::Text, "empty: as asked");
+    }
 }

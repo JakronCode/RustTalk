@@ -261,16 +261,41 @@ impl RustTalkApp {
         });
     }
 
+    /// A device was picked: use it right away (level meter and, when
+    /// connected, the running audio). Falls back to `previous` if it fails.
+    pub(super) fn apply_devices(&mut self, previous: (Option<String>, Option<String>)) {
+        self.mic_monitor = None; // restarts with the new input next frame
+        if let Some(engine) = self.audio.as_mut() {
+            let (input, output) = (self.config.input_device.clone(), self.config.output_device.clone());
+            if let Err(e) = engine.restart(input.as_deref(), output.as_deref()) {
+                let failed = format!("{e:#}");
+                (self.config.input_device, self.config.output_device) = previous;
+                let back = engine.restart(self.config.input_device.as_deref(), self.config.output_device.as_deref());
+                self.set_error(match back {
+                    Ok(()) => format!("Could not use that device ({failed}) - kept the previous one"),
+                    Err(e) => format!("Audio stopped: {e:#} - reconnect to try again"),
+                });
+            }
+            // Computer audio of a screen share follows the output device.
+            self.screen_audio = None;
+            self.screen_audio_failed = false;
+        }
+        self.config.save();
+    }
+
     fn page_voice(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
             caption(ui, "Devices");
+            let before = (self.config.input_device.clone(), self.config.output_device.clone());
             ui.columns(2, |cols| {
                 cols[0].label(egui::RichText::new("Input device").color(theme::HEADER));
                 device_combo(&mut cols[0], "input_dev", &mut self.config.input_device, &self.input_devices);
                 cols[1].label(egui::RichText::new("Output device").color(theme::HEADER));
                 device_combo(&mut cols[1], "output_dev", &mut self.config.output_device, &self.output_devices);
             });
-            ui.label(egui::RichText::new(format!("{}  Device changes apply on the next connect.", icons::regular::INFO)).size(12.0).color(theme::MUTED));
+            if before != (self.config.input_device.clone(), self.config.output_device.clone()) {
+                self.apply_devices(before);
+            }
             ui.separator();
             setting_row(ui, "Output volume", Some("Volume of everyone you hear"), false, |ui| {
                 let mut pct = (self.config.output_volume * 100.0).round();
