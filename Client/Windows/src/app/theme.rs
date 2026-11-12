@@ -359,7 +359,8 @@ pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
         .inner
 }
 
-/// Setting row: label (+ optional description) on the left, control right.
+/// Setting row: label (+ optional description, wrapping) on the left, control
+/// right-aligned on the label's line. `wip` rows are greyed out with a badge.
 pub fn setting_row(
     ui: &mut egui::Ui,
     label: &str,
@@ -367,22 +368,57 @@ pub fn setting_row(
     wip: bool,
     control: impl FnOnce(&mut egui::Ui),
 ) {
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(label).color(HEADER));
-                if wip {
-                    wip_badge(ui);
-                }
-            });
-            if let Some(d) = desc {
-                ui.label(egui::RichText::new(d).size(12.0).color(MUTED));
-            }
+    let enabled = ui.is_enabled() && !wip;
+    let pad = dense(6.0, 3.0);
+    ui.add_space(pad);
+    let top = ui.cursor().min;
+    // Can be negative for a frame while a window opens; egui asserts on negative child sizes.
+    let width = ui.available_width().max(0.0);
+    let row_h = ui.spacing().interact_size.y;
+
+    // Control first (right to left), so the text knows how much room is left.
+    let mut ctrl = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(egui::Rect::from_min_size(top, egui::vec2(width, row_h)))
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    if wip {
+        ctrl.disable();
+    }
+    control(&mut ctrl);
+    let ctrl_rect = ctrl.min_rect();
+
+    let text_w = (ctrl_rect.left() - top.x - 16.0).clamp(0.0, width);
+    // Stack below the control when a narrow window leaves too little label space.
+    let (text_top, text_w) = if text_w < 120.0 {
+        (egui::pos2(top.x, ctrl_rect.bottom() + pad), width)
+    } else {
+        (top, text_w)
+    };
+    let mut text = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(egui::Rect::from_min_size(text_top, egui::vec2(text_w, row_h)))
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    text.spacing_mut().item_spacing.y = 2.0;
+    let line_h = text.text_style_height(&egui::TextStyle::Body);
+    text.add_space(((row_h - line_h) / 2.0).max(0.0));
+    let title = egui::RichText::new(label).size(14.5).color(if enabled { HEADER } else { MUTED });
+    if wip {
+        text.horizontal(|ui| {
+            ui.label(title);
+            wip_badge(ui);
         });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_enabled_ui(!wip, |ui| control(ui));
-        });
-    });
+    } else {
+        text.label(title);
+    }
+    if let Some(d) = desc {
+        text.label(egui::RichText::new(d).size(12.5).color(if enabled { MUTED } else { DISABLED }));
+    }
+
+    let bottom = text.min_rect().bottom().max(ctrl_rect.bottom()).max(top.y + row_h);
+    ui.advance_cursor_after_rect(egui::Rect::from_min_max(top, egui::pos2(top.x + width, bottom)));
+    ui.add_space(pad);
 }
 
 /// Pill-style toggle switch.
@@ -398,7 +434,7 @@ pub fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     let bg = if !enabled {
         DISABLED
     } else if *on {
-        GREEN
+        accent()
     } else {
         egui::Color32::from_rgb(0x80, 0x84, 0x8E)
     };
@@ -472,6 +508,25 @@ pub fn toast(ctx: &egui::Context, text: &str, age_secs: f32, is_error: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setting_rows_handle_narrow_and_opening_frames() {
+        for width in [0.0, 1.0, 100.0, 400.0] {
+            let ctx = egui::Context::default();
+            let _ = ctx.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.set_max_width(width);
+                    setting_row(ui, "Input device", Some("Device used for voice capture"), false, |ui| {
+                        ui.add_sized([250.0, 24.0], egui::Button::new("A long device name"));
+                    });
+                    setting_row(ui, "Unavailable setting", None, true, |ui| {
+                        toggle(ui, &mut false);
+                    });
+                    assert!(ui.min_rect().is_finite());
+                });
+            });
+        }
+    }
 
     #[test]
     fn avatar_color_is_deterministic() {
