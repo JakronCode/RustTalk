@@ -37,7 +37,11 @@ impl RustTalkApp {
                                 ui.allocate_ui_with_layout(
                                     egui::vec2(if expanded { 240.0 } else { card_w - 40.0 }, 360.0),
                                     egui::Layout::top_down(egui::Align::Min),
-                                    |ui| self.saved_servers(ui),
+                                    |ui| {
+                                        if self.saved_servers(ui) {
+                                            self.start_connect();
+                                        }
+                                    },
                                 );
                                 if expanded {
                                     ui.add_space(8.0);
@@ -90,7 +94,8 @@ impl RustTalkApp {
         }
     }
 
-    fn saved_servers(&mut self, ui: &mut egui::Ui) {
+    fn saved_servers(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut connect = false;
         theme::caption(ui, "Saved servers");
         ui.add_space(4.0);
         let bookmarks = self.config.bookmarks.clone();
@@ -104,12 +109,9 @@ impl RustTalkApp {
                 );
             }
             for (i, bm) in bookmarks.iter().enumerate() {
-                if self.renaming_bookmark.as_ref().is_some_and(|(r, _)| *r == i) {
-                    self.rename_row(ui, i);
-                    continue;
-                }
                 let selected = self.config.server_address == bm.address;
-                let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 44.0), egui::Sense::click());
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 44.0), egui::Sense::hover());
+                let resp = ui.interact(rect, ui.id().with(("saved_server", &bm.address)), egui::Sense::click());
                 let p = ui.painter();
                 p.rect_filled(rect, 8.0, if selected { theme::SELECTED } else if resp.hovered() { theme::HOVER } else { egui::Color32::TRANSPARENT });
                 let icon_r = egui::Rect::from_center_size(rect.left_center() + egui::vec2(22.0, 0.0), egui::vec2(30.0, 30.0));
@@ -123,26 +125,21 @@ impl RustTalkApp {
                     }
                     None => paint_clipped(ui, rect.left_top() + egui::vec2(46.0, 13.0), &bm.address, 14.0, theme::HEADER, text_w),
                 }
-                if resp.clicked() {
-                    self.show_connect_form = true;
-                    self.config.invite = None;
-                    self.config.server_address = bm.address.clone();
-                    self.config.server_password = bm.password.clone();
-                    self.server_nickname = bm.nickname().unwrap_or_default().to_string();
+                if resp.clicked() || resp.double_clicked() {
+                    self.select_saved_server(bm);
+                    self.show_connect_form = false;
                 }
-                if resp.double_clicked() {
-                    self.config.invite = None;
-                    self.config.server_address = bm.address.clone();
-                    self.config.server_password = bm.password.clone();
-                    self.server_nickname = bm.nickname().unwrap_or_default().to_string();
-                    self.start_connect();
+                if resp.double_clicked() && self.cmd_tx.is_none() {
+                    connect = true;
                 }
-                resp.on_hover_text(format!("{}\nClick = fill in  -  double click = connect  -  right click = rename or remove", bm.address))
+                resp.on_hover_text(format!("{}\nClick = select  -  double click = connect  -  right click = edit or remove", bm.address))
                     .context_menu(|ui| {
                         ui.set_width(160.0);
                         ui.spacing_mut().item_spacing.y = 2.0;
-                        if theme::menu_item(ui, icons::regular::PENCIL_SIMPLE, "Rename", false).clicked() {
-                            self.renaming_bookmark = Some((i, bm.nickname().unwrap_or_default().to_string()));
+                        if theme::menu_item(ui, icons::regular::PENCIL_SIMPLE, "Edit", false).clicked() {
+                            self.select_saved_server(bm);
+                            self.editing_bookmark = Some(bm.address.clone());
+                            self.show_connect_form = true;
                             ui.close_menu();
                         }
                         theme::menu_separator(ui);
@@ -163,51 +160,76 @@ impl RustTalkApp {
                 self.config.server_address.clear();
                 self.config.server_password = None;
                 self.config.invite = None;
-                self.renaming_bookmark = None;
+                self.editing_bookmark = None;
             }
         });
-        if !self.show_connect_form {
-            ui.add_space(8.0);
-            if theme::ghost_button(ui, format!("{}  Settings", icons::regular::GEAR_SIX)).clicked() {
-                self.open_settings(SettingsPage::Voice);
-            }
-        }
         if let Some(i) = remove_idx {
             self.config.bookmarks.remove(i);
-            self.renaming_bookmark = None;
             self.config.save();
         }
+        if !self.show_connect_form {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if theme::ghost_button_sized(ui, format!("{}  Settings", icons::regular::GEAR_SIX), egui::vec2(0.0, 32.0)).clicked() {
+                    self.open_settings(SettingsPage::Voice);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let selected = self.config.bookmarks.iter()
+                        .find(|bm| bm.address == self.config.server_address).cloned();
+                    let enabled = selected.is_some() && self.cmd_tx.is_none();
+                    if ui.add_enabled_ui(enabled, |ui| theme::primary_button(ui, "Connect")).inner.clicked() {
+                        if let Some(bm) = selected {
+                            self.select_saved_server(&bm);
+                            connect = true;
+                        }
+                    }
+                });
+            });
+        }
+        connect
     }
 
-    /// Inline nickname editor: Enter or clicking away saves, Escape cancels.
-    fn rename_row(&mut self, ui: &mut egui::Ui, i: usize) {
-        let Some((_, text)) = self.renaming_bookmark.as_mut() else { return };
-        let address = self.config.bookmarks.get(i).map(|b| b.address.clone()).unwrap_or_default();
-        let resp = ui.add_sized(
-            [ui.available_width(), 30.0],
-            egui::TextEdit::singleline(text)
-                .hint_text(format!("Nickname for {address}"))
-                .char_limit(crate::config::MAX_NICKNAME_CHARS),
-        );
-        ui.label(egui::RichText::new("Enter = save  -  Esc = cancel  -  empty = show address").size(11.0).color(theme::MUTED));
-        ui.add_space(4.0);
-        if ui.input(|inp| inp.key_pressed(egui::Key::Escape)) {
-            self.renaming_bookmark = None;
-        } else if resp.lost_focus() {
-            // The connect form must not also act on this Enter.
-            ui.input_mut(|inp| inp.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
-            if let Some((_, text)) = self.renaming_bookmark.take() {
-                if let Some(bm) = self.config.bookmarks.get_mut(i) {
-                    bm.set_nickname(&text);
-                    if bm.address == self.config.server_address {
-                        self.server_nickname = bm.nickname().unwrap_or_default().to_string();
-                    }
-                    self.config.save();
-                }
-            }
-        } else if !resp.has_focus() {
-            resp.request_focus();
+    fn update_saved_server(&mut self) -> Result<(), &'static str> {
+        let addr = self.config.server_address.trim().to_string();
+        if addr.is_empty() {
+            return Err("Enter a server address before saving.");
         }
+        let editing = self.editing_bookmark.as_ref().and_then(|address|
+            self.config.bookmarks.iter().position(|b| &b.address == address));
+        if self.editing_bookmark.is_some() && editing.is_none() {
+            return Err("This saved server was removed. Select a server or add a new one.");
+        }
+        let existing = self.config.bookmarks.iter().position(|b| b.address == addr);
+        if editing.is_some() && existing.is_some() && editing != existing {
+            return Err("Another saved server already uses this address.");
+        }
+        let idx = match editing.or(existing) {
+            Some(i) => i,
+            None => {
+                self.config.bookmarks.push(ServerBookmark {
+                    name: String::new(),
+                    address: addr.clone(),
+                    password: None,
+                });
+                self.config.bookmarks.len() - 1
+            }
+        };
+        let bm = &mut self.config.bookmarks[idx];
+        bm.address = addr.clone();
+        bm.set_nickname(&self.server_nickname);
+        bm.password = self.config.server_password.clone();
+        self.server_nickname = bm.nickname().unwrap_or_default().to_string();
+        self.config.server_address = addr.clone();
+        self.editing_bookmark = Some(addr);
+        Ok(())
+    }
+
+    fn select_saved_server(&mut self, bm: &ServerBookmark) {
+        self.config.invite = None;
+        self.config.server_address = bm.address.clone();
+        self.config.server_password = bm.password.clone();
+        self.server_nickname = bm.nickname().unwrap_or_default().to_string();
+        self.editing_bookmark = None;
     }
 
     /// Error panel for a failed join: icon, title, explanation, actions, raw details.
@@ -401,24 +423,12 @@ impl RustTalkApp {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             if theme::ghost_button(ui, format!("{}  Save server", icons::regular::BOOKMARK_SIMPLE)).clicked() {
-                let addr = self.config.server_address.trim().to_string();
-                if !addr.is_empty() {
-                    let idx = match self.config.bookmarks.iter().position(|b| b.address == addr) {
-                        Some(i) => i,
-                        None => {
-                            self.config.bookmarks.push(ServerBookmark {
-                                name: String::new(),
-                                address: addr.clone(),
-                                password: self.config.server_password.clone(),
-                            });
-                            self.config.bookmarks.len() - 1
-                        }
-                    };
-                    self.config.bookmarks[idx].set_nickname(&self.server_nickname);
-                    self.config.bookmarks[idx].password = self.config.server_password.clone();
-                    self.server_nickname = self.config.bookmarks[idx].nickname().unwrap_or_default().to_string();
-                    self.config.save();
-                    self.set_status("Server saved");
+                match self.update_saved_server() {
+                    Ok(()) => {
+                        self.config.save();
+                        self.set_status("Server saved");
+                    }
+                    Err(message) => self.set_error(message),
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -435,3 +445,7 @@ fn paint_clipped(ui: &egui::Ui, pos: egui::Pos2, text: &str, size: f32, color: e
     let clip = egui::Rect::from_min_size(pos, egui::vec2(max_w.max(0.0), size * 1.6));
     ui.painter().with_clip_rect(clip.intersect(ui.clip_rect())).text(pos, egui::Align2::LEFT_TOP, text, egui::FontId::proportional(size), color);
 }
+
+#[cfg(test)]
+#[path = "connect_tests.rs"]
+mod tests;
