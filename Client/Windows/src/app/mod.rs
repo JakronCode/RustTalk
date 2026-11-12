@@ -380,6 +380,7 @@ pub struct RustTalkApp {
     focus_password: bool,
     /// Saved server being renamed: (index, text being edited).
     renaming_bookmark: Option<(usize, String)>,
+    server_nickname: String,
     /// Not installed yet: the whole window is the install screen.
     install_screen: Option<lifecycle::InstallScreen>,
     update: lifecycle::UpdateState,
@@ -421,6 +422,9 @@ impl RustTalkApp {
         let (video_tx, video_rx) = std::sync::mpsc::channel::<media_ui::DecodeMsg>();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let (giphy_tx, giphy_rx) = std::sync::mpsc::channel::<GiphyMsg>();
+        let server_nickname = config.bookmarks.iter()
+            .find(|b| b.address == config.server_address)
+            .and_then(|b| b.nickname()).unwrap_or_default().to_string();
         let sfx: sfx::SfxQueue = Default::default();
         Self {
             control,
@@ -516,6 +520,7 @@ impl RustTalkApp {
             join_error: None,
             focus_password: false,
             renaming_bookmark: None,
+            server_nickname,
             install_screen: (crate::install::mode() == crate::install::Mode::NotInstalled).then(lifecycle::InstallScreen::new),
             update: lifecycle::UpdateState::new(),
             toast_tx,

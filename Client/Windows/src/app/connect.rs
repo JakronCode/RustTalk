@@ -13,7 +13,7 @@ impl RustTalkApp {
                 }
                 let avail = ui.available_size();
                 let card_w = 760.0f32.min(avail.x - 32.0);
-                ui.add_space(((avail.y - 470.0) / 2.0).max(16.0));
+                ui.add_space(((avail.y - 530.0) / 2.0).max(16.0));
                 ui.vertical_centered(|ui| {
                     logo::paint_logo(ui, 64.0);
                     ui.add_space(6.0);
@@ -34,7 +34,7 @@ impl RustTalkApp {
                             ui.horizontal_top(|ui| {
                                 // --- Left: saved servers ---
                                 ui.allocate_ui_with_layout(
-                                    egui::vec2(240.0, 300.0),
+                                    egui::vec2(240.0, 360.0),
                                     egui::Layout::top_down(egui::Align::Min),
                                     |ui| self.saved_servers(ui),
                                 );
@@ -43,7 +43,7 @@ impl RustTalkApp {
                                 ui.add_space(8.0);
                                 // --- Right: connect form ---
                                 ui.allocate_ui_with_layout(
-                                    egui::vec2(ui.available_width(), 300.0),
+                                    egui::vec2(ui.available_width(), 360.0),
                                     egui::Layout::top_down(egui::Align::Min),
                                     |ui| self.connect_form(ui),
                                 );
@@ -78,12 +78,16 @@ impl RustTalkApp {
             });
         if self.join_error.is_some() {
             let size = ctx.screen_rect().size();
-            let width = (size.x - 72.0).clamp(160.0, 530.0);
+            let width = (size.x - 96.0).clamp(160.0, 640.0);
             let response = egui::Modal::new(egui::Id::new("join_error_dialog"))
                 .frame(egui::Frame::default().fill(theme::BG).corner_radius(10.0))
                 .backdrop_color(egui::Color32::from_black_alpha(160))
                 .show(ctx, |ui| {
+                    // A modal Area otherwise retains its small default height and clips the scroll viewport.
+                    ui.set_width(width + 48.0);
+                    ui.set_max_height((size.y - 64.0).max(80.0));
                     egui::ScrollArea::vertical()
+                        .id_salt("join_error_dialog_scroll")
                         .max_height((size.y - 64.0).max(80.0))
                         .show(ui, |ui| self.join_error_panel(ui, width));
                 });
@@ -131,10 +135,12 @@ impl RustTalkApp {
                 if resp.clicked() {
                     self.config.server_address = bm.address.clone();
                     self.config.server_password = bm.password.clone();
+                    self.server_nickname = bm.nickname().unwrap_or_default().to_string();
                 }
                 if resp.double_clicked() {
                     self.config.server_address = bm.address.clone();
                     self.config.server_password = bm.password.clone();
+                    self.server_nickname = bm.nickname().unwrap_or_default().to_string();
                     self.start_connect();
                 }
                 resp.on_hover_text(format!("{}\nClick = fill in  -  double click = connect  -  right click = rename or remove", bm.address))
@@ -180,6 +186,9 @@ impl RustTalkApp {
             if let Some((_, text)) = self.renaming_bookmark.take() {
                 if let Some(bm) = self.config.bookmarks.get_mut(i) {
                     bm.set_nickname(&text);
+                    if bm.address == self.config.server_address {
+                        self.server_nickname = bm.nickname().unwrap_or_default().to_string();
+                    }
                     self.config.save();
                 }
             }
@@ -200,9 +209,10 @@ impl RustTalkApp {
             .fill(color.gamma_multiply(0.12))
             .stroke(egui::Stroke::new(1.0_f32, color.gamma_multiply(0.7)))
             .corner_radius(10.0)
-            .inner_margin(egui::Margin::same(14))
+            .inner_margin(egui::Margin::same(24))
             .show(ui, |ui| {
                 ui.set_width(width);
+                ui.spacing_mut().item_spacing.y = 10.0;
                 ui.horizontal_top(|ui| {
                     ui.label(egui::RichText::new(err.icon()).size(26.0).color(color));
                     ui.add_space(6.0);
@@ -302,6 +312,14 @@ impl RustTalkApp {
 
     fn connect_form(&mut self, ui: &mut egui::Ui) {
         let w = ui.available_width();
+        theme::caption(ui, "Server nickname (optional)");
+        ui.add_sized(
+            [w, 32.0],
+            egui::TextEdit::singleline(&mut self.server_nickname)
+                .hint_text("e.g. Local Dev Server")
+                .char_limit(crate::config::MAX_NICKNAME_CHARS),
+        );
+        ui.add_space(4.0);
         theme::caption(ui, "Server address");
         ui.add_sized([w, 32.0], egui::TextEdit::singleline(&mut self.config.server_address).hint_text("host, host:port or invite link"));
         if let Some((_, code)) = super::moderation_ui::parse_invite_link(&self.config.server_address) {
@@ -367,21 +385,22 @@ impl RustTalkApp {
             if theme::ghost_button(ui, format!("{}  Save server", icons::regular::BOOKMARK_SIMPLE)).clicked() {
                 let addr = self.config.server_address.trim().to_string();
                 if !addr.is_empty() {
-                    // Saving opens the nickname editor (also for an already saved address).
                     let idx = match self.config.bookmarks.iter().position(|b| b.address == addr) {
                         Some(i) => i,
                         None => {
                             self.config.bookmarks.push(ServerBookmark {
                                 name: String::new(),
-                                address: addr,
+                                address: addr.clone(),
                                 password: self.config.server_password.clone(),
                             });
-                            self.config.save();
                             self.config.bookmarks.len() - 1
                         }
                     };
-                    let nick = self.config.bookmarks[idx].nickname().unwrap_or_default().to_string();
-                    self.renaming_bookmark = Some((idx, nick));
+                    self.config.bookmarks[idx].set_nickname(&self.server_nickname);
+                    self.config.bookmarks[idx].password = self.config.server_password.clone();
+                    self.server_nickname = self.config.bookmarks[idx].nickname().unwrap_or_default().to_string();
+                    self.config.save();
+                    self.set_status("Server saved");
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
