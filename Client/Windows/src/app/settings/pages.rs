@@ -568,8 +568,8 @@ impl RustTalkApp {
         setting_row(
             ui,
             "Share audio with screen",
-            Some("Send the computer sound while sharing (Windows only)"),
-            !cfg!(windows),
+            Some("Send computer sound while sharing. Linux captures all sound on the default system output, including for a single shared window; requires libpulse and PulseAudio or pipewire-pulse."),
+            !cfg!(any(windows, target_os = "linux")),
             |ui| {
                 toggle(ui, &mut self.config.share_screen_audio);
             },

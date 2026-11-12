@@ -102,8 +102,17 @@ fn sample_image(sample: &gst::Sample) -> Result<image::RgbImage> {
     Ok(rgb)
 }
 
-fn capture_loop(source: &str, stop: &AtomicBool, jobs: SyncSender<EncodeJob>, params: EncodeParams) -> Result<()> {
+struct ScreenSending<'a>(Option<&'a AtomicBool>);
+impl Drop for ScreenSending<'_> {
+    fn drop(&mut self) {
+        if let Some(sending) = self.0 { sending.store(false, Ordering::Relaxed); }
+    }
+}
+
+fn capture_loop(source: &str, stop: &AtomicBool, jobs: SyncSender<EncodeJob>, params: EncodeParams, sending: Option<&AtomicBool>) -> Result<()> {
     let (pipeline, sink) = capture_pipeline(source, Some(params))?;
+    // Declared after the pipeline: clear audio consent before pipeline teardown can wait.
+    let _sending = ScreenSending(sending);
     let bus = pipeline.0.bus().context("Capture bus missing")?;
     let mut pacer = Pacer::new();
     let mut last_frame = Instant::now();
@@ -120,6 +129,13 @@ fn capture_loop(source: &str, stop: &AtomicBool, jobs: SyncSender<EncodeJob>, pa
             last_frame = Instant::now();
             if pacer.ready_at(last_frame) {
                 let img = image::DynamicImage::ImageRgb8(sample_image(&sample)?);
+                if stop.load(Ordering::Relaxed) { break; }
+                // A Playing request may still be asynchronous; only a valid frame proves capture is live.
+                if let Some(sending) = sending { sending.store(true, Ordering::Relaxed); }
+                if stop.load(Ordering::Relaxed) {
+                    if let Some(sending) = sending { sending.store(false, Ordering::Relaxed); }
+                    break;
+                }
                 match jobs.try_send(EncodeJob { img }) {
                     Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_)) => {}
                     Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
@@ -166,6 +182,7 @@ where
                 &stop,
                 jobs,
                 quality.camera(),
+                None,
             ) {
                 if !stop.load(Ordering::Relaxed) {
                     on_error(format!("Camera error: {e:#}"));
@@ -189,7 +206,17 @@ async fn until_stopped<T>(
     }
 }
 
-async fn portal_capture(stop: Arc<AtomicBool>, jobs: SyncSender<EncodeJob>, params: EncodeParams) -> Result<()> {
+async fn stop_screen_capture(
+    sending: &AtomicBool,
+    capture_stop: &AtomicBool,
+    cleanup: impl std::future::Future<Output = ()>,
+) {
+    capture_stop.store(true, Ordering::Relaxed);
+    sending.store(false, Ordering::Relaxed);
+    cleanup.await;
+}
+
+async fn portal_capture(stop: Arc<AtomicBool>, sending: Arc<AtomicBool>, jobs: SyncSender<EncodeJob>, params: EncodeParams) -> Result<()> {
     let proxy = Screencast::new()
         .await
         .context("Screen sharing requires a working desktop portal")?;
@@ -209,28 +236,28 @@ async fn portal_capture(stop: Arc<AtomicBool>, jobs: SyncSender<EncodeJob>, para
         let mut closed = session.receive_closed().await?;
         let capture_stop = Arc::new(AtomicBool::new(false));
         let worker_stop = capture_stop.clone();
+        let worker_sending = sending.clone();
         let mut capture = tokio::task::spawn_blocking(move || {
             // Older PipeWire versions lack on-disconnect; also watch portal closure below.
             let probe = gst::ElementFactory::make("pipewiresrc").build()?;
             let disconnect = if probe.find_property("on-disconnect").is_some() { "on-disconnect=eos" } else { "" };
             let keepalive = if probe.find_property("keepalive-time").is_some() { "keepalive-time=40" } else { "" };
             let source = format!("pipewiresrc fd={} path={node} do-timestamp=true {keepalive} {disconnect} ! video/x-raw,width=(int)[1,16384],height=(int)[1,16384],pixel-aspect-ratio=(fraction)1/1", fd.as_raw_fd());
-            capture_loop(&source, &worker_stop, jobs, params)
+            capture_loop(&source, &worker_stop, jobs, params, Some(&worker_sending))
         });
         tokio::select! {
-            result = &mut capture => { result??; }
+            result = &mut capture => { sending.store(false, Ordering::Relaxed); result??; }
             _ = closed.next() => {
-                capture_stop.store(true, Ordering::Relaxed);
-                let _ = capture.await;
+                stop_screen_capture(&sending, &capture_stop, async { let _ = capture.await; }).await;
                 bail!("Desktop stopped screen sharing");
             }
             _ = until_stopped(&stop, std::future::pending::<()>()) => {
-                capture_stop.store(true, Ordering::Relaxed);
-                let _ = capture.await;
+                stop_screen_capture(&sending, &capture_stop, async { let _ = capture.await; }).await;
             }
         }
         Ok(())
     }.await;
+    sending.store(false, Ordering::Relaxed);
     let _ = session.close().await;
     result
 }
@@ -252,7 +279,7 @@ where
     );
     let cap = VideoCapture {
         stop: Arc::new(AtomicBool::new(false)),
-        sending: Arc::new(AtomicBool::new(true)),
+        sending: Arc::new(AtomicBool::new(false)),
         keyframe: Arc::new(AtomicBool::new(false)),
     };
     let jobs = spawn_encoder(
@@ -265,6 +292,7 @@ where
         on_frame,
     )?;
     let stop = cap.stop.clone();
+    let sending = cap.sending.clone();
     std::thread::Builder::new()
         .name("video-screen".into())
         .spawn(move || {
@@ -272,9 +300,11 @@ where
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()?
-                    .block_on(portal_capture(stop.clone(), jobs, quality.screen()))
+                    .block_on(portal_capture(stop.clone(), sending.clone(), jobs, quality.screen()))
             };
-            if let Err(e) = run() {
+            let result = run();
+            sending.store(false, Ordering::Relaxed);
+            if let Err(e) = result {
                 if !stop.load(Ordering::Relaxed) {
                     on_error(format!("Screen sharing stopped: {e:#}"));
                 }
@@ -286,6 +316,35 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn screen_without_frames_never_enables_audio() {
+        gst::init().unwrap();
+        let sending = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (jobs, _receiver) = std::sync::mpsc::sync_channel(1);
+        let worker_stop = stop.clone();
+        let worker_sending = sending.clone();
+        let worker = std::thread::spawn(move || capture_loop(
+            "videotestsrc is-live=true ! valve drop=true", &worker_stop, jobs,
+            VideoQuality::Balanced.screen(), Some(&worker_sending)));
+        std::thread::sleep(Duration::from_millis(200));
+        let live_before_stop = sending.load(Ordering::Relaxed);
+        stop.store(true, Ordering::Relaxed);
+        worker.join().unwrap().unwrap();
+        assert!(!live_before_stop);
+        assert!(!sending.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn portal_stop_clears_sending_before_pending_cleanup() {
+        use futures_util::FutureExt;
+        let sending = AtomicBool::new(true);
+        let stop = AtomicBool::new(false);
+        assert!(stop_screen_capture(&sending, &stop, std::future::pending()).now_or_never().is_none());
+        assert!(!sending.load(Ordering::Relaxed));
+        assert!(stop.load(Ordering::Relaxed));
+    }
+
     #[test]
     fn rgb_frames_respect_row_padding() {
         gst::init().unwrap();
@@ -340,6 +399,7 @@ mod tests {
                 &thread_stop,
                 jobs,
                 VideoQuality::Balanced.camera(),
+                None,
             )
         });
         assert!(rx

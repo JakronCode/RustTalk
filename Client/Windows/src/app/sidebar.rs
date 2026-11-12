@@ -770,14 +770,17 @@ impl RustTalkApp {
                 self.toggle_screen(cmd_tx);
             }
         });
+        #[cfg(target_os = "linux")]
+        ui.checkbox(&mut self.config.share_screen_audio, "Include system audio with screen")
+            .on_hover_text("Share all sound on the default system output, including when sharing one window");
         let active = self.screen_audio.is_some();
         let label = if active { "Stop sharing audio" } else { "Share audio only" };
         let tip = if cfg!(windows) {
             "Share computer audio with this voice channel; microphone stays independent"
         } else {
-            "System audio capture is currently supported only on Windows (WASAPI loopback)"
+            "Share all audio on the default system output (PulseAudio / pipewire-pulse); microphone stays independent"
         };
-        ui.add_enabled_ui(cfg!(windows), |ui| {
+        ui.add_enabled_ui(cfg!(any(windows, target_os = "linux")), |ui| {
             if wide_toggle(ui, icons::regular::SPEAKER_HIGH, label,
                 if active { IconState::Active } else { IconState::Normal }, tip).clicked() {
                 if active { self.stop_shared_audio(); } else { self.toggle_audio_only(); }

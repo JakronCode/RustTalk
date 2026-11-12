@@ -69,6 +69,7 @@ pub fn build_input_stream(
 }
 
 /// Input stream for any device + format (loopback of an output device).
+#[cfg(windows)]
 pub fn build_stream_for(device: &cpal::Device, supported: &cpal::SupportedStreamConfig, producer: HeapProd<f32>, failed: Arc<AtomicBool>) -> Result<cpal::Stream> {
     let config = supported.config();
     let err_fn = move |e| {

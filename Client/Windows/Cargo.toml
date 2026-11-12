@@ -60,6 +60,7 @@ notify-rust = "4"
 gstreamer = "0.24"
 gstreamer-app = "0.24"
 gstreamer-video = "0.24"
+libpulse-binding = "2.30"
 
 [dev-dependencies]
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }

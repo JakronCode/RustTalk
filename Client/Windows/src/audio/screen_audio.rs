@@ -1,7 +1,7 @@
 //! Computer audio shared independently or alongside a screen.
 //!
-//! WASAPI loopback of the output device (`cpal` records an output device
-//! as input) -> mono 48 kHz -> echo canceller against our own playback
+//! WASAPI loopback on Windows, or a PulseAudio output monitor on Linux
+//! -> mono 48 kHz -> echo canceller against our own playback
 //! (otherwise everyone would hear the other speakers again) -> Opus in music
 //! mode -> UDP with `FLAG_SCREEN_AUDIO`. Silence is not sent. Receivers mix it
 //! like a voice (per-user mute/volume apply), without the talking indicator.
@@ -14,6 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use audiopus::coder::Encoder;
 use audiopus::{Application, Bitrate, Channels, SampleRate, Signal};
+#[cfg(windows)]
 use cpal::traits::DeviceTrait;
 use ringbuf::traits::{Consumer, Split};
 use ringbuf::{HeapProd, HeapRb};
@@ -33,7 +34,9 @@ const SILENCE_HANGOVER: u32 = 25; // 0.5 s
 
 /// Running "share audio"; dropping it stops everything.
 pub struct ScreenAudio {
-    _stream: super::DeviceStream,
+    _stream: Option<super::DeviceStream>,
+    #[cfg(target_os = "linux")]
+    capture_worker: Option<std::thread::JoinHandle<()>>,
     worker: Option<std::thread::JoinHandle<()>>,
     stop: Arc<AtomicBool>,
     tap: RenderTap,
@@ -44,6 +47,8 @@ impl Drop for ScreenAudio {
         self.stop.store(true, Ordering::Relaxed);
         *self.tap.lock().unwrap() = None;
         if let Some(worker) = self.worker.take() { let _ = worker.join(); }
+        #[cfg(target_os = "linux")]
+        if let Some(worker) = self.capture_worker.take() { let _ = worker.join(); }
     }
 }
 
@@ -60,16 +65,27 @@ impl ScreenAudio {
     pub fn start(udp: UdpSocket, token: u64, cipher: Arc<PacketCipher>, link: Arc<super::link::LinkStats>, output_device: Option<&str>, tap: RenderTap) -> Result<Self> {
         #[cfg(test)]
         if let Some(stream) = super::test_devices::open(super::test_devices::Kind::System, output_device) {
-            return Ok(Self { _stream: stream?, worker: None, stop: Arc::new(AtomicBool::new(false)), tap });
+            return Ok(Self { _stream: Some(stream?), #[cfg(target_os = "linux")] capture_worker: None, worker: None, stop: Arc::new(AtomicBool::new(false)), tap });
         }
-        anyhow::ensure!(cfg!(windows), "System audio capture is supported only on Windows (WASAPI loopback)");
+        #[cfg(not(windows))]
+        let _ = output_device; // Linux captures the system default output, not a CPAL device.
+        anyhow::ensure!(cfg!(any(windows, target_os = "linux")), "System audio capture is not supported on this platform");
         let stop = Arc::new(AtomicBool::new(false));
-        let device = super::playback::pick_output_device(output_device)?;
-        let supported = device.default_output_config().context("Output device has no format")?;
-        let config = supported.config();
-        tracing::info!("Loopback: {:?}, {} Hz, {} Kanaele", device.name().unwrap_or_default(), config.sample_rate.0, config.channels);
         let (prod, cons) = HeapRb::<f32>::new(SAMPLE_RATE as usize * 2).split();
-        let stream = super::capture::build_stream_for(&device, &supported, prod, stop.clone()).context("Could not record the computer audio")?;
+        #[cfg(windows)]
+        let stream = {
+            let device = super::playback::pick_output_device(output_device)?;
+            let supported = device.default_output_config().context("Output device has no format")?;
+            let stream = super::capture::build_stream_for(&device, &supported, prod, stop.clone())
+                .context("Could not record the computer audio")?;
+            #[cfg(test)]
+            let stream = super::DeviceStream::Hardware { _stream: stream };
+            Some(stream)
+        };
+        #[cfg(not(windows))]
+        let stream = None;
+        #[cfg(target_os = "linux")]
+        let capture_worker = Some(super::system_audio::start(prod, stop.clone())?);
 
         let (render_prod, render_cons) = HeapRb::<f32>::new(SAMPLE_RATE as usize).split();
         let worker = std::thread::Builder::new()
@@ -78,11 +94,18 @@ impl ScreenAudio {
                 let stop = stop.clone();
                 move || encode_loop(cons, render_cons, udp, token, cipher, link, stop)
             })
-            .context("screen audio thread")?;
+            .context("screen audio thread");
+        let worker = match worker {
+            Ok(worker) => worker,
+            Err(e) => {
+                stop.store(true, Ordering::Relaxed);
+                #[cfg(target_os = "linux")]
+                if let Some(worker) = capture_worker { let _ = worker.join(); }
+                return Err(e);
+            }
+        };
         *tap.lock().unwrap() = Some(render_prod);
-        #[cfg(test)]
-        let stream = super::DeviceStream::Hardware { _stream: stream };
-        Ok(Self { _stream: stream, worker: Some(worker), stop, tap })
+        Ok(Self { _stream: stream, #[cfg(target_os = "linux")] capture_worker, worker: Some(worker), stop, tap })
     }
 }
 
@@ -183,7 +206,7 @@ mod tests {
             let stop = stop.clone();
             move || encode_loop(cons, render_cons, sender, 42, cipher, Arc::new(super::super::link::LinkStats::default()), stop)
         });
-        let audio = ScreenAudio { _stream: stream, worker: Some(worker), stop: stop.clone(), tap: tap.clone() };
+        let audio = ScreenAudio { _stream: Some(stream), #[cfg(target_os = "linux")] capture_worker: None, worker: Some(worker), stop: stop.clone(), tap: tap.clone() };
         let mut buf = [0; 1500];
         let n = receiver.recv(&mut buf).unwrap();
         let (header, _) = decode(&buf[..n]).unwrap();
@@ -196,10 +219,28 @@ mod tests {
         assert_eq!(devices.0.borrow().systems, 0);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a running local PulseAudio or pipewire-pulse server"]
+    fn linux_system_audio_worker_stops() {
+        let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+        udp.connect(udp.local_addr().unwrap()).unwrap();
+        let tap = Arc::new(Mutex::new(None));
+        let audio = ScreenAudio::start(udp, 42, Arc::new(PacketCipher::new(&[7; 32]).unwrap()),
+            Arc::new(super::super::link::LinkStats::default()), None, tap.clone()).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!audio.failed());
+        let start = std::time::Instant::now();
+        drop(audio);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(tap.lock().unwrap().is_none());
+    }
+
     /// Opens the loopback recording of the default output device (plays nothing).
     /// Manual: `cargo test -p rusttalk-client loopback_opens -- --ignored`
     #[test]
     #[ignore]
+    #[cfg(windows)]
     fn loopback_opens() {
         let device = crate::audio::playback::pick_output_device(None).expect("output device");
         let supported = device.default_output_config().expect("format");

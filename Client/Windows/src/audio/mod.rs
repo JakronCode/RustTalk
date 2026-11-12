@@ -16,6 +16,9 @@ pub mod neural;
 pub mod playback;
 pub mod resample;
 pub mod screen_audio;
+#[cfg(target_os = "linux")]
+#[path = "../linux/system_audio.rs"]
+mod system_audio;
 pub mod sfx;
 pub mod speech;
 pub mod voice_pack;

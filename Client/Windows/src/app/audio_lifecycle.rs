@@ -16,7 +16,7 @@ fn set_active<T>(
 }
 
 fn wants_shared_audio(audio_only: bool, screen: bool, share_screen_audio: bool) -> bool {
-    audio_only || (cfg!(windows) && screen && share_screen_audio)
+    audio_only || (cfg!(any(windows, target_os = "linux")) && screen && share_screen_audio)
 }
 
 fn wants_preview(show_settings: bool, page: SettingsPage, in_voice: bool) -> bool {
@@ -112,7 +112,9 @@ impl RustTalkApp {
         }
         let wanted = wants_shared_audio(
             self.audio_only,
-            self.screen.is_some(),
+            self.screen
+                .as_ref()
+                .is_some_and(|screen| screen.is_sending()),
             self.config.share_screen_audio,
         );
         if !wanted {
@@ -235,8 +237,11 @@ mod tests {
     }
 
     #[test]
-    fn automatic_screen_audio_is_windows_only() {
-        assert_eq!(wants_shared_audio(false, true, true), cfg!(windows));
+    fn automatic_screen_audio_requires_live_screen_and_opt_in() {
+        assert_eq!(
+            wants_shared_audio(false, true, true),
+            cfg!(any(windows, target_os = "linux"))
+        );
         assert!(!wants_shared_audio(false, false, true));
         assert!(!wants_shared_audio(false, true, false));
         assert!(wants_shared_audio(true, false, false));
