@@ -550,6 +550,9 @@ impl RustTalkApp {
             ui.separator();
             let size_mb = voice_pack::total_size() / 1_000_000;
             let desc = match &pack {
+                PackState::Missing if self.config.auto_download_voices && crate::install::mode() == crate::install::Mode::Installed => {
+                    format!("10 voices that sound like a person, speak English and German, and work offline. Downloads on its own in the background ({size_mb} MB, once).")
+                }
                 PackState::Missing => format!("10 voices that sound like a person, speak English and German, and work offline. One-time download of {size_mb} MB."),
                 PackState::Downloading { done, total } => format!("Downloading... {} of {} MB", done / 1_000_000, total / 1_000_000),
                 PackState::Failed(e) => format!("Download failed: {e}"),
@@ -565,6 +568,12 @@ impl RustTalkApp {
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
                 }
                 PackState::Installed => remove = ui.button("Remove").clicked(),
+            });
+            ui.separator();
+            setting_row(ui, "Download natural voices automatically", Some("After installing, RustTalk fetches them once in the background and switches to a natural voice"), false, |ui| {
+                if toggle(ui, &mut self.config.auto_download_voices).changed() {
+                    self.config.save();
+                }
             });
             if download {
                 self.voice_pack.download();

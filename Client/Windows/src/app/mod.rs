@@ -768,6 +768,30 @@ impl RustTalkApp {
         }
     }
 
+    /// Natural voices for everyone without a click: the installed app downloads
+    /// the pack once per start in the background (a broken download continues
+    /// where it stopped) and, when it is there, switches ONCE from the Windows
+    /// voice to a natural one in the Windows display language.
+    fn auto_voices(&mut self) {
+        use crate::audio::voice_pack::{self, State};
+        static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let allowed = crate::install::mode() == crate::install::Mode::Installed || std::env::var_os("RUSTTALK_AUTO_VOICES").is_some();
+        if allowed && self.config.auto_download_voices && !STARTED.swap(true, Ordering::Relaxed) {
+            if matches!(self.voice_pack.state(), State::Missing | State::Failed(_)) {
+                self.voice_pack.download();
+            }
+        }
+        if !self.config.voices_switched && self.voice_pack.state() == State::Installed {
+            self.config.voices_switched = true;
+            if self.config.announce_voice.is_none() {
+                self.config.announce_voice = Some(voice_pack::DEFAULT_VOICE.to_string());
+                self.config.announce_language = voice_pack::system_language().to_string();
+                self.prepare_all_names();
+            }
+            self.config.save();
+        }
+    }
+
     /// Current playback volume of one user (1.0 = 100 %).
     fn user_volume(&self, id: u64) -> f32 {
         self.user_volumes.lock().unwrap().get(&id).copied().unwrap_or(1.0)
@@ -1179,6 +1203,7 @@ impl eframe::App for RustTalkApp {
         {
             self.check_for_updates();
         }
+        self.auto_voices();
         while let Ok(ev) = self.event_rx.try_recv() {
             self.handle_event(ev);
         }

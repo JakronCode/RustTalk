@@ -2,6 +2,18 @@
 
 > Pflichtdokumentation aller Testläufe. Neueste oben.
 
+## 2026-11-12 (24) – Natürliche Stimmen automatisch laden
+
+**Wunsch:** Die natürlichen Stimmen sollen beim Nutzer ohne Klick ankommen (Entscheidung: Auto-Download statt im Installer, Installer/Updates bleiben ~13 MB).
+
+**Client:** Die installierte App startet einmal pro Start im Hintergrund den Download des Stimmenpakets, falls es fehlt (abgebrochene Downloads setzen beim nächsten Start fort, SHA-256 wie bisher). Ist es da, wird **einmalig** von der Windows-Stimme auf `neural:F1` umgeschaltet, Sprache nach der Windows-Anzeigesprache (`de-*` → Deutsch, sonst Englisch, WinRT `GlobalizationPreferences`); eine eigene Stimmenwahl wird nie überschrieben (`voices_switched`). Schalter „Download natural voices automatically“ (Standard an). Dev-Builds laden nur mit `RUSTTALK_AUTO_VOICES=1`.
+
+**Tests:** Client 92 ✅ (neu: Sprache aus Windows-Tag, Standardstimme existiert), `dump_neural` mit geladenem Paket ✅.
+**Live geprüft:** Debug-Client mit frischer Config + `RUSTTALK_AUTO_VOICES=1`: Download startete ohne Klick (383 MiB in ~20 s), danach `announce_voice = "neural:F1"`, `announce_language = "en"` (Windows auf Englisch), `voices_switched = true`.
+**Nicht geprüft:** echter Installer-Lauf (installierter Modus), Klang in der laufenden App.
+
+---
+
 ## 2026-11-12 (23) – D4: H.264-Video statt MJPEG
 
 **Client:** `video_codec.rs` (OpenH264, aus dem Quellcode gebaut, nur C++-Compiler nötig). Sender: pro Quelle ein Encoder-Thread (H.264-Bilder hängen voneinander ab), Aufnahme übergibt höchstens ein Bild (beschäftigter Encoder verwirft statt Latenz aufzubauen), Bildschirm 1080p 4 Mbit/s bzw. 720p 2 Mbit/s, Kamera 720p 2,5 / 540p 1,2 Mbit/s (vorher MJPEG ~40–50 Mbit/s), Vollbild alle 4 s und beim Live-Gehen. Wire-Format: 4-Byte-Bildnummer + Annex-B. Empfänger: ein Decoder-Thread pro Stream, Bild als Textur (vorher JPEG-Hash + Dekodierung beim Zeichnen); Lücke in der Bildnummer, Decoder-Fehler oder ausgelasteter Decoder → `RequestKeyframe` (max. 1/s pro Stream), Server leitet als `KeyframeRequest` nur innerhalb desselben Channels an Teilende weiter. Kamera-Vorschau direkt als Bild (kein JPEG mehr).

@@ -93,6 +93,27 @@ fn voices_dir() -> PathBuf {
     crate::install::data_dir().unwrap_or_default().join("voices")
 }
 
+/// Default voice after the automatic download.
+pub const DEFAULT_VOICE: &str = "neural:F1";
+
+/// Language natural voices speak for a Windows language tag ("de-DE" -> "de").
+pub fn language_for(tag: &str) -> &'static str {
+    if tag.trim().to_ascii_lowercase().starts_with("de") {
+        "de"
+    } else {
+        "en"
+    }
+}
+
+/// "de" when Windows' first display language is German, else "en".
+pub fn system_language() -> &'static str {
+    windows::System::UserProfile::GlobalizationPreferences::Languages()
+        .ok()
+        .and_then(|list| list.GetAt(0).ok())
+        .map(|tag| language_for(&tag.to_string()))
+        .unwrap_or("en")
+}
+
 /// Where the model lives.
 pub fn dir() -> PathBuf {
     voices_dir().join("supertonic-3")
@@ -239,6 +260,17 @@ fn download_file(agent: &ureq::Agent, url: &str, part: &Path, f: &PackFile, prog
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn language_from_windows_tag() {
+        assert_eq!(language_for("de-DE"), "de");
+        assert_eq!(language_for("de-AT"), "de");
+        assert_eq!(language_for("en-US"), "en");
+        assert_eq!(language_for("fr-FR"), "en", "other languages: English");
+        assert_eq!(language_for(""), "en");
+        assert!(["de", "en"].contains(&system_language()));
+        assert!(neural_id(DEFAULT_VOICE).is_some(), "default voice exists");
+    }
 
     #[test]
     fn voice_ids() {

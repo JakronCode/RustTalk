@@ -28,7 +28,7 @@ device_query = "4"
 # Windows toasts (pop-ups), install (registry, Start menu link), update check (SHA-256)
 tauri-winrt-notification = "0.8"
 # Spoken names for join/leave (Windows speech voices)
-windows = { version = "0.62", features = ["Media_Core", "Media_SpeechSynthesis", "Storage_Streams", "Foundation_Collections"] }
+windows = { version = "0.62", features = ["Media_Core", "Media_SpeechSynthesis", "Storage_Streams", "Foundation_Collections", "System_UserProfile"] }
 winreg = "0.55"
 mslnk = "0.1"
 sha2 = "0.10"

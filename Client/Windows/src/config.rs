@@ -102,6 +102,12 @@ pub struct ClientConfig {
     /// Language of the sentence with natural voices ("en" or "de").
     #[serde(default = "default_announce_language")]
     pub announce_language: String,
+    /// Download the natural voices on their own after installing (once, in the background).
+    #[serde(default = "default_true")]
+    pub auto_download_voices: bool,
+    /// The one automatic switch to a natural voice has happened (never again after that).
+    #[serde(default)]
+    pub voices_switched: bool,
     /// Play animated GIFs in chat (off = first frame only).
     #[serde(default = "default_true")]
     pub animate_gifs: bool,
@@ -173,6 +179,8 @@ impl Default for ClientConfig {
             announce_names: true,
             announce_voice: None,
             announce_language: default_announce_language(),
+            auto_download_voices: true,
+            voices_switched: false,
             animate_gifs: true,
             global_ptt: false,
             input_volume: 1.0,
@@ -276,6 +284,8 @@ mod tests {
             announce_names: false,
             announce_voice: Some("neural:F1".into()),
             announce_language: "de".into(),
+            auto_download_voices: false,
+            voices_switched: true,
             animate_gifs: false,
             global_ptt: true,
             input_volume: 0.5,
