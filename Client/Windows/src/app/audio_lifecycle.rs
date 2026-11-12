@@ -280,6 +280,26 @@ mod tests {
     }
 
     #[test]
+    fn audio_button_stops_active_sharing_without_reopening_picker() {
+        use crate::audio::share_source::AudioShareSource;
+        let devices = Devices::new();
+        let mut app = app();
+        let _commands = connect(&mut app);
+        move_to(&mut app, 2);
+        app.toggle_audio_sharing();
+        assert!(app.audio_picker.is_some());
+        app.start_audio_selection(AudioShareSource::System);
+        assert!(app.audio_sharing_active());
+        assert_eq!(devices.0.borrow().systems, 1);
+        app.toggle_audio_sharing();
+        assert!(app.audio_picker.is_none());
+        assert!(!app.audio_sharing_active());
+        assert_eq!(devices.0.borrow().systems, 0);
+        app.sync_shared_audio();
+        assert_eq!(devices.0.borrow().systems, 0, "no automatic resume after stop");
+    }
+
+    #[test]
     fn audio_only_is_explicit_and_stops_at_membership_and_device_boundaries() {
         let devices = Devices::new();
         let mut app = app();

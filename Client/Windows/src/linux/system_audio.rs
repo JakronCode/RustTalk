@@ -101,9 +101,14 @@ pub fn applications(stop: &AtomicBool) -> Result<Vec<super::share_source::AudioA
                 if name.len() > 1024 || process.as_ref().is_some_and(|p| p.len() > 64) {
                     return;
                 }
-                let app: String = app.chars().take(128).collect();
-                applications.push(super::share_source::AudioApplication {
-                    name: format!("{} — {}", app, name).chars().take(256).collect(),
+                let icon_hint = info
+                    .proplist
+                    .get_str("application.icon_name")
+                    .or_else(|| info.proplist.get_str("application.process.binary"));
+                applications.push(super::share_source::RawApplication {
+                    app: app.chars().take(128).collect(),
+                    stream: Some(name.clone()),
+                    icon_hint,
                     source: ApplicationSource {
                         cookie,
                         index: info.index,
@@ -115,9 +120,21 @@ pub fn applications(stop: &AtomicBool) -> Result<Vec<super::share_source::AudioA
             }
         });
     wait(&mut operation, &context, &mut mainloop, stop)?;
-    let mut apps = std::mem::take(&mut *applications.borrow_mut());
-    apps.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(apps)
+    let raw = std::mem::take(&mut *applications.borrow_mut());
+    Ok(super::share_source::finish(raw))
+}
+
+impl ApplicationSource {
+    #[cfg(test)]
+    pub(crate) fn for_test(index: u32) -> Self {
+        Self {
+            cookie: 1,
+            index,
+            client: index,
+            process: None,
+            name: "test".into(),
+        }
+    }
 }
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -476,7 +493,7 @@ mod tests {
             if let Some(app) = applications(&stop)
                 .unwrap()
                 .into_iter()
-                .find(|app| app.name.starts_with(&selected_name))
+                .find(|app| app.label.starts_with(&crate::audio::share_source::friendly_name(&selected_name)))
             {
                 break app.source;
             }

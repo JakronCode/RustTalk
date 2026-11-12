@@ -761,12 +761,12 @@ impl RustTalkApp {
             egui::TextStyle::Button.resolve(ui.style()), theme::TEXT).size().x + ui.spacing().button_padding.x * 2.0)
             .fold(0.0_f32, f32::max) * 3.0 + ui.spacing().item_spacing.x * 2.0;
         let compact = ui.available_width() < required;
-        let active = self.screen_audio.is_some();
+        let active = self.audio_sharing_active();
         ui.columns(3, |cols| {
             for (index, (icon, live, tip)) in [
                 (icons::regular::VIDEO_CAMERA, cam_live, "Camera: choose a device or stop sharing"),
                 (icons::regular::SCREENCAST, screen_live, "Screen: share a screen or window, or stop sharing"),
-                (icons::regular::SPEAKER_HIGH, active, if active { "Audio sharing active: choose source or stop" } else { "Audio: share an application or system-wide audio" }),
+                (icons::regular::SPEAKER_HIGH, active, if active { "Stop sharing audio" } else { "Choose audio source" }),
             ].into_iter().enumerate() {
                 let label = if compact { "" } else { labels[index] };
                 if wide_toggle(&mut cols[index], icon, label,
@@ -774,7 +774,7 @@ impl RustTalkApp {
                     match index {
                         0 => self.toggle_cam(cmd_tx),
                         1 => self.toggle_screen(cmd_tx),
-                        _ => self.open_audio_picker(),
+                        _ => self.toggle_audio_sharing(),
                     }
                 }
             }

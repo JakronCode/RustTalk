@@ -22,7 +22,7 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::System::Variant::VT_BLOB;
 
-use super::share_source::AudioApplication;
+use super::share_source::{AudioApplication, RawApplication};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApplicationSource {
@@ -130,15 +130,16 @@ pub fn applications(stop: &AtomicBool) -> Result<Vec<AudioApplication>> {
                 continue;
             }
             if let Ok((_process, created, name)) = process(pid) {
-                applications.push(AudioApplication {
-                    name,
+                applications.push(RawApplication {
+                    app: name,
+                    stream: None,
+                    icon_hint: None,
                     source: ApplicationSource { pid, created },
                 });
             }
         }
     }
-    applications.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(applications)
+    Ok(super::share_source::finish(applications))
 }
 
 static ACTIVATING: AtomicBool = AtomicBool::new(false);
