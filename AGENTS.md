@@ -24,6 +24,7 @@ Server/tests/      integration tests (real server process + synthetic clients)
 Server/deploy/     systemd unit + install script
 Client/Windows/    egui client (app/, audio/, linux/, net, media, video, update, ...)
 packaging/ scripts/  Linux AppImage packaging
+website/           static project website (rusttalk.com), Caddyfile, deploy script
 .github/workflows/ build.yml (test + build matrix on main), test.yml (PRs: tests + clippy), release.yml
 ```
 

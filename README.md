@@ -2,6 +2,7 @@
 
 Lightweight voice chat in Rust — a Discord-style client with a TeamSpeak-style server.
 **Local first:** no online accounts, no cloud. Client: Windows (egui), server: Linux (Debian, systemd).
+Website: [rusttalk.com](https://rusttalk.com) (source in [website/](website/))
 
 ![Status](https://img.shields.io/badge/status-MVP-green)
 
