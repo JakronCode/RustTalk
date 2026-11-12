@@ -48,39 +48,11 @@ impl RustTalkApp {
                         });
                 });
 
-                if let Some((addr, fp)) = self.cert_warning.clone() {
+                if self.join_error.is_some() {
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         ui.add_space(((avail.x - 560.0) / 2.0).max(0.0));
-                        egui::Frame::default()
-                            .fill(theme::RED.gamma_multiply(0.15))
-                            .stroke(egui::Stroke::new(1.0_f32, theme::RED))
-                            .corner_radius(10.0)
-                            .inner_margin(egui::Margin::same(14))
-                            .show(ui, |ui| {
-                                ui.set_width(530.0);
-                                ui.label(egui::RichText::new(format!("{}  The identity of {addr} changed", icons::regular::WARNING)).strong().size(15.0).color(theme::RED));
-                                ui.label(
-                                    egui::RichText::new(
-                                        "Its encryption certificate is not the one RustTalk saw before. That is expected after the server \
-                                         was reinstalled or its data folder was reset. Otherwise someone may be listening in - ask the \
-                                         server owner whether the fingerprint below matches the one in the server log.",
-                                    )
-                                    .color(theme::TEXT),
-                                );
-                                ui.label(egui::RichText::new(&fp).monospace().size(11.0).color(theme::MUTED));
-                                ui.horizontal(|ui| {
-                                    if theme::danger_button(ui, "Trust the new identity and connect").clicked() {
-                                        self.config.known_servers.insert(addr.clone(), fp.clone());
-                                        self.config.save();
-                                        self.cert_warning = None;
-                                        self.start_connect();
-                                    }
-                                    if ui.button("Cancel").clicked() {
-                                        self.cert_warning = None;
-                                    }
-                                });
-                            });
+                        self.join_error_panel(ui, 530.0);
                     });
                 }
                 if let Some(r) = self.update.available.clone() {
@@ -95,7 +67,7 @@ impl RustTalkApp {
                         });
                     });
                 }
-                if !self.status.is_empty() {
+                if !self.status.is_empty() && self.join_error.is_none() {
                     ui.add_space(14.0);
                     ui.vertical_centered(|ui| {
                         let color = if self.status_is_error { theme::RED } else { theme::MUTED };
@@ -119,15 +91,25 @@ impl RustTalkApp {
                 );
             }
             for (i, bm) in bookmarks.iter().enumerate() {
+                if self.renaming_bookmark.as_ref().is_some_and(|(r, _)| *r == i) {
+                    self.rename_row(ui, i);
+                    continue;
+                }
                 let selected = self.config.server_address == bm.address;
                 let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 44.0), egui::Sense::click());
                 let p = ui.painter();
                 p.rect_filled(rect, 8.0, if selected { theme::SELECTED } else if resp.hovered() { theme::HOVER } else { egui::Color32::TRANSPARENT });
                 let icon_r = egui::Rect::from_center_size(rect.left_center() + egui::vec2(22.0, 0.0), egui::vec2(30.0, 30.0));
-                p.rect_filled(icon_r, 15.0, theme::avatar_color(&bm.name));
+                p.rect_filled(icon_r, 15.0, theme::avatar_color(&bm.address));
                 p.text(icon_r.center(), egui::Align2::CENTER_CENTER, icons::regular::HARD_DRIVES, egui::FontId::proportional(15.0), egui::Color32::WHITE);
-                p.text(rect.left_top() + egui::vec2(46.0, 7.0), egui::Align2::LEFT_TOP, &bm.name, egui::FontId::proportional(14.0), theme::HEADER);
-                p.text(rect.left_top() + egui::vec2(46.0, 25.0), egui::Align2::LEFT_TOP, &bm.address, egui::FontId::proportional(11.5), theme::MUTED);
+                let text_w = rect.width() - 52.0;
+                match bm.nickname() {
+                    Some(nick) => {
+                        paint_clipped(ui, rect.left_top() + egui::vec2(46.0, 7.0), nick, 14.0, theme::HEADER, text_w);
+                        paint_clipped(ui, rect.left_top() + egui::vec2(46.0, 25.0), &bm.address, 11.5, theme::MUTED, text_w);
+                    }
+                    None => paint_clipped(ui, rect.left_top() + egui::vec2(46.0, 13.0), &bm.address, 14.0, theme::HEADER, text_w),
+                }
                 if resp.clicked() {
                     self.config.server_address = bm.address.clone();
                     self.config.server_password = bm.password.clone();
@@ -137,10 +119,15 @@ impl RustTalkApp {
                     self.config.server_password = bm.password.clone();
                     self.start_connect();
                 }
-                resp.on_hover_text("Click = fill in  -  double click = connect  -  right click = remove")
+                resp.on_hover_text(format!("{}\nClick = fill in  -  double click = connect  -  right click = rename or remove", bm.address))
                     .context_menu(|ui| {
                         ui.set_width(160.0);
                         ui.spacing_mut().item_spacing.y = 2.0;
+                        if theme::menu_item(ui, icons::regular::PENCIL_SIMPLE, "Rename", false).clicked() {
+                            self.renaming_bookmark = Some((i, bm.nickname().unwrap_or_default().to_string()));
+                            ui.close_menu();
+                        }
+                        theme::menu_separator(ui);
                         if theme::menu_item(ui, icons::regular::TRASH, "Remove", true).clicked() {
                             remove_idx = Some(i);
                             ui.close_menu();
@@ -150,7 +137,120 @@ impl RustTalkApp {
         });
         if let Some(i) = remove_idx {
             self.config.bookmarks.remove(i);
+            self.renaming_bookmark = None;
             self.config.save();
+        }
+    }
+
+    /// Inline nickname editor: Enter or clicking away saves, Escape cancels.
+    fn rename_row(&mut self, ui: &mut egui::Ui, i: usize) {
+        let Some((_, text)) = self.renaming_bookmark.as_mut() else { return };
+        let address = self.config.bookmarks.get(i).map(|b| b.address.clone()).unwrap_or_default();
+        let resp = ui.add_sized(
+            [ui.available_width(), 30.0],
+            egui::TextEdit::singleline(text)
+                .hint_text(format!("Nickname for {address}"))
+                .char_limit(crate::config::MAX_NICKNAME_CHARS),
+        );
+        ui.label(egui::RichText::new("Enter = save  -  Esc = cancel  -  empty = show address").size(11.0).color(theme::MUTED));
+        ui.add_space(4.0);
+        if ui.input(|inp| inp.key_pressed(egui::Key::Escape)) {
+            self.renaming_bookmark = None;
+        } else if resp.lost_focus() {
+            // The connect form must not also act on this Enter.
+            ui.input_mut(|inp| inp.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+            if let Some((_, text)) = self.renaming_bookmark.take() {
+                if let Some(bm) = self.config.bookmarks.get_mut(i) {
+                    bm.set_nickname(&text);
+                    self.config.save();
+                }
+            }
+        } else if !resp.has_focus() {
+            resp.request_focus();
+        }
+    }
+
+    /// Error panel for a failed join: icon, title, explanation, actions, raw details.
+    fn join_error_panel(&mut self, ui: &mut egui::Ui, width: f32) {
+        let Some(err) = self.join_error.clone() else { return };
+        let color = if err.is_fatal() { theme::RED } else { theme::YELLOW };
+        egui::Frame::default()
+            .fill(color.gamma_multiply(0.12))
+            .stroke(egui::Stroke::new(1.0_f32, color.gamma_multiply(0.7)))
+            .corner_radius(10.0)
+            .inner_margin(egui::Margin::same(14))
+            .show(ui, |ui| {
+                ui.set_width(width);
+                ui.horizontal_top(|ui| {
+                    ui.label(egui::RichText::new(err.icon()).size(26.0).color(color));
+                    ui.add_space(6.0);
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(err.title()).strong().size(15.0).color(theme::HEADER));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if theme::ghost_button(ui, egui::RichText::new(icons::regular::X).color(theme::MUTED)).on_hover_text("Dismiss").clicked() {
+                                    self.join_error = None;
+                                    self.cert_warning = None;
+                                }
+                            });
+                        });
+                        ui.label(egui::RichText::new(err.explanation()).color(theme::TEXT));
+                        ui.label(egui::RichText::new(err.suggestion()).size(12.5).color(theme::MUTED));
+                        if err.kind == super::join_error::Kind::CertChanged {
+                            self.cert_actions(ui);
+                        }
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            for &action in err.actions() {
+                                if ui.button(action.label()).clicked() {
+                                    self.run_join_action(ui.ctx(), action);
+                                }
+                            }
+                            let caret = if err.details_open { icons::regular::CARET_DOWN } else { icons::regular::CARET_RIGHT };
+                            if theme::ghost_button(ui, egui::RichText::new(format!("{caret}  Details")).color(theme::MUTED)).clicked() {
+                                if let Some(e) = self.join_error.as_mut() {
+                                    e.details_open = !e.details_open;
+                                }
+                            }
+                        });
+                        if err.details_open {
+                            ui.label(egui::RichText::new(&err.raw).monospace().size(11.5).color(theme::MUTED));
+                        }
+                    });
+                });
+            });
+    }
+
+    /// Changed certificate: the only way on is an explicit trust decision.
+    fn cert_actions(&mut self, ui: &mut egui::Ui) {
+        let Some((addr, fp)) = self.cert_warning.clone() else { return };
+        ui.label(egui::RichText::new(format!("{addr}  {fp}")).monospace().size(11.0).color(theme::MUTED));
+        ui.horizontal(|ui| {
+            if theme::danger_button(ui, "Trust the new identity and connect").clicked() {
+                self.config.known_servers.insert(addr.clone(), fp.clone());
+                self.config.save();
+                self.cert_warning = None;
+                self.start_connect();
+            }
+            if ui.button("Cancel").clicked() {
+                self.cert_warning = None;
+                self.join_error = None;
+            }
+        });
+    }
+
+    fn run_join_action(&mut self, ctx: &egui::Context, action: super::join_error::Action) {
+        use super::join_error::Action;
+        match action {
+            Action::Retry => self.start_connect(),
+            Action::EditPassword => {
+                self.config.server_password = None;
+                self.focus_password = true;
+            }
+            Action::ShowUpdate => self.open_settings(SettingsPage::About),
+            Action::OpenReleases => {
+                ctx.open_url(egui::OpenUrl::new_tab(format!("https://github.com/{}/releases/latest", crate::update::REPO)));
+            }
         }
     }
 
@@ -168,7 +268,11 @@ impl RustTalkApp {
         ui.add_space(4.0);
         theme::caption(ui, "Password (optional)");
         let mut pw = self.config.server_password.clone().unwrap_or_default();
-        if ui.add_sized([w, 32.0], egui::TextEdit::singleline(&mut pw).password(true)).changed() {
+        let pw_resp = ui.add_sized([w, 32.0], egui::TextEdit::singleline(&mut pw).password(true));
+        if std::mem::take(&mut self.focus_password) {
+            pw_resp.request_focus();
+        }
+        if pw_resp.changed() {
             self.config.server_password = if pw.is_empty() { None } else { Some(pw) };
         }
         ui.add_space(12.0);
@@ -216,13 +320,22 @@ impl RustTalkApp {
         ui.horizontal(|ui| {
             if theme::ghost_button(ui, format!("{}  Save server", icons::regular::BOOKMARK_SIMPLE)).clicked() {
                 let addr = self.config.server_address.trim().to_string();
-                if !addr.is_empty() && !self.config.bookmarks.iter().any(|b| b.address == addr) {
-                    self.config.bookmarks.push(ServerBookmark {
-                        name: addr.clone(),
-                        address: addr,
-                        password: self.config.server_password.clone(),
-                    });
-                    self.config.save();
+                if !addr.is_empty() {
+                    // Saving opens the nickname editor (also for an already saved address).
+                    let idx = match self.config.bookmarks.iter().position(|b| b.address == addr) {
+                        Some(i) => i,
+                        None => {
+                            self.config.bookmarks.push(ServerBookmark {
+                                name: String::new(),
+                                address: addr,
+                                password: self.config.server_password.clone(),
+                            });
+                            self.config.save();
+                            self.config.bookmarks.len() - 1
+                        }
+                    };
+                    let nick = self.config.bookmarks[idx].nickname().unwrap_or_default().to_string();
+                    self.renaming_bookmark = Some((idx, nick));
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -232,4 +345,10 @@ impl RustTalkApp {
             });
         });
     }
+}
+
+/// One line of text, cut off at `max_w` so long names don't run over the row.
+fn paint_clipped(ui: &egui::Ui, pos: egui::Pos2, text: &str, size: f32, color: egui::Color32, max_w: f32) {
+    let clip = egui::Rect::from_min_size(pos, egui::vec2(max_w.max(0.0), size * 1.6));
+    ui.painter().with_clip_rect(clip.intersect(ui.clip_rect())).text(pos, egui::Align2::LEFT_TOP, text, egui::FontId::proportional(size), color);
 }

@@ -19,6 +19,7 @@ mod connect;
 mod connection_ui;
 #[cfg(debug_assertions)]
 mod dev_input;
+mod join_error;
 mod lifecycle;
 mod media_ui;
 mod moderation_ui;
@@ -373,6 +374,12 @@ pub struct RustTalkApp {
     server_fingerprint: String,
     /// The server's certificate changed: (address, new fingerprint).
     cert_warning: Option<(String, String)>,
+    /// Last failed join, shown as a panel on the connect screen.
+    join_error: Option<join_error::JoinError>,
+    /// Focus the password field on the next frame.
+    focus_password: bool,
+    /// Saved server being renamed: (index, text being edited).
+    renaming_bookmark: Option<(usize, String)>,
     /// Not installed yet: the whole window is the install screen.
     install_screen: Option<lifecycle::InstallScreen>,
     update: lifecycle::UpdateState,
@@ -506,6 +513,9 @@ impl RustTalkApp {
             connect_on_start,
             server_fingerprint: String::new(),
             cert_warning: None,
+            join_error: None,
+            focus_password: false,
+            renaming_bookmark: None,
             install_screen: (crate::install::mode() == crate::install::Mode::NotInstalled).then(lifecycle::InstallScreen::new),
             update: lifecycle::UpdateState::new(),
             toast_tx,
@@ -548,6 +558,7 @@ impl RustTalkApp {
             self.config.server_address = addr;
             self.config.invite = code;
         }
+        self.join_error = None;
         self.set_status(format!("Connecting to {}...", self.config.server_address));
         self.control.set_vad_threshold(self.config.vad_threshold);
         self.control
@@ -669,13 +680,15 @@ impl RustTalkApp {
             self.reconnect = None;
             self.disconnect();
             self.cert_warning = Some((net::normalize_addr(&self.config.server_address), fp));
-            self.set_error("The server's identity changed - see the warning above");
+            self.join_error = Some(join_error::JoinError::classify(&reason));
+            self.set_error("The server's identity changed");
             return;
         }
         // Kicked or banned: no automatic reconnect.
         if let Some(why) = self.removed.take() {
             self.reconnect = None;
             self.disconnect();
+            self.join_error = Some(join_error::JoinError::classify(&why));
             self.set_error(why);
             return;
         }
@@ -694,8 +707,14 @@ impl RustTalkApp {
                 deafened: self.control.self_deafened.load(Ordering::Relaxed),
             });
         }
+        let failure = join_error::JoinError::classify(&reason);
+        // Wrong password, ban, version mismatch: retrying won't help.
+        if failure.is_fatal() {
+            self.reconnect = None;
+        }
         self.disconnect();
         let Some(rc) = self.reconnect.as_mut() else {
+            self.join_error = Some(failure);
             self.set_error(format!("Disconnected: {reason}"));
             return;
         };
@@ -704,6 +723,7 @@ impl RustTalkApp {
         }
         if rc.attempt > MAX_RECONNECT_ATTEMPTS {
             self.reconnect = None;
+            self.join_error = Some(join_error::JoinError::classify(&format!("{reason} (gave up reconnecting)")));
             self.set_error(format!("Disconnected: {reason} (gave up reconnecting)"));
             return;
         }
@@ -947,6 +967,7 @@ impl RustTalkApp {
                 }
                 self.server_fingerprint = fingerprint;
                 self.cert_warning = None;
+                self.join_error = None;
                 self.open_permissions = open_permissions;
                 self.config.invite = None; // used
                 self.server_settings = settings;

@@ -7,11 +7,28 @@ use serde::{Deserialize, Serialize};
 /// Ein gespeicherter Server im Lesezeichen-Bereich des Startfensters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerBookmark {
+    /// Nickname; empty (or the address, as older versions saved) means none.
+    #[serde(default)]
     pub name: String,
     pub address: String,
     /// Achtung: Klartext in der lokalen Config-Datei (bewusst lokal-first).
     #[serde(default)]
     pub password: Option<String>,
+}
+
+/// Longest nickname for a saved server.
+pub const MAX_NICKNAME_CHARS: usize = 48;
+
+impl ServerBookmark {
+    pub fn nickname(&self) -> Option<&str> {
+        let name = self.name.trim();
+        (!name.is_empty() && name != self.address.trim()).then_some(name)
+    }
+
+    /// Stores a trimmed, length-bounded nickname (empty clears it).
+    pub fn set_nickname(&mut self, name: &str) {
+        self.name = name.trim().chars().take(MAX_NICKNAME_CHARS).collect();
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -361,6 +378,37 @@ mod tests {
         assert_eq!(back.invite, None, "invite codes are not saved");
         assert_eq!(back.known_servers.get("10.0.0.5:7331").map(String::as_str), Some("AB:CD"));
         assert_eq!(back.user_volumes.get("anna"), Some(&1.5));
+    }
+
+    #[test]
+    fn bookmark_nicknames() {
+        let text = r#"
+            [[bookmarks]]
+            name = "gw01.el.k0mplex.de"
+            address = "gw01.el.k0mplex.de"
+
+            [[bookmarks]]
+            address = "10.0.0.5:7331"
+
+            [[bookmarks]]
+            name = "Jakob's Devbude"
+            address = "gw02.example.org"
+            password = "pw"
+        "#;
+        let mut cfg: ClientConfig = toml::from_str(text).unwrap();
+        assert_eq!(cfg.bookmarks.len(), 3);
+        assert_eq!(cfg.bookmarks[0].nickname(), None, "old bookmarks saved the address as name");
+        assert_eq!(cfg.bookmarks[1].nickname(), None, "name is optional");
+        assert_eq!(cfg.bookmarks[2].nickname(), Some("Jakob's Devbude"));
+
+        cfg.bookmarks[1].set_nickname("  Home  ");
+        cfg.bookmarks[2].set_nickname("");
+        cfg.bookmarks[0].set_nickname(&"x".repeat(200));
+        let back: ClientConfig = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.bookmarks[1].nickname(), Some("Home"));
+        assert_eq!(back.bookmarks[2].nickname(), None);
+        assert_eq!(back.bookmarks[2].password.as_deref(), Some("pw"));
+        assert_eq!(back.bookmarks[0].name.chars().count(), MAX_NICKNAME_CHARS);
     }
 
     #[test]
