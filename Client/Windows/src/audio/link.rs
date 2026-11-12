@@ -267,6 +267,9 @@ impl Pinger {
     ) -> Option<Sample> {
         let pos = self.pending.iter().position(|p| p.id == id)?;
         let p = self.pending[pos];
+        if now.saturating_duration_since(p.at) >= PENDING_TIMEOUT {
+            return None; // too late to count as a ping
+        }
         self.pending.drain(..=pos); // older pings are lost or late
         Some(Sample {
             at: now,

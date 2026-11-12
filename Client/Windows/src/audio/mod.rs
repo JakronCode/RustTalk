@@ -198,6 +198,10 @@ impl AudioEngine {
             sfx: sfx.clone(),
         };
         let stop = Arc::new(AtomicBool::new(false));
+        // Any early return below stops the threads already spawned.
+        let mut guard = StopGuard(Some(stop.clone()));
+        // Bound now, not in the thread: a late-starting thread must not adopt a newer session.
+        let session = control.link.session();
         let share_udp = udp.try_clone().context("UDP-Socket klonen")?;
         let render_tap: screen_audio::RenderTap = Arc::new(Mutex::new(None));
         let mixer: SharedMixer = Arc::new(Mutex::new(HashMap::new()));
@@ -213,7 +217,7 @@ impl AudioEngine {
                 let stop = stop.clone();
                 let cipher = cipher.clone();
                 let link = control.link.clone();
-                move || recv_loop(recv_udp, token, mixer, talking, stop, cipher, link)
+                move || recv_loop(recv_udp, token, mixer, talking, stop, cipher, link, session)
             })
             .context("Empfangsthread starten")?;
 
@@ -240,6 +244,7 @@ impl AudioEngine {
         let output = playback::build_output_stream(output_device, mixer, control, local_muted, user_volumes, sfx, render_prod, render_tap.clone())
             .context("Audio-Ausgabe konnte nicht gestartet werden")?;
 
+        guard.0 = None;
         Ok(Self { _input: input, _output: output, stop, udp: share_udp, token, cipher, render_tap, shared })
     }
 
@@ -273,6 +278,17 @@ impl Drop for AudioEngine {
     }
 }
 
+/// Sets the stop flag when dropped while still armed.
+struct StopGuard(Option<Arc<AtomicBool>>);
+
+impl Drop for StopGuard {
+    fn drop(&mut self) {
+        if let Some(stop) = &self.0 {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Sends an encrypted ping every [`link::PING_INTERVAL`].
 fn send_ping(udp: &UdpSocket, token: u64, cipher: &rusttalk_shared::secure::PacketCipher, link: &link::LinkStats, pinger: &mut link::Pinger) {
     let now = Instant::now();
@@ -289,6 +305,7 @@ fn send_ping(udp: &UdpSocket, token: u64, cipher: &rusttalk_shared::secure::Pack
 
 /// Empfangsschleife: UDP-Pakete in die Jitter-Buffer der Sprecher einsortieren;
 /// sends the pings and evaluates the pongs.
+#[allow(clippy::too_many_arguments)]
 fn recv_loop(
     udp: UdpSocket,
     token: u64,
@@ -297,11 +314,12 @@ fn recv_loop(
     stop: Arc<AtomicBool>,
     cipher: Arc<rusttalk_shared::secure::PacketCipher>,
     link: Arc<link::LinkStats>,
+    session: u64,
 ) {
     let mut buf = [0u8; rusttalk_shared::audio_packet::MAX_PACKET_LEN];
     let mut pinger = link::Pinger::default();
-    let session = link.session();
-    while !stop.load(Ordering::Relaxed) {
+    // Also ends when a newer session starts, even if nothing arrives (no orphaned pinger).
+    while !stop.load(Ordering::Relaxed) && link.session() == session {
         send_ping(&udp, token, &cipher, &link, &mut pinger);
         match udp.recv(&mut buf) {
             Ok(n) => {
@@ -382,5 +400,55 @@ mod shortcut_audio_tests {
         control.self_deafened.store(false, Ordering::Relaxed);
         control.self_muted.store(true, Ordering::Relaxed);
         assert!(!control.should_transmit(true));
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    /// Runs `recv_loop` on a socket that never gets an answer; returns its join handle.
+    fn spawn_recv(link: Arc<link::LinkStats>, session: u64) -> std::thread::JoinHandle<()> {
+        let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+        udp.connect(peer.local_addr().unwrap()).unwrap();
+        udp.set_read_timeout(Some(std::time::Duration::from_millis(50))).unwrap();
+        let cipher = Arc::new(rusttalk_shared::secure::PacketCipher::new(&[7u8; 32]).unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        std::thread::spawn(move || {
+            let _peer = peer;
+            recv_loop(udp, 1, Arc::default(), Arc::default(), stop, cipher, link, session)
+        })
+    }
+
+    fn joins_soon(h: std::thread::JoinHandle<()>) -> bool {
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        while !h.is_finished() {
+            if Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        h.join().is_ok()
+    }
+
+    #[test]
+    fn receiver_stops_on_new_session_without_traffic() {
+        let link = Arc::new(link::LinkStats::default());
+        let h = spawn_recv(link.clone(), link.session());
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!h.is_finished(), "runs while its session is current");
+        link.reset();
+        assert!(joins_soon(h), "no orphaned pinger after a new session");
+    }
+
+    #[test]
+    fn late_starting_receiver_keeps_its_old_session() {
+        let link = Arc::new(link::LinkStats::default());
+        let bound = link.session(); // bound at engine start
+        link.reset(); // reconnect before the thread got scheduled
+        let h = spawn_recv(link.clone(), bound);
+        assert!(joins_soon(h), "must not adopt the newer session");
+        assert_eq!(link.accept(link.session(), 1), Some(true), "new window untouched");
     }
 }
