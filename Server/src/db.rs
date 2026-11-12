@@ -53,7 +53,7 @@ fn parse_kind(s: &str) -> ChannelKind {
 
 impl Db {
     pub fn open(path: &str) -> Result<Self> {
-        let conn = Connection::open(path).with_context(|| format!("SQLite oeffnen: {path}"))?;
+        let conn = Connection::open(path).with_context(|| format!("Could not open SQLite database {path}"))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS channels (
@@ -214,11 +214,11 @@ impl Db {
             // Protocol v7 blob (before the server message fields): migrate.
             Err(_) if bincode::deserialize::<SettingsV7>(&b).is_ok() => {
                 let old: SettingsV7 = bincode::deserialize(&b).expect("checked above");
-                tracing::info!("Einstellungen aus v7 migriert");
+                tracing::info!("Migrated settings from v7");
                 Some(old.into())
             }
             Err(e) => {
-                tracing::warn!("Gespeicherte Einstellungen unlesbar, nutze Config: {e}");
+                tracing::warn!("Saved settings unreadable, using config: {e}");
                 None
             }
         }))

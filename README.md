@@ -74,6 +74,16 @@ Details (German): [Konzept.md](Konzept.md) · test log: [test.md](test.md) · ro
 
 ## Setup
 
+### Development quick start (Linux/macOS)
+
+```bash
+make            # list all targets
+make setup      # check build tools, fetch crates
+make setup-server && make server   # local dev server on 127.0.0.1:7331, data in .dev/server
+make client     # client with its own config in .dev/client
+make test       # all tests, serial like CI
+```
+
 ### Server (Debian/Linux)
 
 Requirements: Rust (1.85+), systemd.
@@ -200,7 +210,9 @@ git tag v0.4.0 && git push origin v0.4.0
 
 The [build workflow](.github/workflows/build.yml) tests and builds both client and
 server on native Windows x64, Windows ARM64, Linux x64, and Linux ARM64 runners.
-Pull requests and main/master pushes run the same build used by releases.
+Pushes to main/master run the same build used by releases. Pull requests only run
+the [test workflow](.github/workflows/test.yml): tests and clippy on Linux x64 and
+Windows x64, without release builds or packages.
 Integration tests run serially because their server fixtures share TLS files.
 The [release workflow](.github/workflows/release.yml) verifies package versions
 and publishes only after the entire matrix succeeds.

@@ -16,8 +16,8 @@ use tracing::info;
 use crate::state::SharedState;
 
 pub async fn run_udp(state: SharedState, bind: &str) -> Result<()> {
-    let socket = UdpSocket::bind(bind).await.with_context(|| format!("UDP-Bind an {bind}"))?;
-    info!("UDP-Audio lauscht auf {bind}");
+    let socket = UdpSocket::bind(bind).await.with_context(|| format!("Could not bind UDP to {bind}"))?;
+    info!("UDP audio listening on {bind}");
 
     let mut buf = vec![0u8; MAX_PACKET_LEN];
 

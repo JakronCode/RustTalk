@@ -47,10 +47,10 @@ async fn main() -> anyhow::Result<()> {
 
     let config_path = args.first().cloned().unwrap_or_else(|| "server.toml".to_string());
     let cfg = ServerConfig::load(&config_path)
-        .with_context(|| format!("Konfiguration '{config_path}' konnte nicht geladen werden"))?;
+        .with_context(|| format!("Could not load config '{config_path}'"))?;
 
     info!(
-        "Starte RustTalk-Server {} '{}' (max. {} Clients)",
+        "Starting RustTalk server {} '{}' (max. {} clients)",
         update::VERSION, cfg.server_name, cfg.max_clients
     );
     let state = Arc::new(Mutex::new(State::new(&cfg)?));
@@ -94,8 +94,8 @@ async fn main() -> anyhow::Result<()> {
                             tracing::warn!("{notice}");
                         }
                     }
-                    Ok(Ok(None)) => info!("Server ist aktuell ({})", update::VERSION),
-                    Ok(Err(e)) => tracing::warn!("Update-Pruefung fehlgeschlagen: {e:#}"),
+                    Ok(Ok(None)) => info!("Server is up to date ({})", update::VERSION),
+                    Ok(Err(e)) => tracing::warn!("Update check failed: {e:#}"),
                     Err(_) => {}
                 }
             }
@@ -110,8 +110,8 @@ async fn main() -> anyhow::Result<()> {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let (cert, key) = tls::load_or_create(&cert_dir)?;
-    info!("TLS-Fingerprint: {}", rusttalk_shared::secure::fingerprint(&cert));
-    let tls = rusttalk_shared::secure::server_config(cert, key).context("TLS-Konfiguration")?;
+    info!("TLS fingerprint: {}", rusttalk_shared::secure::fingerprint(&cert));
+    let tls = rusttalk_shared::secure::server_config(cert, key).context("TLS configuration")?;
     let tcp = tcp::run_listener(state.clone(), &cfg.bind_address, tls);
     let udp = udp::run_udp(state.clone(), &cfg.bind_address);
     tokio::try_join!(tcp, udp)?;
