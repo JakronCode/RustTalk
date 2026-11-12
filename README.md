@@ -2,6 +2,7 @@
 
 Lightweight voice chat in Rust — a Discord-style client with a TeamSpeak-style server.
 **Local first:** no online accounts, no cloud. Client: Windows (egui), server: Linux (Debian, systemd).
+Website: [rusttalk.com](https://rusttalk.com) (source in [website/](website/))
 
 ![Status](https://img.shields.io/badge/status-MVP-green)
 
@@ -12,7 +13,7 @@ Lightweight voice chat in Rust — a Discord-style client with a TeamSpeak-style
 ### Working
 
 - **Echo cancellation** (WebRTC AEC3, pure Rust): speakers instead of headphones work
-- **Encryption:** control connection over TLS (the server's own certificate, pinned by the client on first connect like SSH; a changed certificate is refused with a warning), voice and screen audio encrypted with ChaCha20-Poly1305 (per-session key)
+- **Encryption:** control connection over TLS (the server's own certificate: on first connect the client shows its fingerprint and asks before sending anything, then pins it like SSH; a changed certificate is refused with a warning), voice and screen audio encrypted with ChaCha20-Poly1305 (per-session key)
 - **Voice:** push-to-talk (optionally **global**, also while RustTalk is in the background; keys or side mouse buttons) + voice activity (VAD using RMS *and* RNNoise speech probability), Opus 64 kbit/s 48 kHz/20 ms over UDP with in-band FEC, jitter buffer with FEC/PLC, sinc resampler for any microphone sample rate; click "Voice Connected" for connection stats (ping graph of the last 4 minutes, jitter, inbound/outbound packet loss)
 - **Automatic gain control** (AGC + limiter): quiet microphones are boosted, loud ones tamed — can be turned off
 - **AI noise suppression** (RNNoise via `nnnoiseless`) — can be turned off
@@ -31,7 +32,7 @@ Lightweight voice chat in Rust — a Discord-style client with a TeamSpeak-style
 - **Video (H.264 30 fps over TCP, OpenH264):** webcam with device selection + live preview, share a screen or a single window via a picker ("Applications" / "Entire Screen") **with computer audio** (WASAPI loopback, your RustTalk voices are filtered out); camera and screen at the same time. **Watching is opt-in:** other people's streams show as a "Watch Stream" / "Watch Camera" card, and the server only sends video to those who clicked it ("Stop watching" in the tile's corner) - no forced bandwidth. Click a tile for fullscreen with a member bar (green dot while talking). Quality levels "Best" (1440p screen / 1080p camera, up to ~10 Mbit/s), "High" (1080p / 720p, ~6 Mbit/s) and "Balanced" (720p / 540p, ~2.5 Mbit/s); monitors are captured with DXGI Desktop Duplication, pictures scaled with SIMD, OpenH264 with its assembly (~25 ms per 1440p frame from capture to H.264 instead of ~180 ms); viewers who join late or lose frames ask the sender for a keyframe
 - **Server settings** (in the app): name, icon, welcome message and rules in the lobby, **join/leave messages** in an announcement text channel, AFK notice template, message of the day, **auto AFK mover** (muted users are moved after N minutes, default 10) — roles/bans/invites as WIP
 - **Report a Bug** button that opens a pre-filled GitHub issue
-- **Server:** single binary + `server.toml`, systemd service, one port (7331 TCP+UDP), optional password, keepalive/timeouts for dead connections
+- **Server:** single binary + `server.toml`, systemd service or hardened Docker image (amd64/arm64), one port (7331 TCP+UDP), optional password, keepalive/timeouts for dead connections
 
 ### Not yet (WIP)
 
@@ -103,7 +104,7 @@ With persistence enabled, the channels in `server.toml` are only used on the ver
 
 Open port **7331** (TCP+UDP) in the firewall if nftables/ufw is active.
 
-Prebuilt binaries are attached to the [GitHub releases](https://github.com/JakronCode/RustTalk/releases) (`rusttalk-server-linux-x86_64.tar.gz`).
+Prebuilt binaries are attached to the [GitHub releases](https://github.com/rusttalkcrew/RustTalk/releases) (`rusttalk-server-linux-x86_64.tar.gz`).
 
 **Updates:** the server looks for a newer release on start and once a day (`check_updates` in `server.toml`, on by default) and shows admins "Server update available" in the client. It never installs anything by itself - the service user cannot write its own program. To update, run on the server:
 
@@ -114,11 +115,81 @@ sudo /opt/rusttalk/server/bin/rusttalk-server update            # download, SHA-
 
 The previous version stays next to it as `rusttalk-server.old` (to go back: `sudo mv rusttalk-server.old rusttalk-server && sudo systemctl restart rusttalk-server`). `--no-restart` skips the restart; `rusttalk-server --version` prints the version. Works the same for a Windows server (`rusttalk-server.exe update`, restart it yourself).
 
+### Server (Docker)
+
+The official image is `ghcr.io/rusttalkcrew/rusttalk-server` (linux/amd64 and linux/arm64), built from [Server/Dockerfile](Server/Dockerfile) by the release workflow. It is distroless: no shell, no package manager, the program owned by root and the server running as user 65532. Pulling it contacts GitHub's container registry (`ghcr.io`); the server itself makes no connections beyond the ones it makes without Docker (the GitHub release check).
+
+Setup with the [compose example](Server/deploy/docker-compose.yml) (commands work in bash and fish):
+
+```bash
+mkdir rusttalk && cd rusttalk
+curl -fsSLO https://raw.githubusercontent.com/rusttalkcrew/RustTalk/main/Server/deploy/docker-compose.yml
+touch admin_password.txt && chmod 600 admin_password.txt && openssl rand -base64 32 > admin_password.txt
+sudo chown 65532:65532 admin_password.txt && sudo chmod 0400 admin_password.txt
+docker compose up -d
+docker compose logs rusttalk        # shows the TLS fingerprint for your users
+```
+
+- **Admin password:** the container refuses to start without it. It is read from the file named by `RUSTTALK_ADMIN_PASSWORD_FILE` (the compose secret above): one line, at least 16 characters and at most 1024 bytes. It never goes into `server.toml` or the logs. Compose mounts the file as it is (it ignores `uid`/`mode` outside Swarm), so the container user 65532 must be able to read it: the `chown` above, or keep it yours and grant read access with `setfacl -m u:65532:r admin_password.txt`. Read it back with `sudo cat admin_password.txt`.
+- **Admin login limits:** failed password claims back off per source IP (1 second up to 60 seconds), including reconnects. At most 1024 sources are remembered for five minutes, with a global budget of ten attempts per second. Successful login clears that source's failures. Users behind the same NAT share the limit.
+- **No open mode in Docker:** unlike a bare server, a container never lets the first visitor take over. Nobody is admin until someone enters the admin password under Server Settings > Roles.
+- **Ports:** publish 7331 **TCP and UDP**. TCP carries login and chat, UDP carries voice: without the UDP mapping (or with UDP blocked by a firewall) people can log in but nobody hears anyone.
+- **Hardening:** the example runs with a read-only root filesystem, `cap_drop: [ALL]`, `no-new-privileges` and a small `/tmp` tmpfs. Never mount the Docker socket into the RustTalk container.
+- **Health and stop:** `HEALTHCHECK` runs `rusttalk-server --healthcheck`, which only checks that the TCP listener accepts a connection (no login). `docker stop` sends SIGTERM; the server closes the database cleanly and exits.
+
+**Volume layout** (`/data`, the named volume `rusttalk_rusttalk-data`, directory mode 0700, everything owned by 65532):
+
+| File | Content |
+|---|---|
+| `server.toml` | Created on the first start (mode 0600) and never overwritten. Edit it while the server is stopped |
+| `rusttalk.db` (+ `-wal`/`-shm` while running) | Channels, chat history, roles, bans, invites, settings |
+| `tls-cert.der`, `tls-key.der` | The server's certificate and private key (mode 0600). Clients pin it: losing it means every user sees a "certificate changed" warning |
+
+Back up the whole volume while the server is stopped (the archive contains the private key, keep it private):
+
+```bash
+docker compose stop rusttalk
+docker run --rm -v rusttalk_rusttalk-data:/data:ro -v $PWD:/backup debian:trixie-slim sh -c 'set -eu; umask 077; archive=$(mktemp /backup/.rusttalk-backup.XXXXXX); tar -czf "$archive" -C /data .; mv -f "$archive" /backup/rusttalk-data.tgz'
+docker compose start rusttalk
+```
+
+Restore the same way with `tar -xzpf /backup/rusttalk-data.tgz -C /data` (mount the volume read-write; running as root keeps the 65532 ownership). If you use a host directory instead of a named volume, give it to the container user first: `sudo chown -R 65532:65532 ./data && sudo chmod 700 ./data`.
+
+**Updates:** the server still tells admins "Server update available" in the client (`check_updates`), but `rusttalk-server update` is disabled in the container: the image is replaced instead.
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+Tags: `X.Y.Z` never changes, `X.Y` (used by the example) moves to new patch releases, `latest` moves to every release, including new minor versions that may refuse older clients. To freeze an exact build, pin its digest (shown in the release workflow summary):
+
+```bash
+docker buildx imagetools inspect ghcr.io/rusttalkcrew/rusttalk-server:0.10
+# then in docker-compose.yml: image: ghcr.io/rusttalkcrew/rusttalk-server:0.10@sha256:<digest>
+```
+
+Each image carries build provenance and an SBOM (`docker buildx imagetools inspect <image> --format '{{json .Provenance}}'`, or `.SBOM`).
+
+**Automatic updates (opt-in):** [docker-compose.watchtower.yml](Server/deploy/docker-compose.watchtower.yml) adds [Watchtower](https://github.com/nicholas-fedor/watchtower) (the maintained fork; the original `containrrr/watchtower` is archived), which checks once a day and only updates containers labelled `com.centurylinklabs.watchtower.enable=true`:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.watchtower.yml up -d
+```
+
+Know the trade-offs before you turn it on:
+
+- Whatever the tag points to is installed without review. A compromised release or registry account would reach your server within a day. Keep the `X.Y` tag (patch releases only), never `latest`; a digest pin cannot auto-update at all.
+- Watchtower needs the Docker socket, which is root on the host. Anyone who controls Watchtower or its image controls the machine. Only Watchtower gets the socket, never RustTalk.
+- An update restarts the server and drops everyone connected for a moment (the schedule is 04:00).
+- Watchtower contacts `ghcr.io` once a day to look for new images.
+
+Build and test the image yourself: `make docker-build` (or `docker build -f Server/Dockerfile -t rusttalk-server .`) and `make docker-test`.
+
 ### Client (Windows) – install
 
-Download `rusttalk-windows.exe` from the [latest release](https://github.com/JakronCode/RustTalk/releases/latest) and run it. It installs itself for your user (no admin rights): `%LOCALAPPDATA%\Programs\RustTalk`, Start menu entry (optional desktop shortcut), settings in `%APPDATA%\RustTalk`. Uninstall via Windows **Apps & features**.
+Download `rusttalk-windows.exe` from the [latest release](https://github.com/rusttalkcrew/RustTalk/releases/latest) and run it. It installs itself for your user (no admin rights): `%LOCALAPPDATA%\Programs\RustTalk`, Start menu entry (optional desktop shortcut), settings in `%APPDATA%\RustTalk`. Uninstall via Windows **Apps & features**.
 
-**Updates:** the installed app checks GitHub for a newer release on start (Settings > About > Updates) and installs it on one click (download, SHA-256 check, restart).
+**Updates:** the installed app checks GitHub for a newer release on start (Settings > About > Updates). A newer release shows an "Update" notice in the top right corner; clicking it (or Install in Settings > About) asks for confirmation, then downloads it, checks its SHA-256 checksum and restarts.
 
 Command line (for admins/scripts): `rusttalk-windows.exe --install [--desktop-shortcut] [--no-start]`, `rusttalk.exe --uninstall [--quiet] [--remove-settings]`, `rusttalk.exe --update`.
 
@@ -216,7 +287,12 @@ the [test workflow](.github/workflows/test.yml): tests and clippy on Linux x64 a
 Windows x64, without release builds or packages.
 Integration tests run serially because their server fixtures share TLS files.
 The [release workflow](.github/workflows/release.yml) verifies package versions
-and publishes only after the entire matrix succeeds.
+and publishes only after the entire matrix succeeds. It also builds the server
+image for linux/amd64 and linux/arm64, smoke-tests it and pushes it to
+`ghcr.io/rusttalkcrew/rusttalk-server` as `vX.Y.Z`, `X.Y.Z`, `X.Y` and `latest` (pull
+requests only build and test it, see the [Docker workflow](.github/workflows/docker.yml)).
+When the minor version changes, also update the image tag in
+`Server/deploy/docker-compose.yml`; the version check refuses the release otherwise.
 
 Linux clients are `rusttalk-linux-x86_64.AppImage` and
 `rusttalk-linux-aarch64.AppImage`, with checksums. Built on Ubuntu 24.04, they bundle
@@ -250,6 +326,8 @@ powershell -ExecutionPolicy Bypass -File Client\Windows\Test_Scripts\e2e_server.
 # Linux: server tests + local E2E smoke test
 bash Server/Test_Scripts/run_tests.sh
 bash Server/Test_Scripts/e2e_local.sh
+# Docker image: build + container smoke test (needs Docker)
+make docker-test
 ```
 
 ## Project structure
@@ -272,7 +350,7 @@ bash Server/Test_Scripts/e2e_local.sh
 
 ## Known limitations
 
-- The server certificate is self-signed: compare the fingerprint in the server log (`TLS-Fingerprint: ...`) with Settings > Advanced on first connect if you want to rule out a man in the middle
+- The server certificate is self-signed: on first connect RustTalk shows its SHA-256 fingerprint and asks before sending anything (name, identity, password). Compare it with the `TLS fingerprint: ...` line in the server log to rule out a man in the middle. Once trusted it is pinned; a changed certificate is a hard stop
 - GIFs need one free GIPHY API key per server (developers.giphy.com), entered under Server Settings > Integrations
 - Video runs over the TCP control connection (H.264): fine in a LAN, on weak Wi-Fi pick "Balanced"
 - Natural voices use `ort` 2.0 release candidate `=2.0.0-rc.15` (no stable 2.0 exists yet; pinned exactly so builds don't change on their own). Switch to 2.0.0 once it is out

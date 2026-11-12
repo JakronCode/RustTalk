@@ -1,0 +1,19 @@
+# Caddy config for rusttalk.com (install as /etc/caddy/Caddyfile).
+# Caddy gets the TLS certificate itself and redirects port 80 to 443.
+rusttalk.com {
+	root * /var/www/rusttalk
+	file_server
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+	@img path /img/* /favicon.svg
+	header @img Cache-Control "public, max-age=86400"
+}
+
+www.rusttalk.com {
+	redir https://rusttalk.com{uri} permanent
+}

@@ -1,0 +1,14 @@
+# Allowlist: the image is built from the server sources only. Local data, keys,
+# secrets, databases and build output never reach the build context.
+*
+!Cargo.toml
+!Cargo.lock
+!shared/Cargo.toml
+!shared/src/
+!Server/Cargo.toml
+!Server/src/
+!Client/Windows/Cargo.toml
+**/*.der
+**/*.pem
+**/*.key
+**/*.db*

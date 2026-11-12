@@ -115,7 +115,7 @@ pub struct State {
     /// Last poke per (sender, target), for the cooldown.
     pokes: HashMap<(u64, u64), Instant>,
     moderation: crate::moderation::Moderation,
-    admin_password: Option<String>,
+    admin_auth: crate::admin_auth::AdminAuth,
     /// "Server update available ..." once the daily check found one.
     update_notice: Option<String>,
 }
@@ -152,7 +152,7 @@ impl State {
             gif_cache: Default::default(),
             pokes: HashMap::new(),
             moderation: Default::default(),
-            admin_password: cfg.admin_password.clone().filter(|p| !p.is_empty()),
+            admin_auth: crate::admin_auth::AdminAuth::new(cfg.admin_password.as_deref()),
             update_notice: None,
         };
 
@@ -260,7 +260,13 @@ impl State {
             );
             state.db = Some(db);
         }
+        state.moderation.set_closed(cfg.admin_password_required);
         Ok(state)
+    }
+
+    /// Closes the database cleanly (shutdown); later changes are not persisted.
+    pub fn close_db(&mut self) {
+        self.db = None;
     }
 
     /// Grundstruktur aus der Config (Spawn zuerst, dann Kategorien, dann
@@ -925,15 +931,15 @@ impl State {
         Ok((changed, (was_open != now_open).then_some(now_open)))
     }
 
-    /// Become admin: free while nobody is admin, else with `admin_password`.
+    /// Become admin: free while the server is open, else with `admin_password`.
     pub fn claim_admin(&mut self, client_id: u64, password: Option<&str>) -> Result<(Vec<(u64, Role)>, Option<bool>), String> {
         let c = self.clients.get(&client_id).ok_or("Client does not exist")?;
         if c.role == Role::Admin {
             return Err("You are already an admin".to_string());
         }
-        let ok = self.moderation.is_open() || (self.admin_password.is_some() && password == self.admin_password.as_deref());
-        if !ok {
-            return Err(if self.admin_password.is_some() { "Wrong admin password" } else { "This server already has an admin" }.to_string());
+        if !self.moderation.is_open() {
+            let source = c.ip.as_deref().unwrap_or(&c.uid);
+            self.admin_auth.verify(source, password, Instant::now()).map_err(str::to_string)?;
         }
         let (uid, name) = (c.uid.clone(), c.name.clone());
         let res = self.apply_role(&uid, &name, Role::Admin)?;

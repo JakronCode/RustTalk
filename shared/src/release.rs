@@ -4,7 +4,7 @@
 use sha2::{Digest, Sha256};
 
 /// Repository whose GitHub releases carry the updates.
-pub const REPO: &str = "JakronCode/RustTalk";
+pub const REPO: &str = "rusttalkcrew/RustTalk";
 
 /// "v0.4.0" / "0.4.0" -> (0, 4, 0). Pre-release suffixes are ignored.
 pub fn parse_version(s: &str) -> Option<(u64, u64, u64)> {

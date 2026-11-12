@@ -4710,7 +4710,7 @@ dependencies = [
 
 [[package]]
 name = "rusttalk-client"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "aec3",
  "anyhow",
@@ -4758,7 +4758,7 @@ dependencies = [
 
 [[package]]
 name = "rusttalk-server"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "bincode",
@@ -4771,6 +4771,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "socket2",
+ "subtle",
  "tokio",
  "tokio-rustls",
  "toml 0.8.23",
@@ -4781,7 +4782,7 @@ dependencies = [
 
 [[package]]
 name = "rusttalk-shared"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "bincode",
  "chacha20poly1305",

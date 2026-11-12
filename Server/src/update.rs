@@ -94,7 +94,10 @@ pub fn check() -> Result<Option<Release>> {
 }
 
 /// What admins see in the client when an update is waiting.
-pub fn notice(release: &Release) -> String {
+pub fn notice(release: &Release, in_container: bool) -> String {
+    if in_container {
+        return format!("Server update available: {VERSION} -> {}. Install it by pulling the new container image.", release.version);
+    }
     format!("Server update available: {VERSION} -> {}. Install it on the server with: sudo rusttalk-server update", release.version)
 }
 
@@ -178,6 +181,10 @@ fn restart_service() -> String {
 pub fn run_cli(args: &[String]) -> i32 {
     let only_check = args.iter().any(|a| a == "--check");
     let no_restart = args.iter().any(|a| a == "--no-restart");
+    if !only_check && crate::container::enabled() {
+        eprintln!("This server runs in a container: update it by pulling the new image (docker compose pull && docker compose up -d), not with 'rusttalk-server update'.");
+        return 1;
+    }
     if asset_name().is_none() {
         eprintln!("No server builds for this system in the releases - update by building from source.");
         return 1;
@@ -247,7 +254,9 @@ mod tests {
         // Releases before the server updater only had the tarball.
         let old = serde_json::json!({ "tag_name": "v0.6.1", "assets": [{ "name": "rusttalk-server-linux-x86_64.tar.gz", "browser_download_url": "x" }] });
         assert!(parse_release(&old, "rusttalk-server-linux-x86_64").is_none());
-        assert!(notice(&r).contains("0.7.0") && notice(&r).contains("rusttalk-server update"));
+        assert!(notice(&r, false).contains("0.7.0") && notice(&r, false).contains("rusttalk-server update"));
+        let boxed = notice(&r, true);
+        assert!(boxed.contains("0.7.0") && boxed.contains("container image") && !boxed.contains("sudo"), "{boxed}");
     }
 
     #[test]
