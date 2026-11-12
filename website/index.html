@@ -65,7 +65,7 @@ h2{font-size:clamp(28px,4vw,38px);margin:0 0 10px;letter-spacing:-.01em}
 .gallery figcaption{padding:12px 16px;color:var(--muted);font-size:14px}
 @media(max-width:760px){.gallery{grid-template-columns:1fr}}
 /* downloads */
-.dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:18px}
+.dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:18px}
 .dl .card{display:flex;flex-direction:column;gap:12px}
 .dl .card h3{display:flex;align-items:center;gap:10px;font-size:20px}
 .dl .card>.btn{align-self:flex-start}
@@ -108,7 +108,10 @@ footer a{color:var(--muted)}
 .dl-win,.dl-linux,.dl-mac,.dl-other{display:none}
 html[data-os=windows] .dl-win,html[data-os=linux] .dl-linux,html[data-os=mac] .dl-mac,html[data-os=other] .dl-other{display:inline-flex}
 .btn[aria-disabled=true]{opacity:.7;cursor:default;pointer-events:none}
-.soon{display:inline-block;font-size:12px;font-weight:700;padding:2px 8px;border-radius:99px;background:rgba(88,101,242,.2);color:#aab0ff;margin-left:6px}
+.dl .card.wide{grid-column:1/-1}
+.dl .card.wide .row{display:flex;flex-wrap:wrap;align-items:center;gap:14px 22px}
+.dl .card.wide .row p{flex:1 1 320px}
+.soon{white-space:nowrap;display:inline-block;font-size:12px;font-weight:700;padding:2px 8px;border-radius:99px;background:rgba(88,101,242,.2);color:#aab0ff;margin-left:6px}
 details.files{margin-top:auto;border-top:1px solid var(--line);padding-top:10px}
 details.files summary{cursor:pointer;color:var(--muted);font-size:14px;font-weight:600;user-select:none}
 details.files summary:hover{color:var(--text)}
@@ -116,9 +119,15 @@ details.files summary:hover{color:var(--text)}
 .files select{background:var(--bg3);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:5px 8px;font:inherit;font-size:13.5px}
 .files h4{margin:12px 0 4px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim)}
 .files ul{list-style:none;margin:0;padding:0}
-.files li{display:flex;justify-content:space-between;gap:10px;padding:4px 0;font-size:13.5px;border-bottom:1px solid var(--line)}
-.files li a{color:var(--text);word-break:break-all}
-.files li span{color:var(--dim);white-space:nowrap}
+.files li{padding:8px 0;font-size:13.5px;border-bottom:1px solid var(--line)}
+.files li .top{display:flex;justify-content:space-between;gap:10px}
+.files li .top a{color:var(--text);word-break:break-all}
+.files li .top span{color:var(--dim);white-space:nowrap}
+.files .sha{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;margin-top:4px;font-size:12px;color:var(--dim)}
+.files .sha b{font-weight:600}
+.files .sha code{font-size:11.5px;word-break:break-all;cursor:copy;padding:2px 6px}
+.files .sha code.ok{background:var(--green);color:#fff}
+.files .sha a{color:var(--dim)}
 .files .err{color:var(--dim);font-size:13.5px}
 /* lightbox */
 #lb{position:fixed;inset:0;background:rgba(0,0,0,.88);display:none;align-items:center;justify-content:center;padding:20px;z-index:50;cursor:zoom-out}
@@ -275,8 +284,9 @@ html[lang=en] [data-l=de],html[lang=de] [data-l=en]{display:none!important}
         <h3>🐧 <span data-l="en">Linux app</span><span data-l="de">Linux-App</span></h3>
         <p class="small" data-l="en">AppImage: download, make it executable, run. Wayland, PipeWire screen sharing, global shortcuts.</p>
         <p class="small" data-l="de">AppImage: herunterladen, ausführbar machen, starten. Wayland, Bildschirm teilen über PipeWire, globale Tastenkürzel.</p>
-        <a class="btn ghost" href="https://github.com/rusttalkcrew/RustTalk/releases/latest/download/rusttalk-linux-x86_64.AppImage"><span data-l="en">Download (x86_64)</span><span data-l="de">Herunterladen (x86_64)</span></a>
+        <a class="btn primary" href="https://github.com/rusttalkcrew/RustTalk/releases/latest/download/rusttalk-linux-x86_64.AppImage"><span data-l="en">Download (x86_64)</span><span data-l="de">Herunterladen (x86_64)</span></a>
         <a class="alt-link" href="https://github.com/rusttalkcrew/RustTalk/releases/latest/download/rusttalk-linux-aarch64.AppImage"><span data-l="en">ARM64 version</span><span data-l="de">ARM64-Version</span></a>
+        <a class="alt-link" href="https://github.com/rusttalkcrew/RustTalk#client-linux--minimal-build" rel="noopener"><span data-l="en">Build from source</span><span data-l="de">Aus dem Quellcode bauen</span></a>
         <details class="files" data-kind="linux"><summary><span data-l="en">All files &amp; older versions</span><span data-l="de">Alle Dateien &amp; ältere Versionen</span></summary>
         <div class="tools"><label><span data-l="en">Version</span><span data-l="de">Version</span> <select class="ver-sel" aria-label="Version"></select></label></div>
         <div class="list"><p class="err"><a href="https://github.com/rusttalkcrew/RustTalk/releases" rel="noopener"><span data-l="en">Open releases on GitHub</span><span data-l="de">Releases auf GitHub öffnen</span></a></p></div></details>
@@ -287,12 +297,14 @@ html[lang=en] [data-l=de],html[lang=de] [data-l=en]{display:none!important}
         <p class="small" data-l="de">Einen macOS-Build gibt es noch nicht. Er ist geplant.</p>
         <a class="btn ghost" href="#download" aria-disabled="true"><span data-l="en">Coming soon</span><span data-l="de">Bald verfügbar</span></a>
       </div>
-      <div class="card">
+      <div class="card wide">
         <h3>🗄️ <span data-l="en">Server</span><span data-l="de">Server</span></h3>
-        <p class="small" data-l="en">Linux binary with systemd, Docker image or Windows. One port: 7331 TCP + UDP.</p>
+
+        <div class="row">        <p class="small" data-l="en">Linux binary with systemd, Docker image or Windows. One port: 7331 TCP + UDP.</p>
         <p class="small" data-l="de">Linux-Datei mit systemd, Docker-Image oder Windows. Ein Port: 7331 TCP + UDP.</p>
         <a class="btn ghost" href="#server"><span data-l="en">Setup guide</span><span data-l="de">Anleitung</span></a>
         <a class="alt-link" href="https://github.com/rusttalkcrew/RustTalk/releases" rel="noopener"><span data-l="en">All releases &amp; checksums</span><span data-l="de">Alle Releases &amp; Prüfsummen</span></a>
+        </div>
         <details class="files" data-kind="server"><summary><span data-l="en">All files &amp; older versions</span><span data-l="de">Alle Dateien &amp; ältere Versionen</span></summary>
         <div class="tools"><label><span data-l="en">Version</span><span data-l="de">Version</span> <select class="ver-sel" aria-label="Version"></select></label></div>
         <div class="list"><p class="err"><a href="https://github.com/rusttalkcrew/RustTalk/releases" rel="noopener"><span data-l="en">Open releases on GitHub</span><span data-l="de">Releases auf GitHub öffnen</span></a></p></div></details>
@@ -451,25 +463,33 @@ docker compose logs rusttalk</code></pre>
   var releases=[];
   function render(box,kind,rel){
     box.textContent='';
-    var groups={app:[],sum:[]};
+    var sums={},files=[];
     rel.assets.forEach(function(a){
       var n=a.name.toLowerCase(),isServer=n.indexOf('server')>=0;
       if(kind==='server'?!isServer:(isServer||n.indexOf(kind)<0))return;
-      groups[/\.sha256$/.test(n)?'sum':'app'].push(a);
+      if(/\.sha256$/.test(n))sums[n]=a;else files.push(a);
     });
-    var any=false;
-    [['app','Files'],['sum','SHA-256']].forEach(function(g){
-      var l=groups[g[0]];if(!l.length)return;any=true;
-      box.appendChild(el('h4',null,g[1]));
-      var ul=el('ul');
-      l.forEach(function(a){
-        var li=el('li'),an=el('a',null,a.name);
-        an.href=a.browser_download_url;an.rel='noopener';
-        li.appendChild(an);li.appendChild(el('span',null,fmt(a.size)));ul.appendChild(li);
-      });
-      box.appendChild(ul);
+    if(!files.length){box.appendChild(el('p','err','No files in '+rel.tag_name+'.'));return}
+    var ul=el('ul');
+    files.forEach(function(a){
+      var li=el('li'),top=el('div','top'),an=el('a',null,a.name);
+      an.href=a.browser_download_url;an.rel='noopener';
+      top.appendChild(an);top.appendChild(el('span',null,fmt(a.size)));li.appendChild(top);
+      var h=(a.digest||'').replace(/^sha256:/,'');
+      if(/^[0-9a-f]{64}$/.test(h)){
+        var row=el('div','sha'),code=el('code',null,h);
+        code.title='Click to copy SHA-256';
+        code.addEventListener('click',function(){
+          try{navigator.clipboard.writeText(h);code.classList.add('ok');setTimeout(function(){code.classList.remove('ok')},1200)}catch(e){}
+        });
+        row.appendChild(el('b',null,'SHA-256'));row.appendChild(code);
+        var sf=sums[a.name.toLowerCase()+'.sha256'];
+        if(sf){var l=el('a',null,'.sha256');l.href=sf.browser_download_url;l.rel='noopener';row.appendChild(l)}
+        li.appendChild(row);
+      }
+      ul.appendChild(li);
     });
-    if(!any)box.appendChild(el('p','err','No files in '+rel.tag_name+'.'));
+    box.appendChild(ul);
   }
   function show(d,tag){
     var rel=releases.filter(function(r){return r.tag_name===tag})[0];
