@@ -1,5 +1,8 @@
 # RustTalk
 
+Fresh client configurations include `public.rusttalk.com:7331` as **rusttalk official server** in saved servers. Joining is manual and uses the same certificate-trust prompt as any other server. Existing saved-server lists, including empty lists, are preserved.
+
+
 Lightweight voice chat in Rust — a Discord-style client with a TeamSpeak-style server.
 **Local first:** no online accounts, no cloud. Client: Windows (egui), server: Linux (Debian, systemd).
 Website: [rusttalk.com](https://rusttalk.com) (source in [website/](website/))

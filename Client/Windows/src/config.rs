@@ -61,7 +61,7 @@ pub struct ClientConfig {
     /// Automatische Lautstaerke fuer das eigene Mikro (AGC + Limiter).
     #[serde(default = "default_true")]
     pub auto_gain: bool,
-    #[serde(default)]
+    #[serde(default = "default_bookmarks")]
     pub bookmarks: Vec<ServerBookmark>,
     #[serde(default)]
     pub input_device: Option<String>,
@@ -184,6 +184,14 @@ fn default_true() -> bool {
     true
 }
 
+fn default_bookmarks() -> Vec<ServerBookmark> {
+    vec![ServerBookmark {
+        name: "rusttalk official server".to_owned(),
+        address: "public.rusttalk.com:7331".to_owned(),
+        password: None,
+    }]
+}
+
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
@@ -199,7 +207,7 @@ impl Default for ClientConfig {
             auto_gain: true,
             echo_cancellation: true,
             share_screen_audio: true,
-            bookmarks: Vec::new(),
+            bookmarks: default_bookmarks(),
             input_device: None,
             output_device: None,
             camera: None,
@@ -293,6 +301,23 @@ impl ClientConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn official_bookmark_is_default_but_removal_is_preserved() {
+        let fresh = ClientConfig::default();
+        assert_eq!(fresh.bookmarks, default_bookmarks());
+        assert_eq!(fresh.bookmarks[0].nickname(), Some("rusttalk official server"));
+        assert!(fresh.bookmarks[0].password.is_none());
+        let empty: ClientConfig = toml::from_str("bookmarks = []").unwrap();
+        assert!(empty.bookmarks.is_empty());
+        let back: ClientConfig = toml::from_str(&toml::to_string(&empty).unwrap()).unwrap();
+        assert!(back.bookmarks.is_empty());
+        let custom: ClientConfig = toml::from_str(
+            "[[bookmarks]]\nname = 'Mine'\naddress = 'localhost:7331'",
+        ).unwrap();
+        assert_eq!(custom.bookmarks.len(), 1);
+        assert_eq!(custom.bookmarks[0].name, "Mine");
+    }
 
     #[test]
     fn roundtrip() {
@@ -433,7 +458,7 @@ mod tests {
         assert!(!cfg.voice_activation);
         assert!(cfg.noise_suppression, "Rauschunterdrueckung default an");
         assert!(cfg.auto_gain, "Auto-Lautstaerke default an (alte Configs ohne Feld)");
-        assert!(cfg.bookmarks.is_empty());
+        assert_eq!(cfg.bookmarks, default_bookmarks());
         assert_eq!(cfg.input_volume, 1.0);
         assert!(!cfg.global_ptt, "global PTT is opt-in");
         assert!(cfg.animate_gifs);
