@@ -250,103 +250,69 @@ impl RustTalkApp {
         }
     }
 
-    /// Channel header: layout dropdown (Grid / Focus / Presenter) and, for
-    /// Focus / Presenter, a dropdown with who is shown.
-    pub(super) fn stage_layout_controls(&mut self, ui: &mut egui::Ui, ch_id: u64) {
+    /// Layout buttons (Grid / Focus / Presenter) in the bottom right corner of the stage and,
+    /// for Focus / Presenter, a menu with who is shown.
+    pub(super) fn stage_controls(&mut self, ui: &mut egui::Ui, area: egui::Rect, ch_id: u64) {
         let mode = self.config.stage_mode;
-        let popup_id = ui.make_persistent_id("stage_layout_menu");
-        let text = format!(
-            "{}  {}  {}",
-            mode.icon(),
-            mode.label(),
-            icons::regular::CARET_DOWN
+        let count = if mode == StageMode::Grid { 3.0 } else { 4.0 };
+        let size = egui::vec2(count * 34.0 + 8.0, 40.0);
+        let pill = egui::Rect::from_min_size(
+            area.right_bottom() - size - egui::vec2(10.0, 10.0),
+            size,
         );
-        let resp = ui
-            .add(
-                egui::Button::new(egui::RichText::new(text).color(theme::TEXT))
-                    .min_size(egui::vec2(0.0, 28.0)),
-            )
-            .on_hover_text("Stage layout (only on your screen)");
-        if resp.clicked() {
-            ui.memory_mut(|m| m.toggle_popup(popup_id));
-        }
+        ui.painter()
+            .rect_filled(pill, 10.0, egui::Color32::from_black_alpha(170));
         let mut picked = None;
-        egui::popup_below_widget(
-            ui,
-            popup_id,
-            &resp,
-            egui::PopupCloseBehavior::CloseOnClickOutside,
+        let mut target = None;
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(pill.shrink(4.0))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
             |ui| {
-                ui.set_min_width(260.0);
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(egui::RichText::new("Layout").strong().color(theme::HEADER));
-                theme::menu_separator(ui);
+                ui.spacing_mut().item_spacing.x = 2.0;
                 for m in [StageMode::Grid, StageMode::Focus, StageMode::Presenter] {
-                    let icon = if m == mode {
-                        icons::regular::CHECK
+                    let state = if m == mode {
+                        theme::IconState::Active
                     } else {
-                        m.icon()
+                        theme::IconState::Normal
                     };
-                    if theme::menu_item(ui, icon, m.label(), false)
-                        .on_hover_text(m.hint())
-                        .clicked()
-                    {
+                    let tip = format!("{}: {} (only on your screen)", m.label(), m.hint());
+                    if theme::icon_button(ui, m.icon(), state, &tip).clicked() {
                         picked = Some(m);
                     }
+                }
+                if mode != StageMode::Grid {
+                    target = Some(theme::icon_button(
+                        ui,
+                        icons::regular::USER_FOCUS,
+                        theme::IconState::Normal,
+                        &format!("Who {} shows (only on your screen)", mode.label()),
+                    ));
                 }
             },
         );
         if let Some(m) = picked {
-            ui.memory_mut(|mem| mem.close_popup());
             if m != mode {
                 self.config.stage_mode = m;
                 self.config.save();
             }
         }
-        if mode == StageMode::Grid {
-            return;
-        }
-        let members = self.channel_members(ch_id);
-        let tiles = self.stage_tiles(&members);
-        let keys: Vec<TileKey> = tiles.iter().map(|(u, k)| (u.id, *k)).collect();
-        let candidates: Vec<(u64, Vec<VideoKind>)> =
-            members.iter().map(|u| (u.id, self.streams_of(u))).collect();
-        let name_of = |id: u64| {
-            members
-                .iter()
-                .find(|u| u.id == id)
-                .map(|u| u.name.clone())
-                .unwrap_or_default()
-        };
-        let current = match mode {
-            StageMode::Focus => resolve_focus(&keys, self.stage_pick.focus)
-                .map(|i| tile_label(&tiles[i].0, tiles[i].1)),
-            _ => match resolve_presenter(&candidates, self.stage_pick.presenter) {
-                Presenting::Both(id) | Presenting::ScreenOnly(id) => Some(name_of(id)),
-                Presenting::Nobody => None,
-            },
-        };
+        let Some(resp) = target else { return };
         let popup_id = ui.make_persistent_id("stage_target_menu");
-        let mut toggle_cutout = false;
-        let text = format!(
-            "{}  {}",
-            current.unwrap_or_else(|| "Nobody".into()),
-            icons::regular::CARET_DOWN
-        );
-        let resp = ui
-            .add(
-                egui::Button::new(egui::RichText::new(text).color(theme::TEXT))
-                    .min_size(egui::vec2(0.0, 28.0)),
-            )
-            .on_hover_text(format!("Who {} shows (only on your screen)", mode.label()));
         if resp.clicked() {
             ui.memory_mut(|m| m.toggle_popup(popup_id));
         }
+        let members = self.channel_members(ch_id);
+        let tiles = self.stage_tiles(&members);
+        let candidates: Vec<(u64, Vec<VideoKind>)> =
+            members.iter().map(|u| (u.id, self.streams_of(u))).collect();
+        let mut toggle_cutout = false;
         let mut chosen = None;
-        egui::popup_below_widget(
+        egui::popup::popup_above_or_below_widget(
             ui,
             popup_id,
             &resp,
+            egui::AboveOrBelow::Above,
             egui::PopupCloseBehavior::CloseOnClickOutside,
             |ui| {
                 ui.set_min_width(300.0);
@@ -521,6 +487,7 @@ impl RustTalkApp {
             }
             StageMode::Grid => {}
         }
+        let main_tile = placed.first().map(|(i, _)| *i);
         if placed.is_empty() {
             let (cols, tile) = stage_grid(tiles.len(), area.size(), GAP);
             placed = grid_rects(tiles.len(), cols, tile, GAP, area)
@@ -530,6 +497,7 @@ impl RustTalkApp {
         }
 
         let mut open_fs = None;
+        let mut focus_click = None;
         for (i, rect) in placed.iter().copied() {
             let (user, kind) = &tiles[i];
             let show_name = overlay.is_none_or(|(_, cam)| tiles[cam].0.id != user.id);
@@ -541,6 +509,8 @@ impl RustTalkApp {
                 speaking_of(user),
                 show_name,
                 &mut open_fs,
+                main_tile == Some(i),
+                &mut focus_click,
             );
         }
         if let Some((main, cam)) = overlay {
@@ -560,8 +530,16 @@ impl RustTalkApp {
             p.rect_filled(pill, 8.0, egui::Color32::from_black_alpha(190));
             p.galley(pill.center() - galley.size() / 2.0, galley, theme::HEADER);
         }
+        if let Some((user, kind)) = focus_click {
+            self.config.stage_mode = StageMode::Focus;
+            self.config.save();
+            self.pick_stage_target(StageMode::Focus, user, kind);
+        }
         if let Some(key) = open_fs {
             self.enter_fullscreen(key);
+        }
+        if tiles.len() > 1 {
+            self.stage_controls(ui, area, tiles.first().map_or(0, |(u, _)| u.channel_id));
         }
     }
 
@@ -576,6 +554,8 @@ impl RustTalkApp {
         speaking: bool,
         show_name: bool,
         open_fs: &mut Option<(u64, VideoKind)>,
+        main: bool,
+        focus_click: &mut Option<(u64, Option<VideoKind>)>,
     ) {
         let me = user.id == self.srv.my_id;
         // Speaking ring only on the person's camera, not on screen shares.
@@ -584,7 +564,11 @@ impl RustTalkApp {
             Some(kind) if !me && !self.watching.contains(&(user.id, kind)) => {
                 let resp = watch_tile(ui, rect, user, kind, cam_speaking);
                 if resp.clicked() {
-                    self.watch(user.id, kind);
+                    if main {
+                        self.watch(user.id, kind);
+                    } else {
+                        *focus_click = Some((user.id, Some(kind)));
+                    }
                 }
                 resp
             }
@@ -604,7 +588,11 @@ impl RustTalkApp {
                     show_name,
                 );
                 if resp.clicked() {
-                    *open_fs = Some((user.id, kind));
+                    if main {
+                        *open_fs = Some((user.id, kind));
+                    } else {
+                        *focus_click = Some((user.id, Some(kind)));
+                    }
                 }
                 // Watching someone else: "stop watching" in the top right corner.
                 if !me && (resp.hovered() || ui.rect_contains_pointer(rect)) {
@@ -630,8 +618,21 @@ impl RustTalkApp {
                 }
                 resp
             }
-            None => member_card(ui, rect, user, speaking, me),
+            None => {
+                let resp = member_card(ui, rect, user, speaking, me);
+                if resp.clicked() && !main {
+                    *focus_click = Some((user.id, None));
+                }
+                resp
+            }
         };
+        if !main {
+            ui.output_mut(|o| {
+                if ui.rect_contains_pointer(rect) {
+                    o.cursor_icon = egui::CursorIcon::PointingHand;
+                }
+            });
+        }
         if user.audio_sharing && kind != Some(VideoKind::Screen) {
             let lit = self.shared_audio_lit(user);
             let badge = egui::Rect::from_center_size(rect.left_top() + egui::vec2(24.0, 24.0), egui::vec2(28.0, 28.0));
@@ -812,6 +813,100 @@ mod tests {
 
     fn inside(outer: egui::Rect, r: egui::Rect) -> bool {
         outer.expand(0.5).contains_rect(r)
+    }
+
+    fn user(id: u64, name: &str) -> UserInfo {
+        UserInfo {
+            id,
+            name: name.into(),
+            channel_id: 2,
+            muted: false,
+            deafened: false,
+            sharing: false,
+            audio_sharing: false,
+            role: Default::default(),
+            streams: vec![],
+        }
+    }
+
+    /// Runs the stage in a 1200x700 screen; returns the stage area it drew into.
+    fn run_stage(
+        ctx: &egui::Context,
+        app: &mut RustTalkApp,
+        tiles: &[(UserInfo, Option<VideoKind>)],
+        time: f64,
+        events: Vec<egui::Event>,
+    ) -> egui::Rect {
+        let mut area = egui::Rect::NOTHING;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 700.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    area = ui.max_rect();
+                    app.ui_stage_tiles(ui, area, tiles, &|_| false);
+                });
+            },
+        );
+        area
+    }
+
+    fn click_at(ctx: &egui::Context, app: &mut RustTalkApp, tiles: &[(UserInfo, Option<VideoKind>)], pos: egui::Pos2, t: &mut f64) {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        for events in [vec![egui::Event::PointerMoved(pos)], vec![button(true)], vec![button(false)]] {
+            *t += 0.1;
+            run_stage(ctx, app, tiles, *t, events);
+        }
+    }
+
+    #[test]
+    fn stage_buttons_switch_layout_and_a_tile_click_focuses_it() {
+        let ctx = egui::Context::default();
+        let mut app = RustTalkApp::with_config(ctx.clone(), ClientConfig::default(), false);
+        let tiles: Vec<_> = (1..=3).map(|i| (user(i, &format!("user{i}")), None)).collect();
+        app.config.stage_mode = StageMode::Grid;
+        let mut t = 0.0;
+        let area = run_stage(&ctx, &mut app, &tiles, t, vec![]);
+        // Pill: bottom right of the stage, one button per layout.
+        let button = |n: f32, count: f32| {
+            let size = egui::vec2(count * 34.0 + 8.0, 40.0);
+            let pill = egui::Rect::from_min_size(area.right_bottom() - size - egui::vec2(10.0, 10.0), size);
+            egui::pos2(pill.left() + 4.0 + 16.0 + 34.0 * n, pill.center().y)
+        };
+        click_at(&ctx, &mut app, &tiles, button(2.0, 3.0), &mut t);
+        assert_eq!(app.config.stage_mode, StageMode::Presenter);
+        click_at(&ctx, &mut app, &tiles, button(0.0, 4.0), &mut t);
+        assert_eq!(app.config.stage_mode, StageMode::Grid);
+        click_at(&ctx, &mut app, &tiles, button(1.0, 3.0), &mut t);
+        assert_eq!(app.config.stage_mode, StageMode::Focus);
+        // Back in Grid, clicking a person tile focuses it.
+        click_at(&ctx, &mut app, &tiles, button(0.0, 4.0), &mut t);
+        assert_eq!(app.config.stage_mode, StageMode::Grid);
+        let (cols, tile) = stage_grid(3, area.size(), GAP);
+        let first = grid_rects(3, cols, tile, GAP, area)[0];
+        click_at(&ctx, &mut app, &tiles, first.center(), &mut t);
+        assert_eq!(app.config.stage_mode, StageMode::Focus);
+    }
+
+    #[test]
+    fn a_single_tile_shows_no_layout_buttons() {
+        let ctx = egui::Context::default();
+        let mut app = RustTalkApp::with_config(ctx.clone(), ClientConfig::default(), false);
+        let tiles = vec![(user(1, "solo"), None)];
+        let mut t = 0.0;
+        let area = run_stage(&ctx, &mut app, &tiles, t, vec![]);
+        let corner = area.right_bottom() - egui::vec2(60.0, 30.0);
+        click_at(&ctx, &mut app, &tiles, corner, &mut t);
+        assert_eq!(app.config.stage_mode, ClientConfig::default().stage_mode);
     }
 
     #[test]

@@ -97,9 +97,6 @@ impl RustTalkApp {
                         {
                             self.open_channel_settings(ch_id);
                         }
-                        if kind == ChannelKind::Voice {
-                            self.stage_layout_controls(ui, ch_id);
-                        }
                         let searching = self.chat_search.is_some();
                         let state = if searching { theme::IconState::Active } else { theme::IconState::Normal };
                         if theme::icon_button(ui, icons::regular::MAGNIFYING_GLASS, state, "Search this channel").clicked() {
