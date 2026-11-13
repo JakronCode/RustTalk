@@ -936,7 +936,7 @@ impl RustTalkApp {
 
     fn section_links(&mut self, ui: &mut egui::Ui) {
         let now = links::now();
-        hint(ui, "Links in chat never load anything by themselves. Clicking one shows the full address first; it opens in your browser only after you confirm.");
+        hint(ui, "Links in chat never load anything by themselves. Untrusted links show the full address for confirmation. Trusted HTTPS sites open directly only when no warning applies.");
         hint(ui, &format!(
             "Trusted sites open without asking, for exactly that protocol, name and port. Download, address and threat feed warnings still ask. Trust expires after {} days (at most {} sites).",
             links::TRUST_DAYS,

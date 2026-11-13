@@ -245,6 +245,7 @@ pub(super) fn origin(url: &Url) -> String {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Warning {
     Listed(String),
+    FeedUnavailable,
     Download(String),
     Insecure,
     IpAddress,
@@ -256,6 +257,7 @@ impl Warning {
     fn text(&self) -> String {
         match self {
             Self::Listed(source) => format!("Reported as malicious in your threat feed ({source}). Do not open it unless you are sure the report is wrong."),
+            Self::FeedUnavailable => "Your configured threat feed could not be loaded. Known-malicious checks are unavailable; trusted sites require confirmation until the feed is restored or disabled in Settings.".into(),
             Self::Download(ext) => format!("Looks like a download of a .{ext} file (program, script, installer, disk image or archive). Files from links can take over your computer; only run them if you trust the sender and the site."),
             Self::Insecure => "Not encrypted (http). Anyone on the network can read or change this page.".into(),
             Self::IpAddress => "Uses a bare IP address instead of a site name.".into(),
@@ -306,11 +308,13 @@ pub(super) fn download_ext(url: &Url) -> Option<String> {
         .path_segments()
         .and_then(|mut segments| segments.rfind(|s| !s.is_empty()));
     last.and_then(risky_ext).or_else(|| {
-        url.query()?
-            .split('&')
-            .take(32)
-            .flat_map(|pair| pair.split('='))
-            .find_map(|part| risky_ext(&part.replace('+', " ")))
+        url.query()?.split('&').find_map(|pair| {
+            let decoded = percent_decode(&percent_decode(&pair.replace('+', " ")));
+            // Query values can contain a Content-Disposition filename after a semicolon.
+            decoded.split([';', '=']).find_map(|part| {
+                risky_ext(part.trim().trim_matches(['\"', '\'']))
+            })
+        })
     })
 }
 
@@ -357,6 +361,9 @@ pub(super) fn assess(url: &Url, feed: &FeedState) -> Vec<Warning> {
         if feed.listed(url) {
             warnings.push(Warning::Listed(feed.name.clone()));
         }
+    }
+    if matches!(feed, FeedState::Failed(_)) {
+        warnings.push(Warning::FeedUnavailable);
     }
     if let Some(ext) = download_ext(url) {
         warnings.push(Warning::Download(ext));
@@ -951,6 +958,44 @@ mod tests {
         ] {
             assert!(download_ext(&url(s)).is_none(), "{s}");
         }
+    }
+
+    #[test]
+    fn download_queries_cannot_bypass_trusted_origin_warnings() {
+        let now = 1_700_000_000;
+        let mut trusted = BTreeMap::new();
+        trust(&mut trusted, &url("https://example.com/"), now);
+        for address in [
+            format!("https://example.com/get?{}file=setup.exe", "x=&".repeat(32)),
+            "https://example.com/get?response-content-disposition=attachment%3B%20filename%3Dsetup.exe".into(),
+            "https://example.com/get?response-content-disposition=attachment%3B%20filename%3D%22Setup.EXE%22".into(),
+            "https://example.com/get?response-content-disposition=attachment%253B%2520filename%253D%2522setup.exe%2522".into(),
+            "https://example.com/get?filename*=UTF-8''setup.exe".into(),
+        ] {
+            let parsed = url(&address);
+            assert_eq!(download_ext(&parsed).as_deref(), Some("exe"), "{address}");
+            let Next::Ask(prompt) = decide(parsed, &trusted, &FeedState::Off, now) else {
+                panic!("trusted download opened: {address}");
+            };
+            assert!(!prompt.can_remember());
+        }
+    }
+
+    #[test]
+    fn unavailable_configured_feed_cannot_be_bypassed_by_trust() {
+        let now = 1_700_000_000;
+        let address = url("https://example.com/payload");
+        let mut trusted = BTreeMap::new();
+        trust(&mut trusted, &address, now);
+        let listed = feed("https://example.com/payload", 0, now);
+        assert!(matches!(decide(address.clone(), &trusted, &listed, now), Next::Ask(_)));
+        let failed = FeedState::Failed("file missing".into());
+        let Next::Ask(prompt) = decide(address.clone(), &trusted, &failed, now) else {
+            panic!("failed configured feed silently bypassed");
+        };
+        assert!(prompt.warnings.contains(&Warning::FeedUnavailable));
+        assert!(!prompt.can_remember());
+        assert!(matches!(decide(address, &trusted, &FeedState::Off, now), Next::Open(_)));
     }
 
     #[test]
