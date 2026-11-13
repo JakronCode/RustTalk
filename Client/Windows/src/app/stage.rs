@@ -23,7 +23,7 @@ const GAP: f32 = 12.0;
 /// Tiles beside the focused one are at least this fraction of its size.
 const STRIP: f32 = 0.25;
 /// Height kept free under the tiles for the layout buttons.
-const CONTROLS_BAND: f32 = 50.0;
+pub(super) const CONTROLS_BAND: f32 = 50.0;
 /// Camera overlay width relative to the presented screen.
 const OVERLAY: f32 = 0.25;
 
@@ -343,7 +343,8 @@ impl RustTalkApp {
                     .on_hover_text(presenter.hint())
                     .clicked()
                 {
-                    picked = Some(presenter);
+                    // A toggle: again switches back to the layout before it.
+                    picked = Some(if mode == presenter { self.stage_flat } else { presenter });
                 }
                 let hiding = self.config.stage_hide_idle;
                 let icon = if hiding { icons::regular::CHECK_SQUARE } else { icons::regular::SQUARE };
@@ -464,6 +465,9 @@ impl RustTalkApp {
         }
         if let Some(m) = picked {
             if m != mode {
+                if mode != StageMode::Presenter {
+                    self.stage_flat = mode;
+                }
                 self.config.stage_mode = m;
                 self.config.save();
             }
@@ -496,7 +500,8 @@ impl RustTalkApp {
         };
         let tiles = &visible[..];
         let controls = all.len() > 1;
-        let area = if controls {
+        // On a very short stage the buttons float over the corner instead of squeezing the tiles.
+        let area = if controls && area.height() >= 2.0 * CONTROLS_BAND + 60.0 {
             egui::Rect::from_min_max(area.min, egui::pos2(area.max.x, (area.max.y - CONTROLS_BAND).max(area.min.y)))
         } else {
             area
@@ -567,8 +572,14 @@ impl RustTalkApp {
         }
         let main_tile = placed.first().map(|(i, _)| *i);
         if placed.is_empty() {
-            let (cols, tile) = stage_grid(tiles.len(), area.size(), GAP);
-            placed = grid_rects(tiles.len(), cols, tile, GAP, area)
+            // The hint gets its own line above the tiles.
+            let grid_area = if hint.is_some() {
+                egui::Rect::from_min_max(egui::pos2(area.min.x, (area.min.y + 30.0).min(area.max.y)), area.max)
+            } else {
+                area
+            };
+            let (cols, tile) = stage_grid(tiles.len(), grid_area.size(), GAP);
+            placed = grid_rects(tiles.len(), cols, tile, GAP, grid_area)
                 .into_iter()
                 .enumerate()
                 .collect();
@@ -830,6 +841,29 @@ impl RustTalkApp {
                 egui::StrokeKind::Inside,
             );
         }
+        // Hovering someone else's camera: a small "stop watching" button in the corner.
+        if watched && user.id != self.srv.my_id && ui.rect_contains_pointer(rect) && !resp.dragged() {
+            let b = egui::Rect::from_center_size(
+                rect.right_top() + egui::vec2(-16.0, 16.0),
+                egui::vec2(24.0, 24.0),
+            );
+            let stop = ui
+                .put(
+                    b,
+                    egui::Button::new(
+                        egui::RichText::new(icons::regular::EYE_SLASH)
+                            .size(13.0)
+                            .color(egui::Color32::WHITE),
+                    )
+                    .fill(egui::Color32::from_black_alpha(170))
+                    .corner_radius(12.0),
+                )
+                .on_hover_text("Stop watching the camera");
+            if stop.clicked() {
+                self.unwatch(user.id, VideoKind::Camera);
+                return;
+            }
+        }
         let cursor = if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab };
         let resp = resp.on_hover_cursor(cursor);
         if watched {
@@ -1012,6 +1046,16 @@ mod tests {
         let presenter = text_pos(&out, "Presenter").expect("menu lists Presenter");
         click_at(&ctx, &mut app, &tiles, presenter, &mut t);
         assert_eq!(app.config.stage_mode, StageMode::Presenter);
+        // Presenter is a toggle: the same entry goes back to the layout before it (Focus here).
+        app.config.stage_mode = StageMode::Presenter;
+        app.stage_flat = StageMode::Focus;
+        t += 0.1;
+        run_stage_out(&ctx, &mut app, &tiles, t, vec![]); // the menu grows: let it settle
+        t += 0.1;
+        let (_, out) = run_stage_out(&ctx, &mut app, &tiles, t, vec![]);
+        let again = text_pos(&out, "Presenter").expect("menu still open");
+        click_at(&ctx, &mut app, &tiles, again, &mut t);
+        assert_eq!(app.config.stage_mode, StageMode::Focus);
         click_at(&ctx, &mut app, &tiles, button_pos(area, 0.0), &mut t); // closes the open menu
         click_at(&ctx, &mut app, &tiles, button_pos(area, 0.0), &mut t);
         assert_eq!(app.config.stage_mode, StageMode::Grid);
@@ -1029,6 +1073,46 @@ mod tests {
         // ... the button that appears on hover does.
         click_at(&ctx, &mut app, &tiles, first.right_top() + egui::vec2(-22.0, 22.0), &mut t);
         assert_eq!(app.config.stage_mode, StageMode::Focus);
+    }
+
+    #[test]
+    fn hovering_a_watched_presenter_camera_offers_stop_watching() {
+        let ctx = egui::Context::default();
+        let mut app = RustTalkApp::with_config(ctx.clone(), ClientConfig::default(), false);
+        let other = user(app.srv.my_id + 7, "other");
+        app.watching.insert((other.id, VideoKind::Camera));
+        let content = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(1000.0, 562.0));
+        let mut t = 0.0;
+        let mut frame = |app: &mut RustTalkApp, events: Vec<egui::Event>| {
+            t += 0.1;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 700.0))),
+                    time: Some(t),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        app.presenter_overlay(ui, content, &other, false, &mut None);
+                    });
+                },
+            );
+        };
+        let cam = overlay_rect(content, ASPECT, CamCorner::BottomLeft);
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![egui::Event::PointerMoved(cam.center())]);
+        let stop = cam.right_top() + egui::vec2(-16.0, 16.0);
+        let button = |pressed| egui::Event::PointerButton {
+            pos: stop,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(&mut app, vec![egui::Event::PointerMoved(stop)]);
+        frame(&mut app, vec![button(true)]);
+        frame(&mut app, vec![button(false)]);
+        assert!(!app.watching.contains(&(other.id, VideoKind::Camera)), "stopped watching");
     }
 
     #[test]
@@ -1129,6 +1213,8 @@ mod tests {
             (800.0, 600.0),
             (500.0, 900.0),
             (300.0, 200.0),
+            (1700.0, 150.0),
+            (1700.0, 90.0),
         ] {
             for n in 0..9 {
                 let a = area(w, h);

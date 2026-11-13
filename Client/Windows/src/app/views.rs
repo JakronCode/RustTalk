@@ -165,6 +165,8 @@ impl RustTalkApp {
         // chat below stays usable; without video it stays compact.
         let full = ui.available_height();
         let stage_h = if has_video { (full * 0.62).max(260.0) } else { 260.0f32.min(full * 0.5) };
+        // Room for the layout buttons under the tiles.
+        let stage_h = if members.len() > 1 { (stage_h + super::stage::CONTROLS_BAND).min(full * 0.75) } else { stage_h };
         egui::TopBottomPanel::top(format!("stage_{ch_id}"))
             .exact_height(stage_h)
             .frame(egui::Frame::default().fill(theme::DARK).inner_margin(egui::Margin::same(16)))
