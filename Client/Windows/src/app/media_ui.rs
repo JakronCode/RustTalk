@@ -25,15 +25,15 @@ impl RustTalkApp {
             self.leave_fullscreen();
             return;
         }
-        let streamer = self.users.get(&uid).map(|u| u.name.clone()).unwrap_or_default();
+        let streamer = self.srv.users.get(&uid).map(|u| u.name.clone()).unwrap_or_default();
         let members: Vec<UserInfo> = self
-            .users
+            .srv.users
             .get(&uid)
-            .and_then(|u| self.channels.get(&u.channel_id))
+            .and_then(|u| self.srv.channels.get(&u.channel_id))
             .map(|c| c.user_ids.clone())
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|id| self.users.get(&id).cloned())
+            .filter_map(|id| self.srv.users.get(&id).cloned())
             .collect();
         let talking: HashMap<u64, Instant> = self.talking.lock().unwrap().clone();
         let self_transmitting = self.control.transmitting.load(Ordering::Relaxed);
@@ -64,7 +64,7 @@ impl RustTalkApp {
                             let talking_now = talking
                                 .get(&user.id)
                                 .is_some_and(|t| t.elapsed() < Duration::from_millis(250))
-                                || (user.id == self.my_id && self_transmitting);
+                                || (user.id == self.srv.my_id && self_transmitting);
                             ui.allocate_ui(egui::vec2(84.0, 86.0), |ui| {
                                 ui.vertical_centered(|ui| {
                                     let r = theme::draw_avatar(ui, &user.name, 40.0, talking_now);
@@ -198,10 +198,13 @@ impl RustTalkApp {
     }
 
     /// Kamera-Button: live -> ausschalten, sonst Vorschau-Dialog oeffnen.
-    pub(super) fn toggle_cam(&mut self, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>) {
+    pub(super) fn toggle_cam(&mut self) {
         if self.cam.as_ref().is_some_and(|c| c.is_sending()) {
             self.cam = None;
-            self.after_source_stopped(VideoKind::Camera, cmd_tx);
+            self.after_source_stopped(VideoKind::Camera);
+            return;
+        }
+        if !self.in_voice() {
             return;
         }
         if self.cam_dialog.is_some() {
@@ -219,16 +222,12 @@ impl RustTalkApp {
             .map(|d| d.index);
         self.cam_dialog = Some(CamDialog { devices, selected, error });
         if let Some(index) = selected {
-            self.start_cam_preview(index, cmd_tx);
+            self.start_cam_preview(index);
         }
     }
 
     /// Kamera im Vorschau-Modus starten (sendet noch nichts).
-    pub(super) fn start_cam_preview(
-        &mut self,
-        index: u32,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
-    ) {
+    pub(super) fn start_cam_preview(&mut self, index: u32) {
         // Invalidate callbacks from the previous device before replacing its preview.
         self.video_epoch[epoch_slot(VideoKind::Camera)].fetch_add(1, Ordering::Relaxed);
         self.cam = None; // alten Thread stoppen
@@ -239,7 +238,7 @@ impl RustTalkApp {
         match video::start_camera(
             index,
             self.config.video_quality,
-            self.make_frame_sink(VideoKind::Camera, cmd_tx),
+            self.make_frame_sink(VideoKind::Camera),
             self.make_cam_error_sink(),
         ) {
             Ok(cap) => self.cam = Some(cap),
@@ -252,15 +251,15 @@ impl RustTalkApp {
     }
 
     /// Bildschirm-Button: teilt -> beenden, sonst Auswahl-Dialog oeffnen.
-    pub(super) fn toggle_screen(&mut self, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>) {
+    pub(super) fn toggle_screen(&mut self) {
         if self.screen.is_some() {
             self.screen = None;
-            self.after_source_stopped(VideoKind::Screen, cmd_tx);
+            self.after_source_stopped(VideoKind::Screen);
             return;
         }
         #[cfg(target_os = "linux")]
         {
-            self.start_screen_share(ShareSource::Monitor(0), cmd_tx);
+            self.start_screen_share(ShareSource::Monitor(0));
         }
         #[cfg(not(target_os = "linux"))]
         if self.screen_picker.is_none() {
@@ -269,11 +268,11 @@ impl RustTalkApp {
     }
 
     /// Ausgewaehlte Quelle teilen (eine laufende Kamera bleibt an).
-    pub(super) fn start_screen_share(
-        &mut self,
-        source: ShareSource,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
-    ) {
+    /// Shares on the voice server only (nothing without voice).
+    pub(super) fn start_screen_share(&mut self, source: ShareSource) {
+        let Some(cmd_tx) = self.voice_tx().filter(|_| self.in_voice()) else { return };
+        // A previous capture may still deliver frames or its error: a new epoch drops them.
+        self.video_epoch[epoch_slot(VideoKind::Screen)].fetch_add(1, Ordering::Relaxed);
         self.screen = None;
         self.screen_audio_failed = false; // explicit capture request permits a retry
         // Erst Sharing melden, dann senden (Server relayed nur Sharer).
@@ -281,7 +280,7 @@ impl RustTalkApp {
         match video::start_screen(
             source,
             self.config.video_quality,
-            self.make_frame_sink(VideoKind::Screen, cmd_tx),
+            self.make_frame_sink(VideoKind::Screen),
             self.make_screen_error_sink(),
         ) {
             Ok(cap) => self.screen = Some(cap),
@@ -295,20 +294,18 @@ impl RustTalkApp {
 
     /// Nach dem Stoppen einer Quelle: Zuschauern den einzelnen Stream
     /// abmelden, eigene Kachel weg, Sharing-Status aktualisieren.
-    pub(super) fn after_source_stopped(
-        &mut self,
-        kind: VideoKind,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
-    ) {
+    pub(super) fn after_source_stopped(&mut self, kind: VideoKind) {
         // Reihenfolge wichtig: StopVideo vor SetSharing(false), sonst hat der
         // Server keine Relay-Ziele mehr.
         // New generation: frames the capture/encoder threads still deliver
         // after the stop are dropped by the old sink (no frozen last frame).
         self.video_epoch[epoch_slot(kind)].fetch_add(1, Ordering::Relaxed);
-        let _ = cmd_tx.send(Command::StopVideo(kind));
         let still = self.screen.is_some() || self.cam.as_ref().is_some_and(|c| c.is_sending());
-        let _ = cmd_tx.send(Command::SetSharing(still));
-        self.clear_video_of(self.my_id, Some(kind));
+        if let Some(cmd_tx) = self.voice_tx() {
+            let _ = cmd_tx.send(Command::StopVideo(kind));
+            let _ = cmd_tx.send(Command::SetSharing(still));
+        }
+        self.clear_video_of(self.voice_my_id(), Some(kind));
         if kind == VideoKind::Camera {
             *self.local_preview.lock().unwrap() = None;
             self.local_preview_tex = None;
@@ -317,8 +314,11 @@ impl RustTalkApp {
 
     /// Streams of a user that can be shown: our own (local preview) or what
     /// the server announced for others.
+    /// Only on the voice server: elsewhere the ids would name other people.
     pub(super) fn streams_of(&self, user: &UserInfo) -> Vec<VideoKind> {
-        if user.id == self.my_id {
+        if !self.viewing_voice() {
+            Vec::new()
+        } else if user.id == self.srv.my_id {
             [VideoKind::Screen, VideoKind::Camera].into_iter().filter(|k| self.video_frames.contains_key(&(user.id, *k))).collect()
         } else {
             let mut v = user.streams.clone();
@@ -329,12 +329,12 @@ impl RustTalkApp {
 
     /// Start receiving a stream (the server sends it only to watchers).
     pub(super) fn watch(&mut self, from_id: u64, kind: VideoKind) {
-        if from_id == self.my_id || !self.watching.insert((from_id, kind)) {
+        if !self.viewing_voice() || from_id == self.srv.my_id || !self.watching.insert((from_id, kind)) {
             return;
         }
         // A stream we stopped watching a moment ago: let its frames in again.
         self.video_stopped.remove(&(from_id, kind));
-        if let Some(tx) = &self.cmd_tx {
+        if let Some(tx) = &self.voice_tx() {
             let _ = tx.send(Command::Raw(rusttalk_shared::protocol::ClientMessage::Watch { from_id, kind, watching: true }));
         }
     }
@@ -345,7 +345,7 @@ impl RustTalkApp {
         if !self.watching.remove(&(from_id, kind)) {
             return;
         }
-        if let Some(tx) = &self.cmd_tx {
+        if let Some(tx) = &self.voice_tx() {
             let _ = tx.send(Command::Raw(rusttalk_shared::protocol::ClientMessage::Watch { from_id, kind, watching: false }));
         }
         self.clear_video_of(from_id, Some(kind));
@@ -370,17 +370,15 @@ impl RustTalkApp {
     /// Frame-Senke fuer Capture-Threads. Kamera-Frames landen zusaetzlich in
     /// der lokalen Vorschau (Kamera-Dialog); nur wenn `sending` -> an den
     /// Server + eigene Kachel. Stoesst sofort ein Neuzeichnen an.
-    pub(super) fn make_frame_sink(
-        &self,
-        kind: VideoKind,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
-    ) -> impl FnMut(video::VideoOut) + Send + 'static {
-        let tx = cmd_tx.clone();
-        let events = self.event_tx.clone();
+    /// Bound to the voice server's connection at start: frames never go elsewhere.
+    pub(super) fn make_frame_sink(&self, kind: VideoKind) -> impl FnMut(video::VideoOut) + Send + 'static {
+        let voice = self.voice_owner.and_then(|id| self.session(id));
+        let tx = voice.and_then(|s| s.tx());
+        let events = voice.map(|s| s.event_tx.clone());
         let preview = self.local_preview.clone();
         let ctx = self.ctx.clone();
-        let backlog = self.upload_backlog.clone();
-        let my_id = self.my_id;
+        let backlog = voice.map(|s| s.upload_backlog.clone()).unwrap_or_default();
+        let my_id = voice.map_or(0, |s| s.my_id);
         let epochs = self.video_epoch.clone();
         let slot = epoch_slot(kind);
         let generation = epochs[slot].load(Ordering::Relaxed);
@@ -395,36 +393,51 @@ impl RustTalkApp {
                 // Upload staut (langsames WLAN o. ae.) -> Frame nicht senden,
                 // statt Latenz und Speicher endlos wachsen zu lassen.
                 let len = jpeg.len();
-                if backlog.load(Ordering::Relaxed) + len <= MAX_UPLOAD_BACKLOG {
+                if let Some(tx) = tx.as_ref().filter(|_| backlog.load(Ordering::Relaxed) + len <= MAX_UPLOAD_BACKLOG) {
                     backlog.fetch_add(len, Ordering::Relaxed);
                     if tx.send(Command::VideoFrame(kind, jpeg.clone())).is_err() {
                         backlog.fetch_sub(len, Ordering::Relaxed);
                     }
                 }
-                let _ = events.send(NetEvent::Message(ServerMessage::VideoFrame {
-                    from_id: my_id,
-                    kind,
-                    data: jpeg,
-                }));
+                if let Some(events) = &events {
+                    // Own tile; a full queue drops it rather than block the capture thread.
+                    let _ = events.try_send(NetEvent::Message(ServerMessage::VideoFrame { from_id: my_id, kind, data: jpeg }), len);
+                }
             }
             ctx.request_repaint();
         }
     }
 
     /// Fehler des Bildschirm-Threads: Thread ist beendet -> in `update`
-    /// wird das Teilen sauber abgemeldet.
+    /// wird das Teilen sauber abgemeldet. Bound to the share it was made for:
+    /// an older capture that fails late never stops a newer one.
     pub(super) fn make_screen_error_sink(&self) -> impl FnMut(String) + Send + 'static {
-        let events = self.event_tx.clone();
+        let events = self.voice_events();
         let failed = self.screen_failed.clone();
+        let epochs = self.video_epoch.clone();
+        let slot = epoch_slot(VideoKind::Screen);
+        let generation = epochs[slot].load(Ordering::Relaxed);
         move |msg: String| {
-            failed.store(true, Ordering::Relaxed);
-            let _ = events.send(NetEvent::Status(msg));
+            let mut pending = failed.lock().unwrap();
+            if epochs[slot].load(Ordering::Relaxed) != generation {
+                return;
+            }
+            *pending = Some(generation);
+            if let Some(events) = &events {
+                let _ = events.try_send(NetEvent::Status(msg), 0);
+            }
         }
+    }
+
+    /// The current screen share failed (its thread ended with an error).
+    pub(super) fn take_screen_failure(&mut self) -> bool {
+        let current = self.video_epoch[epoch_slot(VideoKind::Screen)].load(Ordering::Relaxed);
+        self.screen_failed.lock().unwrap().take() == Some(current)
     }
 
     /// Fehler des Kamera-Threads: Statuszeile + Anzeige im Kamera-Dialog.
     pub(super) fn make_cam_error_sink(&self) -> impl FnMut(String) + Send + 'static {
-        let events = self.event_tx.clone();
+        let events = self.voice_events();
         let errors = self.cam_error.clone();
         let epochs = self.video_epoch.clone();
         let slot = epoch_slot(VideoKind::Camera);
@@ -435,7 +448,9 @@ impl RustTalkApp {
                 return;
             }
             *pending = Some((generation, msg.clone()));
-            let _ = events.send(NetEvent::Status(msg));
+            if let Some(events) = &events {
+                let _ = events.try_send(NetEvent::Status(msg), 0);
+            }
         }
     }
 
@@ -463,10 +478,15 @@ impl RustTalkApp {
                 self.video_stopped.remove(&key);
             }
         }
-        let view = self.video_frames.entry(key).or_insert_with(|| VideoView::spawn(key, self.video_tx.clone(), self.ctx.clone()));
+        if !self.video_frames.contains_key(&key) {
+            self.next_video_view += 1;
+            let view = VideoView::spawn(key, self.next_video_view, self.video_tx.clone(), self.ctx.clone());
+            self.video_frames.insert(key, view);
+        }
+        let Some(view) = self.video_frames.get(&key) else { return };
         if let Err(std::sync::mpsc::TrySendError::Full(_)) = view.tx.try_send(data) {
             // Decoder can't keep up: this frame is lost -> the next ones need a keyframe.
-            let _ = self.video_tx.send(DecodeMsg::NeedKeyframe(key));
+            let _ = self.video_tx.send(DecodeMsg::NeedKeyframe(key, view.id));
         }
     }
 
@@ -476,31 +496,31 @@ impl RustTalkApp {
             .filter(|(generation, _)| *generation == self.video_epoch[epoch_slot(VideoKind::Camera)].load(Ordering::Relaxed));
         if let Some((_, error)) = camera_error {
             self.cam = None;
-            if let Some(tx) = self.cmd_tx.clone() {
-                self.after_source_stopped(VideoKind::Camera, &tx);
-            }
+            self.after_source_stopped(VideoKind::Camera);
             if let Some(dialog) = &mut self.cam_dialog {
                 dialog.error = Some(error.clone());
             }
             self.set_error(error);
         }
         while let Ok(msg) = self.video_rx.try_recv() {
+            // Results of a tile that is gone (another voice server, a restarted
+            // stream) name a tile id that no longer exists: dropped.
             match msg {
-                DecodeMsg::Picture(key, img) => {
-                    if let Some(v) = self.video_frames.get_mut(&key) {
+                DecodeMsg::Picture(key, view, img) => {
+                    if let Some(v) = self.video_frames.get_mut(&key).filter(|v| v.id == view) {
                         match &mut v.tex {
                             Some(t) => t.set(img, egui::TextureOptions::LINEAR),
                             None => v.tex = Some(ctx.load_texture(format!("video-{}-{:?}", key.0, key.1), img, egui::TextureOptions::LINEAR)),
                         }
                     }
                 }
-                DecodeMsg::NeedKeyframe(key) => {
-                    let Some(v) = self.video_frames.get_mut(&key) else { continue };
+                DecodeMsg::NeedKeyframe(key, view) => {
+                    let Some(v) = self.video_frames.get_mut(&key).filter(|v| v.id == view) else { continue };
                     if v.last_request.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
                         continue;
                     }
                     v.last_request = Some(Instant::now());
-                    if key.0 == self.my_id {
+                    if key.0 == self.voice_my_id() {
                         // Own tile: ask our own encoder directly.
                         let src = match key.1 {
                             VideoKind::Camera => self.cam.as_ref(),
@@ -509,7 +529,7 @@ impl RustTalkApp {
                         if let Some(c) = src {
                             c.request_keyframe();
                         }
-                    } else if let Some(tx) = &self.cmd_tx {
+                    } else if let Some(tx) = &self.voice_tx() {
                         let _ = tx.send(Command::Raw(rusttalk_shared::protocol::ClientMessage::RequestKeyframe { from_id: key.0, kind: key.1 }));
                     }
                 }
@@ -522,7 +542,7 @@ impl RustTalkApp {
         if self.cam_dialog.is_none() {
             return;
         }
-        let Some(cmd_tx) = self.cmd_tx.clone() else {
+        let Some(cmd_tx) = self.voice_tx().filter(|_| self.in_voice()) else {
             self.cam_dialog = None;
             return;
         };
@@ -606,7 +626,7 @@ impl RustTalkApp {
                 });
             });
         if let Some(index) = switch_to {
-            self.start_cam_preview(index, &cmd_tx);
+            self.start_cam_preview(index);
         }
         match action {
             Some(true) => {
@@ -643,10 +663,10 @@ impl RustTalkApp {
 
     /// Bildschirm/Fenster-Auswahl mit Reitern "Anwendungen" / "Gesamter Bildschirm".
     pub(super) fn ui_screen_picker(&mut self, ctx: &egui::Context) {
-        let Some(cmd_tx) = self.cmd_tx.clone() else {
+        if !self.in_voice() {
             self.screen_picker = None;
             return;
-        };
+        }
         let Some(picker) = &mut self.screen_picker else { return };
         if let Ok(list) = picker.rx.try_recv() {
             picker.loading = false;
@@ -809,7 +829,7 @@ impl RustTalkApp {
         }
         if let Some(source) = share {
             self.screen_picker = None;
-            self.start_screen_share(source, &cmd_tx);
+            self.start_screen_share(source);
         } else if !open || cancel {
             self.screen_picker = None;
         }
@@ -823,28 +843,32 @@ impl RustTalkApp {
         }
     }
 
-    /// Closes the picker and frees the preview images.
+    /// Closes the picker and frees the preview images. Previews still
+    /// downloading belong to the old picker and are dropped when they arrive.
     pub(super) fn close_gif_picker(&mut self) {
         for bytes in self.giphy.previews.values() {
             self.textures.remove_bytes(bytes);
         }
-        self.giphy = GifPicker::default();
+        self.giphy = GifPicker { epoch: self.giphy.epoch + 1, ..Default::default() };
     }
 
     /// Asks the server for a result page (`offset` 0 = new search).
     fn gif_request(&mut self, query: String, offset: u32) {
-        if !self.gif_available {
+        if !self.srv.gif_available {
             return;
         }
-        let Some(tx) = self.cmd_tx.clone() else { return };
+        let Some(tx) = self.srv.cmd_tx.as_ref() else { return };
         if offset == 0 {
             self.giphy.results.clear();
             self.giphy.end = false;
             self.giphy.error = None;
         }
         self.giphy.shown_query = Some(query.clone());
-        self.giphy.loading = true;
-        let _ = tx.send(Command::GifSearch { query, offset });
+        let sent = tx.send(Command::GifSearch { query, offset }).is_ok();
+        self.giphy.loading = sent;
+        if !sent {
+            self.giphy.error = Some("Not sent: the connection is busy. Try again in a moment.".into());
+        }
     }
 
     /// A result page from the server (stale pages are ignored).
@@ -863,25 +887,7 @@ impl RustTalkApp {
     pub(super) fn ui_gif_picker(&mut self, ctx: &egui::Context) {
         // Background downloads (also after closing: a chosen GIF may still arrive).
         while let Ok(msg) = self.giphy_rx.try_recv() {
-            match msg {
-                GiphyMsg::Preview(url, bytes) => {
-                    if self.giphy.open {
-                        self.giphy.previews.insert(url, bytes);
-                    }
-                }
-                GiphyMsg::Full(bytes) => {
-                    self.giphy.sending = false;
-                    if let (Some((channel_id, reply_to)), Some(tx)) = (self.gif_target.take(), self.cmd_tx.clone()) {
-                        let _ = tx.send(Command::SendChat { channel_id, text: String::new(), image: Some(bytes), reply_to });
-                    }
-                    self.close_gif_picker();
-                }
-                GiphyMsg::FullFailed(e) => {
-                    self.giphy.sending = false;
-                    self.gif_target = None;
-                    self.giphy.error = Some(e);
-                }
-            }
+            self.on_giphy_msg(msg);
         }
         if !self.giphy.open {
             return;
@@ -928,7 +934,7 @@ impl RustTalkApp {
                     .show(ui, |ui| {
                         ui.set_width(W - 20.0);
                         ui.set_height(H - 20.0);
-                        if !self.gif_available {
+                        if !self.srv.gif_available {
                             ui.vertical_centered(|ui| {
                                 ui.add_space(110.0);
                                 ui.label(egui::RichText::new(icons::regular::GIF).size(46.0).color(theme::MUTED));
@@ -1002,9 +1008,10 @@ impl RustTalkApp {
                                             let tx = self.giphy_tx.clone();
                                             let url = g.preview_url.clone();
                                             let repaint = ctx.clone();
+                                            let epoch = self.giphy.epoch;
                                             std::thread::spawn(move || {
                                                 if let Ok(bytes) = media::download(&url) {
-                                                    let _ = tx.send(GiphyMsg::Preview(url, bytes));
+                                                    let _ = tx.send(GiphyMsg::Preview { epoch, url, bytes });
                                                     repaint.request_repaint();
                                                 }
                                             });
@@ -1040,16 +1047,17 @@ impl RustTalkApp {
             return;
         }
         if let Some(g) = choose {
-            let Some(ch) = self.selected_channel else { return };
-            self.gif_target = Some((ch, self.reply_to.take()));
+            let Some(target) = self.new_gif_target() else { return };
+            self.gif_target = Some(target);
             self.giphy.sending = true;
             self.giphy.error = None;
             let tx = self.giphy_tx.clone();
             let repaint = ctx.clone();
+            let request = target.request;
             std::thread::spawn(move || {
                 let msg = match media::download(&g.url) {
-                    Ok(bytes) => GiphyMsg::Full(bytes),
-                    Err(e) => GiphyMsg::FullFailed(format!("{e:#}")),
+                    Ok(bytes) => GiphyMsg::Full { request, bytes },
+                    Err(e) => GiphyMsg::FullFailed { request, error: format!("{e:#}") },
                 };
                 let _ = tx.send(msg);
                 repaint.request_repaint();
@@ -1072,6 +1080,59 @@ impl RustTalkApp {
         }
     }
 
+}
+
+impl RustTalkApp {
+    /// The GIF about to download goes to the viewed server's open channel,
+    /// on this connection only.
+    pub(super) fn new_gif_target(&mut self) -> Option<GifTarget> {
+        let channel = self.srv.selected_channel?;
+        self.next_gif_request += 1;
+        Some(GifTarget {
+            request: self.next_gif_request,
+            session: self.srv.id,
+            generation: self.srv.generation,
+            channel,
+            reply_to: self.reply_to.take(),
+        })
+    }
+
+    /// A finished download. Only the request still pending may change the
+    /// picker or send: a late one (other server, closed picker) is dropped.
+    pub(super) fn on_giphy_msg(&mut self, msg: GiphyMsg) {
+        match msg {
+            GiphyMsg::Preview { epoch, url, bytes } => {
+                if self.giphy.open && epoch == self.giphy.epoch {
+                    self.giphy.previews.insert(url, bytes);
+                }
+            }
+            GiphyMsg::Full { request, bytes } => {
+                let Some(t) = self.gif_target.filter(|t| t.request == request) else { return };
+                self.gif_target = None;
+                self.giphy.sending = false;
+                let tx = self
+                    .session(t.session)
+                    .filter(|s| s.connected && s.generation == t.generation && s.channels.contains_key(&t.channel))
+                    .and_then(|s| s.tx());
+                let cmd = Command::SendChat { channel_id: t.channel, text: String::new(), image: Some(bytes), reply_to: t.reply_to };
+                match tx.map(|tx| tx.send(cmd)) {
+                    Some(Ok(())) => self.close_gif_picker(),
+                    Some(Err(_)) => self.giphy.error = Some("Not sent: the connection is busy. Try again in a moment.".into()),
+                    None => {
+                        self.close_gif_picker();
+                        self.set_error("GIF not sent: that server or channel is gone");
+                    }
+                }
+            }
+            GiphyMsg::FullFailed { request, error } => {
+                if self.gif_target.is_some_and(|t| t.request == request) {
+                    self.gif_target = None;
+                    self.giphy.sending = false;
+                    self.giphy.error = Some(error);
+                }
+            }
+        }
+    }
 }
 
 /// GIFs per page (must match the server's page size).
@@ -1215,20 +1276,22 @@ pub(super) fn kind_label(kind: VideoKind) -> &'static str {
 
 /// One incoming video stream: its decoder thread and the latest picture.
 pub(super) struct VideoView {
+    /// Unique per tile, also across voice servers and restarted streams.
+    pub(super) id: u64,
     pub(super) tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     pub(super) tex: Option<egui::TextureHandle>,
     pub(super) last_request: Option<Instant>,
 }
 
-/// From decoder threads to the UI.
+/// From decoder threads to the UI, naming the tile (`VideoView::id`) they decode for.
 pub(super) enum DecodeMsg {
-    Picture((u64, VideoKind), egui::ColorImage),
-    NeedKeyframe((u64, VideoKind)),
+    Picture((u64, VideoKind), u64, egui::ColorImage),
+    NeedKeyframe((u64, VideoKind), u64),
 }
 
 impl VideoView {
     /// Starts the decoder thread (ends when the view and its sender are dropped).
-    fn spawn(key: (u64, VideoKind), out: std::sync::mpsc::Sender<DecodeMsg>, ctx: egui::Context) -> Self {
+    fn spawn(key: (u64, VideoKind), id: u64, out: std::sync::mpsc::Sender<DecodeMsg>, ctx: egui::Context) -> Self {
         let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
         let _ = std::thread::Builder::new().name(format!("video-dec-{}", key.0)).spawn(move || {
             let mut dec = match crate::video_codec::H264Decoder::new() {
@@ -1239,7 +1302,7 @@ impl VideoView {
                 match dec.decode(&frame) {
                     Ok(crate::video_codec::Decoded::Picture(img)) => {
                         dec.got_picture();
-                        if out.send(DecodeMsg::Picture(key, img)).is_err() {
+                        if out.send(DecodeMsg::Picture(key, id, img)).is_err() {
                             break;
                         }
                         ctx.request_repaint();
@@ -1247,11 +1310,11 @@ impl VideoView {
                     Ok(crate::video_codec::Decoded::Nothing) => {}
                     Err(e) => tracing::debug!("{e:#}"),
                 }
-                if dec.need_keyframe && out.send(DecodeMsg::NeedKeyframe(key)).is_err() {
+                if dec.need_keyframe && out.send(DecodeMsg::NeedKeyframe(key, id)).is_err() {
                     break;
                 }
             }
         });
-        Self { tx, tex: None, last_request: None }
+        Self { id, tx, tex: None, last_request: None }
     }
 }

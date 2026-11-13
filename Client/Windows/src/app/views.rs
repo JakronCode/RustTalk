@@ -41,18 +41,18 @@ impl RustTalkApp {
     pub(super) fn ui_main(
         &mut self,
         ctx: &egui::Context,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
+        cmd_tx: &net::CommandSender,
     ) {
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(theme::BG))
             .show(ctx, |ui| {
-                let Some(ch_id) = self.selected_channel.filter(|id| self.channels.contains_key(id)) else {
+                let Some(ch_id) = self.srv.selected_channel.filter(|id| self.srv.channels.contains_key(id)) else {
                     empty_state(ui, icons::regular::CHAT_CIRCLE_DOTS, "No channel selected", "Pick a channel on the left.");
                     self.update_banner_overlay(ctx);
                     return;
                 };
                 let kind = self.channel_kind(ch_id).unwrap_or(ChannelKind::Text);
-                self.ui_channel_header(ui, ch_id, kind, cmd_tx);
+                self.ui_channel_header(ui, ch_id, kind);
                 match kind {
                     ChannelKind::Text => self.ui_text_channel(ui, ch_id, cmd_tx),
                     ChannelKind::Voice => self.ui_voice_channel(ui, ch_id, cmd_tx),
@@ -65,13 +65,7 @@ impl RustTalkApp {
     }
 
     /// 48 px bar: icon, name, subtitle; right: context actions.
-    fn ui_channel_header(
-        &mut self,
-        ui: &mut egui::Ui,
-        ch_id: u64,
-        kind: ChannelKind,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
-    ) {
+    fn ui_channel_header(&mut self, ui: &mut egui::Ui, ch_id: u64, kind: ChannelKind) {
         egui::TopBottomPanel::top(format!("channel_header_{ch_id}"))
             .exact_height(48.0)
             .frame(
@@ -87,7 +81,7 @@ impl RustTalkApp {
                     let subtitle = match kind {
                         ChannelKind::Text => "Text channel".to_string(),
                         ChannelKind::Voice => {
-                            let n = self.channels.get(&ch_id).map(|c| c.user_ids.len()).unwrap_or(0);
+                            let n = self.srv.channels.get(&ch_id).map(|c| c.user_ids.len()).unwrap_or(0);
                             format!("Voice channel  -  {n} connected")
                         }
                         ChannelKind::Spawn => "Everyone lands here  -  talking disabled".to_string(),
@@ -120,11 +114,11 @@ impl RustTalkApp {
                         if kind == ChannelKind::Voice {
                             let here = self.my_channel() == Some(ch_id);
                             if !here && theme::primary_button(ui, &format!("{}  Join Voice", icons::regular::SIGN_IN)).clicked() {
-                                let _ = cmd_tx.send(Command::JoinChannel(ch_id));
+                                self.join_channel(ch_id);
                             }
                         }
                         if kind == ChannelKind::Spawn && self.my_channel() != Some(ch_id) && ui.button(format!("{}  Back to Lobby", icons::regular::SIGN_IN)).clicked() {
-                            let _ = cmd_tx.send(Command::JoinChannel(ch_id));
+                            self.join_channel(ch_id);
                         }
                     });
                 });
@@ -136,7 +130,7 @@ impl RustTalkApp {
         &mut self,
         ui: &mut egui::Ui,
         ch_id: u64,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
+        cmd_tx: &net::CommandSender,
     ) {
         // Composer FIRST as bottom panel (otherwise the scroll area pushes
         // it below the window edge).
@@ -158,18 +152,18 @@ impl RustTalkApp {
         &mut self,
         ui: &mut egui::Ui,
         ch_id: u64,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
+        cmd_tx: &net::CommandSender,
     ) {
         let members: Vec<UserInfo> = self
-            .channels
+            .srv.channels
             .get(&ch_id)
             .map(|c| c.user_ids.clone())
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|id| self.users.get(&id).cloned())
+            .filter_map(|id| self.srv.users.get(&id).cloned())
             .collect();
-        let talking: HashMap<u64, Instant> = self.talking.lock().unwrap().clone();
-        let self_tx = self.control.transmitting.load(Ordering::Relaxed);
+        let (talking, _) = self.voice_maps();
+        let self_tx = self.viewing_voice() && self.control.transmitting.load(Ordering::Relaxed);
 
         // Stage (top, dark): all tiles in one centered grid that scales with
         // the available space.
@@ -188,14 +182,14 @@ impl RustTalkApp {
                         ui.label(egui::RichText::new(icons::regular::SPEAKER_HIGH).size(40.0).color(theme::MUTED));
                         ui.label(egui::RichText::new("Nobody is here yet").size(18.0).color(theme::HEADER));
                         if theme::primary_button(ui, "Join Voice").clicked() {
-                            let _ = cmd_tx.send(Command::JoinChannel(ch_id));
+                            self.join_channel(ch_id);
                         }
                     });
                     return;
                 }
                 // Tiles: screen shares first, then everyone else - with the
                 // camera instead of the avatar card when it is on.
-                let my_id = self.my_id;
+                let my_id = self.srv.my_id;
                 let speaking_of = |u: &UserInfo| {
                     talking.get(&u.id).is_some_and(|t| t.elapsed() < Duration::from_millis(250))
                         || (u.id == my_id && self_tx)
@@ -220,7 +214,7 @@ impl RustTalkApp {
                 let mut open_fs = None;
                 for (i, rect) in grid_rects(tiles.len(), cols, tile, gap, area).into_iter().enumerate() {
                     let (user, kind) = &tiles[i];
-                    let me = user.id == self.my_id;
+                    let me = user.id == self.srv.my_id;
                     let resp = match kind {
                         Some(kind) if !me && !self.watching.contains(&(user.id, *kind)) => {
                             let speaking = *kind == VideoKind::Camera && speaking_of(user);
@@ -278,7 +272,7 @@ impl RustTalkApp {
     /// Lobby: hint banner + join log.
     fn ui_lobby(&mut self, ui: &mut egui::Ui, ch_id: u64) {
         egui::Frame::default().inner_margin(egui::Margin::same(16)).show(ui, |ui| {
-            let settings = self.server_settings.clone();
+            let settings = self.srv.server_settings.clone();
             theme::card(ui, |ui| {
                 ui.horizontal(|ui| {
                     let (r, _) = ui.allocate_exact_size(egui::vec2(56.0, 56.0), egui::Sense::hover());
@@ -333,7 +327,7 @@ impl RustTalkApp {
             .show(ui, |ui| {
                 egui::Frame::default().inner_margin(egui::Margin::symmetric(16, 8)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    let lines = self.chat.get(&ch_id).map(Vec::as_slice).unwrap_or(&[]);
+                    let lines = self.srv.chat.get(&ch_id).map(Vec::as_slice).unwrap_or(&[]);
                     if lines.is_empty() {
                         empty(ui);
                         return;
@@ -387,7 +381,7 @@ impl RustTalkApp {
         &mut self,
         ui: &mut egui::Ui,
         ch_id: u64,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
+        cmd_tx: &net::CommandSender,
     ) {
         if let Some((name, kb)) = self.pending_image.as_ref().map(|(n, b)| (n.clone(), b.len() / 1024)) {
             let mut clear = false;
@@ -455,7 +449,7 @@ impl RustTalkApp {
                         self.reply_to = None;
                     }
                     if resp.has_focus() && self.chat_input.is_empty() && self.editing.is_none() && ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-                        let last_own = self.chat.get(&ch_id).and_then(|v| {
+                        let last_own = self.srv.chat.get(&ch_id).and_then(|v| {
                             v.iter().rev().find(|l| l.id != 0 && matches!(l.kind, ChatKind::Message { own: true, .. })).map(|l| l.id)
                         });
                         if let Some(id) = last_own {
@@ -489,14 +483,20 @@ impl RustTalkApp {
     }
 
     /// Sends text + attached image (as a reply if one is selected).
-    pub(super) fn send_chat(&mut self, ch_id: u64, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>) {
+    pub(super) fn send_chat(&mut self, ch_id: u64, cmd_tx: &net::CommandSender) {
         let text = self.chat_input.trim().to_string();
-        let image = self.pending_image.take().map(|(_, b)| b);
-        if text.is_empty() && image.is_none() {
+        if text.is_empty() && self.pending_image.is_none() {
             return;
         }
-        let reply_to = self.reply_to.take();
-        let _ = cmd_tx.send(Command::SendChat { channel_id: ch_id, text, image, reply_to });
+        // Kept until the command is queued: a busy connection loses nothing.
+        let image = self.pending_image.as_ref().map(|(_, b)| b.clone());
+        let reply_to = self.reply_to;
+        if cmd_tx.send(Command::SendChat { channel_id: ch_id, text, image, reply_to }).is_err() {
+            self.set_error("Not sent: the connection is busy. Try again in a moment.");
+            return;
+        }
+        self.pending_image = None;
+        self.reply_to = None;
         self.chat_input.clear();
     }
 
@@ -505,7 +505,7 @@ impl RustTalkApp {
         let (icon, title, target) = match self.reply_to {
             Some(id) => {
                 let who = self
-                    .chat
+                    .srv.chat
                     .get(&ch_id)
                     .and_then(|v| v.iter().find(|l| l.id == id))
                     .map(|l| match &l.kind {
@@ -518,7 +518,7 @@ impl RustTalkApp {
             None => return,
         };
         let snippet = self
-            .chat
+            .srv.chat
             .get(&ch_id)
             .and_then(|v| v.iter().find(|l| l.id == target))
             .map(|l| snippet(&l.text, l.image.is_some()))
@@ -549,7 +549,7 @@ impl RustTalkApp {
     /// "Delete message?" dialog with a preview of the message.
     pub(super) fn ui_confirm_delete_message(&mut self, ctx: &egui::Context) {
         let Some(id) = self.confirm_delete_msg else { return };
-        let Some(line) = self.chat.values().flatten().find(|l| l.id == id) else {
+        let Some(line) = self.srv.chat.values().flatten().find(|l| l.id == id) else {
             self.confirm_delete_msg = None;
             return;
         };
@@ -606,7 +606,7 @@ impl RustTalkApp {
                 });
             });
         if confirm && !cancel {
-            if let Some(tx) = &self.cmd_tx {
+            if let Some(tx) = &self.srv.cmd_tx {
                 let _ = tx.send(Command::DeleteChat(id));
             }
         }
@@ -621,9 +621,9 @@ impl RustTalkApp {
         let typed_len = raw.len(); // bytes of the original text (not of the lowercase copy)
         let prefix = raw.to_lowercase();
         let mut names: Vec<String> = self
-            .users
+            .srv.users
             .values()
-            .filter(|u| u.id != self.my_id && u.name.to_lowercase().starts_with(&prefix))
+            .filter(|u| u.id != self.srv.my_id && u.name.to_lowercase().starts_with(&prefix))
             .map(|u| u.name.clone())
             .collect();
         names.sort_by_key(|n| n.to_lowercase());

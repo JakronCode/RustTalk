@@ -26,12 +26,16 @@ impl RustTalkApp {
         let Some(at) = self.connection_panel else {
             return;
         };
-        if self.audio.is_none() || self.in_lobby() {
+        // The audio link belongs to the voice server.
+        let Some((address, name)) = self.voice().map(|s| (s.key.clone(), s.server_settings.name.clone())) else {
+            self.connection_panel = None;
+            return;
+        };
+        if self.audio.is_none() {
             self.connection_panel = None;
             return;
         }
         let (points, summary) = self.control.link.view(Instant::now());
-        let address = crate::net::normalize_addr(&self.config.server_address);
         let mut open = true;
         egui::Window::new(format!("{}  Voice Connection", icons::regular::CELL_SIGNAL_FULL))
             .id(egui::Id::new("connection_panel"))
@@ -43,7 +47,7 @@ impl RustTalkApp {
             .fixed_size([GRAPH_SIZE.x, 0.0])
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
-                ui.label(egui::RichText::new(&self.server_settings.name).strong().color(theme::HEADER));
+                ui.label(egui::RichText::new(&name).strong().color(theme::HEADER));
                 ui.label(egui::RichText::new(&address).size(12.0).color(theme::MUTED));
                 ping_graph(ui, &points);
                 if let Some(secs) = summary.stale_secs {

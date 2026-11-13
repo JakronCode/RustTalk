@@ -50,7 +50,7 @@ impl RustTalkApp {
         self.server_settings_dialog =
             Some(ServerSettingsDialog {
                 tab,
-                draft: self.server_settings.clone(),
+                draft: self.srv.server_settings.clone(),
                 error: None,
                 gif_key: String::new(),
                 admin_pw: String::new(),
@@ -119,7 +119,7 @@ impl RustTalkApp {
                             ui.label(egui::RichText::new(e).color(theme::RED));
                         }
                         let admin = self.can(rusttalk_shared::protocol::Role::Admin);
-                        let changed = admin && dlg.draft != self.server_settings;
+                        let changed = admin && dlg.draft != self.srv.server_settings;
                         if !admin {
                             ui.label(egui::RichText::new(format!("{}  Only admins can change server settings.", icons::regular::LOCK)).color(theme::MUTED));
                         }
@@ -131,7 +131,7 @@ impl RustTalkApp {
                                     .min_size(egui::vec2(110.0, 32.0)),
                             );
                             if save.clicked() {
-                                if let Some(tx) = &self.cmd_tx {
+                                if let Some(tx) = &self.srv.cmd_tx {
                                     let _ = tx.send(Command::UpdateServerSettings(dlg.draft.clone()));
                                 }
                                 close = true;
@@ -257,7 +257,7 @@ impl RustTalkApp {
         card(ui, |ui| {
             caption(ui, "GIFs (GIPHY)");
             ui.horizontal(|ui| {
-                let (icon, text, color) = if self.gif_available {
+                let (icon, text, color) = if self.srv.gif_available {
                     (icons::regular::CHECK_CIRCLE, "GIF search is active for everyone on this server", theme::GREEN)
                 } else {
                     (icons::regular::X_CIRCLE, "GIF search is off - no API key set", theme::MUTED)
@@ -274,23 +274,23 @@ impl RustTalkApp {
                 .color(theme::MUTED),
             );
             ui.separator();
-            let label = if self.gif_available { "Replace API key" } else { "GIPHY API key" };
+            let label = if self.srv.gif_available { "Replace API key" } else { "GIPHY API key" };
             setting_row(ui, label, Some("Free at developers.giphy.com (create an app, type \"API\")"), false, |ui| {
                 ui.add(egui::TextEdit::singleline(&mut dlg.gif_key).password(true).hint_text("paste key").desired_width(200.0));
             });
             ui.horizontal(|ui| {
                 let key = dlg.gif_key.trim().to_string();
                 if ui.add_enabled(!key.is_empty(), egui::Button::new(format!("{}  Check & save", icons::regular::FLOPPY_DISK))).clicked() {
-                    if let Some(tx) = &self.cmd_tx {
+                    if let Some(tx) = &self.srv.cmd_tx {
                         let _ = tx.send(Command::SetGifKey(Some(key)));
                     }
                     dlg.gif_key.clear();
                     self.set_status("Checking the GIPHY key...");
                 }
-                if self.gif_available
+                if self.srv.gif_available
                     && ui.add(egui::Button::new(egui::RichText::new(format!("{}  Remove key", icons::regular::TRASH)).color(theme::RED))).clicked()
                 {
-                    if let Some(tx) = &self.cmd_tx {
+                    if let Some(tx) = &self.srv.cmd_tx {
                         let _ = tx.send(Command::SetGifKey(None));
                     }
                 }

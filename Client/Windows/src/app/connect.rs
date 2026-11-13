@@ -5,10 +5,14 @@ use super::*;
 
 impl RustTalkApp {
     pub(super) fn ui_connect(&mut self, ctx: &egui::Context) {
+        // Other servers stay reachable (switcher, voice, mute) while this one is not connected.
+        if self.any_connected() {
+            self.ui_sidebar(ctx, None);
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(theme::DARK))
             .show(ctx, |ui| {
-                if self.join_error.is_some() {
+                if self.srv.join_error.is_some() {
                     ui.disable();
                 }
                 let avail = ui.available_size();
@@ -39,7 +43,7 @@ impl RustTalkApp {
                                     egui::Layout::top_down(egui::Align::Min),
                                     |ui| {
                                         if self.saved_servers(ui) {
-                                            self.start_connect();
+                                            self.request_connect();
                                         }
                                     },
                                 );
@@ -57,12 +61,12 @@ impl RustTalkApp {
                         });
                 });
 
-                if self.cert_check.as_ref().is_some_and(|check| !check.matches_address(&self.config.server_address)) {
-                    self.cert_check = None;
-                    self.join_error = None;
+                if self.srv.cert_check.as_ref().is_some_and(|check| !check.matches_address(&self.config.server_address)) {
+                    self.srv.cert_check = None;
+                    self.srv.join_error = None;
                     self.set_status("Server address changed. Connect again to verify its identity.");
                 }
-                if !self.status.is_empty() && self.join_error.is_none() {
+                if !self.status.is_empty() && self.srv.join_error.is_none() {
                     ui.add_space(14.0);
                     ui.vertical_centered(|ui| {
                         let color = if self.status_is_error { theme::RED } else { theme::MUTED };
@@ -71,7 +75,7 @@ impl RustTalkApp {
                 }
             });
         self.update_banner_overlay(ctx);
-        if self.join_error.is_some() {
+        if self.srv.join_error.is_some() {
             let size = ctx.screen_rect().size();
             let width = (size.x - 96.0).clamp(160.0, 640.0);
             let response = egui::Modal::new(egui::Id::new("join_error_dialog"))
@@ -87,8 +91,8 @@ impl RustTalkApp {
                         .show(ui, |ui| self.join_error_panel(ui, width));
                 });
             if response.should_close() {
-                self.join_error = None;
-                self.cert_check = None;
+                self.srv.join_error = None;
+                self.srv.cert_check = None;
                 self.set_status("");
             }
         }
@@ -129,7 +133,7 @@ impl RustTalkApp {
                     self.select_saved_server(bm);
                     self.show_connect_form = false;
                 }
-                if resp.double_clicked() && self.cmd_tx.is_none() {
+                if resp.double_clicked() && self.srv.cmd_tx.is_none() {
                     connect = true;
                 }
                 resp.on_hover_text(format!("{}\nClick = select  -  double click = connect  -  right click = edit or remove", bm.address))
@@ -164,7 +168,9 @@ impl RustTalkApp {
             }
         });
         if let Some(i) = remove_idx {
-            self.config.bookmarks.remove(i);
+            // A removed server is no longer reconnected at startup.
+            let removed = self.config.bookmarks.remove(i);
+            self.config.auto_connect.remove(&crate::net::normalize_addr(removed.address.trim()));
             self.config.save();
         }
         if !self.show_connect_form {
@@ -176,7 +182,7 @@ impl RustTalkApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let selected = self.config.bookmarks.iter()
                         .find(|bm| bm.address == self.config.server_address).cloned();
-                    let enabled = selected.is_some() && self.cmd_tx.is_none();
+                    let enabled = selected.is_some() && self.srv.cmd_tx.is_none();
                     if ui.add_enabled_ui(enabled, |ui| theme::primary_button(ui, "Connect")).inner.clicked() {
                         if let Some(bm) = selected {
                             self.select_saved_server(&bm);
@@ -224,7 +230,9 @@ impl RustTalkApp {
         Ok(())
     }
 
+    /// Selecting a saved server views it (the connect screen shows the viewed server).
     fn select_saved_server(&mut self, bm: &ServerBookmark) {
+        self.select_server(&crate::net::normalize_addr(bm.address.trim()));
         self.config.invite = None;
         self.config.server_address = bm.address.clone();
         self.config.server_password = bm.password.clone();
@@ -234,7 +242,7 @@ impl RustTalkApp {
 
     /// Error panel for a failed join: icon, title, explanation, actions, raw details.
     fn join_error_panel(&mut self, ui: &mut egui::Ui, width: f32) {
-        let Some(err) = self.join_error.clone() else { return };
+        let Some(err) = self.srv.join_error.clone() else { return };
         let color = match err.kind {
             super::join_error::Kind::UnknownServer => theme::accent(),
             _ if err.is_fatal() => theme::RED,
@@ -256,8 +264,8 @@ impl RustTalkApp {
                             ui.label(egui::RichText::new(err.title()).strong().size(15.0).color(theme::HEADER));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if theme::ghost_button(ui, egui::RichText::new(icons::regular::X).color(theme::MUTED)).on_hover_text("Dismiss").clicked() {
-                                    self.join_error = None;
-                                    self.cert_check = None;
+                                    self.srv.join_error = None;
+                                    self.srv.cert_check = None;
                                     self.set_status("");
                                 }
                             });
@@ -276,7 +284,7 @@ impl RustTalkApp {
                             }
                             let caret = if err.details_open { icons::regular::CARET_DOWN } else { icons::regular::CARET_RIGHT };
                             if theme::ghost_button(ui, egui::RichText::new(format!("{caret}  Details")).color(theme::MUTED)).clicked() {
-                                if let Some(e) = self.join_error.as_mut() {
+                                if let Some(e) = self.srv.join_error.as_mut() {
                                     e.details_open = !e.details_open;
                                 }
                             }
@@ -291,7 +299,7 @@ impl RustTalkApp {
 
     /// New or changed certificate: the only way on is an explicit trust decision.
     fn cert_actions(&mut self, ui: &mut egui::Ui) {
-        let Some(check) = self.cert_check.clone() else { return };
+        let Some(check) = self.srv.cert_check.clone() else { return };
         ui.add_space(6.0);
         egui::Frame::default()
             .fill(theme::DARK)
@@ -312,12 +320,12 @@ impl RustTalkApp {
             };
             if trust.clicked() && check.trust(&mut self.config) {
                 self.config.save();
-                self.cert_check = None;
-                self.start_connect();
+                self.srv.cert_check = None;
+                self.start_connect(self.srv.remember); // the choice made before the certificate question
             }
             if theme::ghost_button(ui, "Cancel").clicked() {
-                self.cert_check = None;
-                self.join_error = None;
+                self.srv.cert_check = None;
+                self.srv.join_error = None;
                 self.set_status("");
             }
         });
@@ -326,17 +334,17 @@ impl RustTalkApp {
     fn run_join_action(&mut self, ctx: &egui::Context, action: super::join_error::Action) {
         use super::join_error::Action;
         match action {
-            Action::Retry => self.start_connect(),
+            Action::Retry => self.start_connect(self.srv.remember),
             Action::EditPassword => {
                 self.show_connect_form = true;
-                self.join_error = None;
+                self.srv.join_error = None;
                 // A stale invite would be refused before the password is checked.
                 self.config.invite = None;
                 self.config.server_password = None;
                 self.focus_password = true;
             }
             Action::ShowUpdate => {
-                self.join_error = None;
+                self.srv.join_error = None;
                 self.check_for_updates();
                 self.open_settings(SettingsPage::About);
             }
@@ -380,8 +388,8 @@ impl RustTalkApp {
             self.config.server_password = if pw.is_empty() { None } else { Some(pw) };
         }
         ui.add_space(12.0);
-        let connecting = self.cmd_tx.is_some();
-        let label = match (&self.reconnect, connecting) {
+        let connecting = self.srv.cmd_tx.is_some();
+        let label = match (&self.srv.reconnect, connecting) {
             (Some(_), true) => "Reconnecting...",
             (Some(rc), false) => {
                 let secs = rc.next_at.map(|t| t.saturating_duration_since(Instant::now()).as_secs() + 1).unwrap_or(0);
@@ -398,12 +406,12 @@ impl RustTalkApp {
                 .min_size(egui::vec2(w, 38.0)),
         );
         if connect.clicked() || (ui.is_enabled() && !connecting && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
-            if let Some(rc) = self.reconnect.as_mut() {
+            if let Some(rc) = self.srv.reconnect.as_mut() {
                 rc.next_at = None; // manual attempt replaces the scheduled one
             }
-            self.start_connect();
+            self.request_connect();
         }
-        if let Some(rc) = &self.reconnect {
+        if let Some(rc) = &self.srv.reconnect {
             ui.add_space(4.0);
             let attempt = rc.attempt;
             let wait = rc.next_at.map(|t| t.saturating_duration_since(Instant::now()).as_secs() + 1);
