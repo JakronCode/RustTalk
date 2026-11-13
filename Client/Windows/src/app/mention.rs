@@ -137,20 +137,57 @@ impl RustTalkApp {
         let Some(m) = self.active_mention(ctx, ch_id, focused) else {
             return;
         };
-        let key =
-            |k| ctx.input_mut(|i| i.modifiers.is_none() && i.consume_key(egui::Modifiers::NONE, k));
+        let keys = ctx.input_mut(|i| {
+            let mut keys = Vec::new();
+            i.events.retain(|event| {
+                if let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = event
+                {
+                    if modifiers.is_none()
+                        && matches!(
+                            key,
+                            egui::Key::ArrowDown
+                                | egui::Key::ArrowUp
+                                | egui::Key::Escape
+                                | egui::Key::Tab
+                                | egui::Key::Enter
+                        )
+                    {
+                        keys.push(*key);
+                        return false;
+                    }
+                }
+                true
+            });
+            keys
+        });
         let n = m.names.len();
-        if key(egui::Key::ArrowDown) {
-            self.mention.selected = (self.mention.selected + 1) % n;
-            self.mention.scroll = true;
-        } else if key(egui::Key::ArrowUp) {
-            self.mention.selected = (self.mention.selected + n - 1) % n;
-            self.mention.scroll = true;
-        } else if key(egui::Key::Escape) {
-            self.mention.dismissed = Some((self.chat_input.clone(), m.at));
-        } else if key(egui::Key::Tab) || key(egui::Key::Enter) {
-            let name = m.names[self.mention.selected].clone();
-            self.accept_mention(ctx, ch_id, &m, &name);
+        // Consume the whole popup-key batch so a second Enter cannot send this frame.
+        for key in keys {
+            match key {
+                egui::Key::ArrowDown => {
+                    self.mention.selected = (self.mention.selected + 1) % n;
+                    self.mention.scroll = true;
+                }
+                egui::Key::ArrowUp => {
+                    self.mention.selected = (self.mention.selected + n - 1) % n;
+                    self.mention.scroll = true;
+                }
+                egui::Key::Escape => {
+                    self.mention.dismissed = Some((self.chat_input.clone(), m.at));
+                    break;
+                }
+                egui::Key::Tab | egui::Key::Enter => {
+                    let name = m.names[self.mention.selected].clone();
+                    self.accept_mention(ctx, ch_id, &m, &name);
+                    break;
+                }
+                _ => {}
+            }
         }
     }
 

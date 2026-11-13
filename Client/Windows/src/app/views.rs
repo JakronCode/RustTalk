@@ -1150,6 +1150,57 @@ mod tests {
 
 
     #[test]
+    fn batched_mention_keys_do_not_send_or_cancel_reply() {
+        use super::super::servers::tests::{app, login};
+        use egui::text::{CCursor, CCursorRange};
+        for (keys, expected) in [
+            (vec![egui::Key::ArrowDown, egui::Key::Enter], "@Anton "),
+            (vec![egui::Key::ArrowDown, egui::Key::Escape], "@an"),
+            (vec![egui::Key::ArrowDown, egui::Key::ArrowUp, egui::Key::Tab], "@Anna "),
+            (vec![egui::Key::Enter, egui::Key::Enter], "@Anna "),
+        ] {
+            let mut app = app();
+            let (session, mut commands) = login(&mut app, "test.invalid:7331", 1);
+            app.view_session(session);
+            for (id, name) in [(2, "Anna"), (3, "Anton")] {
+                app.srv.users.insert(id, UserInfo {
+                    id, name: name.into(), channel_id: 1, muted: false,
+                    deafened: false, sharing: false, role: Default::default(), streams: vec![],
+                });
+            }
+            app.chat_input = "@an".into();
+            app.reply_to = Some(42);
+            let sender = app.srv.cmd_tx.as_ref().unwrap().sender();
+            let ctx = egui::Context::default();
+            let id = composer_id(3);
+            let draw = |app: &mut RustTalkApp, events| {
+                let mut input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                    events, focused: true, ..Default::default()
+                };
+                input.viewports.entry(egui::ViewportId::ROOT).or_default().focused = Some(true);
+                let _ = ctx.run(input, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| app.composer(ui, 3, &sender));
+                });
+            };
+            draw(&mut app, vec![]);
+            let mut state = egui::TextEdit::load_state(&ctx, id).unwrap();
+            state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(3))));
+            state.store(&ctx, id);
+            ctx.memory_mut(|m| m.request_focus(id));
+            draw(&mut app, vec![]);
+            while commands.try_recv().is_some() {}
+            draw(&mut app, keys.into_iter().map(|key| egui::Event::Key {
+                key, physical_key: None, pressed: true, repeat: false, modifiers: Default::default(),
+            }).collect());
+            assert_eq!(app.chat_input, expected);
+            assert_eq!(app.reply_to, Some(42));
+            assert!(commands.try_recv().is_none(), "completion must not send a chat command");
+            assert!(ctx.memory(|m| m.has_focus(id)));
+        }
+    }
+
+    #[test]
     fn context_menu_stays_with_message_after_preceding_deletion() {
         let ctx = egui::Context::default();
         let mut textures = TextureCache::default();
