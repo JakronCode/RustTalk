@@ -177,6 +177,10 @@ pub struct ClientConfig {
     /// Stage: show only people with a camera or screen share (locally).
     #[serde(default)]
     pub stage_hide_idle: bool,
+    /// Stage: pick the layout by itself (Presenter while someone whose screen we watch also
+    /// shares a camera). Choosing a layout by hand turns it off.
+    #[serde(default = "default_true")]
+    pub stage_auto: bool,
     /// Presenter layout: corner of the camera over the screen (dragged, locally).
     #[serde(default)]
     pub presenter_cam_corner: CamCorner,
@@ -301,6 +305,7 @@ impl Default for ClientConfig {
             stage_mode: StageMode::Grid,
             remove_background: false,
             stage_hide_idle: false,
+            stage_auto: true,
             presenter_cam_corner: CamCorner::BottomLeft,
         }
     }
@@ -451,6 +456,7 @@ mod tests {
             stage_mode: StageMode::Presenter,
             remove_background: true,
             stage_hide_idle: true,
+            stage_auto: false,
             presenter_cam_corner: CamCorner::TopRight,
         };
         let text = toml::to_string_pretty(&cfg).unwrap();
@@ -472,6 +478,7 @@ mod tests {
         assert_eq!(back.stage_mode, StageMode::Presenter);
         assert!(back.remove_background);
         assert!(back.stage_hide_idle);
+        assert!(!back.stage_auto);
         assert_eq!(back.presenter_cam_corner, CamCorner::TopRight);
         assert!(!back.animate_gifs);
         assert!(!back.flash_taskbar && !back.sound_leave && back.sound_join);

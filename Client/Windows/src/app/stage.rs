@@ -116,6 +116,20 @@ pub(super) fn resolve_presenter(
     }
 }
 
+/// First user with a screen and a camera whose screen we watch (`me` counts as watched).
+pub(super) fn pick_auto_presenter(
+    candidates: &[(u64, Vec<VideoKind>)],
+    me: u64,
+    watching_screen: impl Fn(u64) -> bool,
+) -> Option<u64> {
+    candidates
+        .iter()
+        .find(|(id, streams)| {
+            presenter_blocker(streams).is_none() && (*id == me || watching_screen(*id))
+        })
+        .map(|(id, _)| *id)
+}
+
 /// Focus layout: the big 16:9 rect plus `n_others` tiles in a strip to the
 /// right or below it, whichever leaves the big one larger.
 pub(super) fn focus_rects(
@@ -283,19 +297,49 @@ impl RustTalkApp {
         tiles
     }
 
+    /// Someone whose screen we watch (or our own) who also shares a camera: the automatic
+    /// layout presents them.
+    fn auto_presenter(&self, users: &[UserInfo]) -> Option<u64> {
+        let candidates: Vec<(u64, Vec<VideoKind>)> =
+            users.iter().map(|u| (u.id, self.streams_of(u))).collect();
+        pick_auto_presenter(&candidates, self.srv.my_id, |id| {
+            self.watching.contains(&(id, VideoKind::Screen))
+        })
+    }
+
+    /// The layout in effect: the chosen one, or in automatic mode Presenter while there is
+    /// someone to present, else Grid.
+    pub(super) fn stage_mode(&self, users: &[UserInfo]) -> StageMode {
+        if !self.config.stage_auto {
+            self.config.stage_mode
+        } else if self.auto_presenter(users).is_some() {
+            StageMode::Presenter
+        } else {
+            StageMode::Grid
+        }
+    }
+
+    /// Who the Presenter layout shows: the pick, else (automatic) the person we watch.
+    fn presenter_pick(&self, users: &[UserInfo]) -> Option<u64> {
+        self.stage_pick
+            .presenter
+            .or_else(|| self.config.stage_auto.then(|| self.auto_presenter(users)).flatten())
+    }
+
     /// The presenter whose screen `key` is, while the Presenter layout shows
     /// them with their camera (fullscreen keeps the camera on top).
     pub(super) fn presenter_of(&self, key: (u64, VideoKind)) -> Option<UserInfo> {
-        if self.config.stage_mode != StageMode::Presenter || key.1 != VideoKind::Screen {
+        if key.1 != VideoKind::Screen {
             return None;
         }
         let user = self.srv.users.get(&key.0)?;
-        let candidates: Vec<(u64, Vec<VideoKind>)> = self
-            .channel_members(user.channel_id)
-            .iter()
-            .map(|u| (u.id, self.streams_of(u)))
-            .collect();
-        (resolve_presenter(&candidates, self.stage_pick.presenter) == Presenting::Both(key.0))
+        let members = self.channel_members(user.channel_id);
+        if self.stage_mode(&members) != StageMode::Presenter {
+            return None;
+        }
+        let candidates: Vec<(u64, Vec<VideoKind>)> =
+            members.iter().map(|u| (u.id, self.streams_of(u))).collect();
+        (resolve_presenter(&candidates, self.presenter_pick(&members)) == Presenting::Both(key.0))
             .then(|| user.clone())
     }
 
@@ -324,10 +368,11 @@ impl RustTalkApp {
     /// Grid and Focus buttons plus a "..." menu (Presenter, video only, who is shown) in the
     /// bottom right corner of the stage.
     pub(super) fn stage_controls(&mut self, ui: &mut egui::Ui, area: egui::Rect, ch_id: u64) {
-        let mode = self.config.stage_mode;
+        let mode = self.stage_mode(&self.channel_members(ch_id));
         let mut picked = None;
         let mut more = None;
         let mut toggle_idle = false;
+        let mut toggle_auto = false;
         // Built from the right so the pill is exactly as wide as its buttons.
         let bg = ui.painter().add(egui::Shape::Noop);
         let anchor = egui::Rect::from_min_max(
@@ -389,6 +434,14 @@ impl RustTalkApp {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 ui.label(egui::RichText::new("Layout").strong().color(theme::HEADER));
                 theme::menu_separator(ui);
+                let auto = self.config.stage_auto;
+                let icon = if auto { icons::regular::CHECK_SQUARE } else { icons::regular::SQUARE };
+                if theme::menu_item(ui, icon, "Automatic layout", false)
+                    .on_hover_text("Presenter while you watch someone's screen and they share a camera, else Grid")
+                    .clicked()
+                {
+                    toggle_auto = true;
+                }
                 let presenter = StageMode::Presenter;
                 let icon = if mode == presenter { icons::regular::CHECK } else { presenter.icon() };
                 if theme::menu_item(ui, icon, presenter.label(), false)
@@ -518,12 +571,20 @@ impl RustTalkApp {
             self.config.stage_hide_idle = !self.config.stage_hide_idle;
             self.config.save();
         }
+        if toggle_auto {
+            self.config.stage_auto = !self.config.stage_auto;
+            if !self.config.stage_auto {
+                self.config.stage_mode = mode; // keep what is shown now
+            }
+            self.config.save();
+        }
         if let Some(m) = picked {
-            if m != mode {
+            if m != mode || self.config.stage_auto {
                 if mode != StageMode::Presenter {
                     self.stage_flat = mode;
                 }
                 self.config.stage_mode = m;
+                self.config.stage_auto = false;
                 self.config.save();
             }
         }
@@ -587,7 +648,18 @@ impl RustTalkApp {
             out.extend(others.into_iter().zip(rects));
             out
         };
-        match self.config.stage_mode {
+        let users: Vec<UserInfo> = {
+            let mut seen: Vec<UserInfo> = Vec::new();
+            for (u, _) in all {
+                if !seen.iter().any(|s| s.id == u.id) {
+                    seen.push(u.clone());
+                }
+            }
+            seen
+        };
+        let mode_now = self.stage_mode(&users);
+        self.stage_now = mode_now;
+        match mode_now {
             StageMode::Focus => {
                 if let Some(i) = resolve_focus(&keys, self.stage_pick.focus) {
                     placed = big(i, &[]);
@@ -604,7 +676,7 @@ impl RustTalkApp {
                     seen
                 };
                 let find = |id: u64, k: VideoKind| keys.iter().position(|t| *t == (id, Some(k)));
-                match resolve_presenter(&candidates, self.stage_pick.presenter) {
+                match resolve_presenter(&candidates, self.presenter_pick(&users)) {
                     Presenting::Both(id) => {
                         if let (Some(screen), Some(cam)) =
                             (find(id, VideoKind::Screen), find(id, VideoKind::Camera))
@@ -676,6 +748,7 @@ impl RustTalkApp {
         }
         if let Some((user, kind)) = focus_click {
             self.config.stage_mode = StageMode::Focus;
+            self.config.stage_auto = false;
             self.config.save();
             self.pick_stage_target(StageMode::Focus, user, kind);
         }
@@ -744,7 +817,7 @@ impl RustTalkApp {
                     let x = if main { -22.0 } else { -64.0 };
                     let mut at = rect.right_top() + egui::vec2(x, 22.0);
                     // Presenter: the camera over the screen may sit in this corner.
-                    if main && kind == VideoKind::Screen && self.config.stage_mode == StageMode::Presenter {
+                    if main && kind == VideoKind::Screen && self.stage_now == StageMode::Presenter {
                         let has_cam = self.streams_of(user).contains(&VideoKind::Camera);
                         let cam = has_cam.then(|| self.presenter_cam_rect(rect, user.id));
                         at = dodge(at, 30.0, cam);
@@ -1237,6 +1310,41 @@ mod tests {
         let cam_bottom_left = cam_rect_at(content, ASPECT, CamCorner::BottomLeft, egui::Vec2::ZERO);
         assert_eq!(dodge(corner_button, 30.0, Some(cam_bottom_left)), corner_button, "no camera there: stays");
         assert_eq!(dodge(corner_button, 30.0, None), corner_button);
+    }
+
+    #[test]
+    fn automatic_layout_presents_someone_we_watch_who_also_has_a_camera() {
+        use VideoKind::{Camera, Screen};
+        let both = vec![Screen, Camera];
+        let candidates = vec![(1, vec![Camera]), (2, both.clone()), (3, vec![Screen]), (4, both.clone())];
+        assert_eq!(pick_auto_presenter(&candidates, 9, |_| false), None, "nothing watched");
+        assert_eq!(pick_auto_presenter(&candidates, 9, |id| id == 3), None, "screen only: no camera to put on top");
+        assert_eq!(pick_auto_presenter(&candidates, 9, |id| id == 4), Some(4));
+        assert_eq!(pick_auto_presenter(&candidates, 9, |_| true), Some(2), "first in stage order");
+        assert_eq!(pick_auto_presenter(&candidates, 2, |_| false), Some(2), "our own screen counts as watched");
+    }
+
+    #[test]
+    fn choosing_a_layout_by_hand_ends_the_automatic_one() {
+        let ctx = egui::Context::default();
+        let mut app = RustTalkApp::with_config(ctx.clone(), ClientConfig::default(), false);
+        assert!(app.config.stage_auto, "automatic by default");
+        let tiles: Vec<_> = (1..=3).map(|i| (user(i, &format!("user{i}")), None)).collect();
+        let mut t = 0.0;
+        let pos = button_pos(&ctx, &mut app, &tiles, 1, &mut t);
+        click_at(&ctx, &mut app, &tiles, pos, &mut t);
+        assert!(!app.config.stage_auto);
+        assert_eq!(app.config.stage_mode, StageMode::Focus);
+        // The menu entry turns automatic back on.
+        let pos = button_pos(&ctx, &mut app, &tiles, 2, &mut t);
+        click_at(&ctx, &mut app, &tiles, pos, &mut t);
+        t += 0.1;
+        run_stage_out(&ctx, &mut app, &tiles, t, vec![]);
+        t += 0.1;
+        let (_, out) = run_stage_out(&ctx, &mut app, &tiles, t, vec![]);
+        let entry = text_pos(&out, "Automatic layout").expect("menu entry");
+        click_at(&ctx, &mut app, &tiles, entry, &mut t);
+        assert!(app.config.stage_auto);
     }
 
     #[test]
