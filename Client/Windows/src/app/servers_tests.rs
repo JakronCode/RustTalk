@@ -580,6 +580,42 @@ fn only_connect_and_remember_enrolls_a_saved_server() {
 }
 
 #[test]
+fn pending_voice_join_receives_toggles_without_starting_capture() {
+    let devices = Devices::new();
+    let mut app = app();
+    let (a, mut ra) = login(&mut app, "a.invalid:7331", 1);
+    let (_b, mut rb) = login(&mut app, "b.invalid:7331", 1);
+    app.view_session(a);
+    app.toggle_deafen();
+    app.join_channel(VOICE);
+    assert_eq!(
+        drain(&mut ra),
+        vec!["SetMute { muted: true, deafened: true }", "JoinChannel(2)"]
+    );
+    app.toggle_deafen();
+    app.toggle_mute();
+    app.toggle_mute();
+    assert_eq!(
+        drain(&mut ra),
+        vec![
+            "SetMute { muted: false, deafened: false }",
+            "SetMute { muted: true, deafened: false }",
+            "SetMute { muted: false, deafened: false }",
+        ]
+    );
+    assert_eq!(devices.0.borrow().input_starts, 0);
+    assert!(app.voice().is_none());
+    assert!(
+        drain(&mut rb).is_empty(),
+        "background chat receives no metadata"
+    );
+    moved(&mut app, a, 1, VOICE);
+    assert_eq!(app.mute_state(), (false, false));
+    assert_eq!(devices.0.borrow().input_starts, 1);
+    assert!(drain(&mut rb).is_empty());
+}
+
+#[test]
 fn mute_state_reaches_only_the_voice_server() {
     let _devices = Devices::new();
     let mut app = app();
