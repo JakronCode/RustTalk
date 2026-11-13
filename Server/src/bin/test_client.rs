@@ -27,6 +27,8 @@ struct Args {
     password: Option<String>,
     /// Wie viele Sekunden lang Audiopakete (Dummy-Payload) gesendet werden.
     audio_secs: u64,
+    /// Also send a computer-audio stream (`FLAG_SCREEN_AUDIO`) next to the voice.
+    screen_audio: bool,
     /// Gesamtlaufzeit des Tests.
     duration_secs: u64,
     chat: Option<String>,
@@ -49,6 +51,7 @@ impl Default for Args {
             name: "tester".to_string(),
             password: None,
             audio_secs: 0,
+            screen_audio: false,
             duration_secs: 0,
             chat: None,
             chat_channel: None,
@@ -74,6 +77,7 @@ fn parse_args() -> Result<Args> {
             "--name" => args.name = value("--name")?,
             "--password" => args.password = Some(value("--password")?),
             "--audio-secs" => args.audio_secs = value("--audio-secs")?.parse()?,
+            "--screen-audio" => args.screen_audio = true,
             "--duration-secs" => args.duration_secs = value("--duration-secs")?.parse()?,
             "--chat" => args.chat = Some(value("--chat")?),
             "--chat-channel" => args.chat_channel = Some(value("--chat-channel")?.parse()?),
@@ -94,7 +98,7 @@ fn parse_args() -> Result<Args> {
             "-h" | "--help" => {
                 println!(
                     "test-client [--addr host:port] [--name N] [--password P] \
-                     [--audio-secs N] [--duration-secs N] [--chat TEXT] \
+                     [--audio-secs N] [--screen-audio] [--duration-secs N] [--chat TEXT] \
                      [--create-channel NAME] [--join-channel ID]"
                 );
                 std::process::exit(0);
@@ -258,6 +262,11 @@ async fn run(args: &Args) -> Result<()> {
                         &dummy_payload,
                     );
                     udp.send(&pkt).await?;
+                    if args.screen_audio {
+                        let mut header = AudioHeader::new(udp_token, seq, timestamp);
+                        header.flags = audio_packet::FLAG_SCREEN_AUDIO;
+                        udp.send(&audio_packet::seal_packet(&header, &cipher, DIR_TO_SERVER, &dummy_payload)).await?;
+                    }
                     seq = seq.wrapping_add(1);
                     timestamp = timestamp.wrapping_add(FRAME_SAMPLES as u32);
                 }

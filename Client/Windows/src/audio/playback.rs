@@ -157,6 +157,7 @@ fn build_out<T: cpal::SizedSample + Send + 'static>(
     let mut chunk = [0f32; FRAME_SAMPLES];
     let mut tmp = [0f32; FRAME_SAMPLES];
     let mut mono_out: Vec<f32> = Vec::with_capacity(16384);
+    let mut levels: Vec<(u64, f32, std::time::Instant)> = Vec::with_capacity(64);
 
     let stream = device.build_output_stream(
         config,
@@ -172,18 +173,33 @@ fn build_out<T: cpal::SizedSample + Send + 'static>(
                     map.retain(|_, u| u.last_seen.elapsed() < USER_TIMEOUT);
                     let local = local_muted.lock().unwrap();
                     let volumes = user_volumes.lock().unwrap();
+                    let muted_streams = control.muted_streams.lock().unwrap();
+                    levels.clear();
                     for (id, user) in map.iter_mut() {
-                        let speaker = super::mixer_speaker(*id);
-                        if local.contains(&speaker) {
-                            continue; // lokal stummgeschaltet
-                        }
                         tmp.fill(0.0);
                         let n = user.fill(&mut tmp);
-                        // Per-user volume (local only, 1.0 = unchanged).
-                        let gain = volumes.get(&speaker).copied().unwrap_or(1.0);
+                        // Per-stream volume (local only, 1.0 = unchanged).
+                        let gain = volumes.get(id).copied().unwrap_or(1.0);
+                        let peak = tmp[..n].iter().fold(0.0f32, |p, s| p.max(s.abs()));
+                        levels.push((*id, peak * gain, user.last_seen));
+                        if local.contains(&super::mixer_speaker(*id)) || muted_streams.contains(id) {
+                            continue; // lokal stummgeschaltet
+                        }
                         for (m, t) in chunk[..n].iter_mut().zip(tmp[..n].iter()) {
                             *m += *t * gain;
                         }
+                    }
+                    if !levels.is_empty() {
+                        control.note_stream_levels(&levels);
+                    }
+                } else {
+                    // Deafened: nothing plays, but the mixer still lists who is sending.
+                    let map = mixer.lock().unwrap();
+                    levels.clear();
+                    levels.extend(map.iter().map(|(id, user)| (*id, 0.0, user.last_seen)));
+                    drop(map);
+                    if !levels.is_empty() {
+                        control.note_stream_levels(&levels);
                     }
                 }
                 // Notification sounds (also while deafened, like Discord).

@@ -146,6 +146,12 @@ pub struct ClientConfig {
     /// Per-user playback volume by username (local only; missing = 100 %).
     #[serde(default)]
     pub user_volumes: std::collections::BTreeMap<String, f32>,
+    /// Per-user volume of their shared computer audio, by username (missing = 100 %).
+    #[serde(default)]
+    pub share_volumes: std::collections::BTreeMap<String, f32>,
+    /// Volume mixer panel open next to the voice chat.
+    #[serde(default)]
+    pub mixer_open: bool,
     /// Compact layout: tighter spacing, chat without avatars.
     #[serde(default)]
     pub compact: bool,
@@ -268,6 +274,8 @@ impl Default for ClientConfig {
             global_ptt: false,
             input_volume: 1.0,
             user_volumes: Default::default(),
+            share_volumes: Default::default(),
+            mixer_open: false,
             compact: false,
             accent_color: DEFAULT_ACCENT,
             sidebar_width: default_sidebar_width(),
@@ -414,6 +422,8 @@ mod tests {
             global_ptt: true,
             input_volume: 0.5,
             user_volumes: [("anna".to_string(), 1.5)].into_iter().collect(),
+            share_volumes: [("anna".to_string(), 0.25)].into_iter().collect(),
+            mixer_open: true,
             compact: true,
             accent_color: [0xEB, 0x45, 0x95],
             sidebar_width: 320.0,
@@ -451,6 +461,8 @@ mod tests {
         assert_eq!(back.known_servers.get("10.0.0.5:7331").map(String::as_str), Some("AB:CD"));
         assert!(back.auto_connect.contains("10.69.40.101:7331"));
         assert_eq!(back.user_volumes.get("anna"), Some(&1.5));
+        assert_eq!(back.share_volumes.get("anna"), Some(&0.25));
+        assert!(back.mixer_open);
         assert_eq!(back.trusted_links.get("https://github.com"), Some(&1_700_000_000));
         assert_eq!(back.threat_feed.as_deref(), Some("feeds/urlhaus.txt"));
     }
@@ -517,6 +529,7 @@ mod tests {
         assert!(cfg.announce_names && cfg.announce_voice.is_none());
         assert_eq!(cfg.announce_language, "en");
         assert!(cfg.user_volumes.is_empty());
+        assert!(cfg.share_volumes.is_empty() && !cfg.mixer_open);
         assert!(!cfg.compact);
         assert_eq!(cfg.accent_color, DEFAULT_ACCENT);
         assert_eq!(cfg.sidebar_width, 260.0);
