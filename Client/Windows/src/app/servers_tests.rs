@@ -1467,3 +1467,48 @@ fn a_late_screen_failure_cannot_stop_a_newer_share() {
     new_sink("ignored".into());
     assert!(!app.take_screen_failure());
 }
+
+#[test]
+fn mixer_volumes_are_per_stream_saved_by_name_and_follow_the_voice_server() {
+    use crate::audio::StreamKind;
+    let _devices = Devices::new();
+    let mut app = app();
+    app.config.user_volumes.insert("anna".into(), 1.5);
+    app.config.share_volumes.insert("anna".into(), 0.25);
+    let (a, _ra) = login(&mut app, "a.invalid:7331", 1);
+    app.view_session(a);
+    join_voice(&mut app, VOICE);
+    let anna = UserInfo {
+        id: 5,
+        name: "anna".into(),
+        channel_id: VOICE,
+        muted: false,
+        deafened: false,
+        sharing: false,
+        role: Default::default(),
+        streams: vec![],
+    };
+    message(&mut app, a, ServerMessage::UserJoined { user: anna.clone() });
+    let gain = |app: &RustTalkApp, kind: StreamKind| app.user_volumes.lock().unwrap().get(&kind.key(5)).copied();
+    assert_eq!(gain(&app, StreamKind::Voice), Some(1.5), "saved voice volume reaches playback");
+    assert_eq!(gain(&app, StreamKind::Shared), Some(0.25), "shared audio has its own volume");
+
+    // One source of truth: whatever slider changes it, config and playback agree.
+    app.set_user_volume(5, "anna", StreamKind::Shared, 1.8);
+    assert_eq!(app.user_volume("anna", StreamKind::Shared), 1.8);
+    assert_eq!(gain(&app, StreamKind::Shared), Some(1.8));
+    assert_eq!(gain(&app, StreamKind::Voice), Some(1.5), "voice untouched");
+    app.set_user_volume(5, "anna", StreamKind::Voice, 1.0);
+    assert!(!app.config.user_volumes.contains_key("anna"), "100 % is not stored");
+    assert_eq!(gain(&app, StreamKind::Voice), None);
+
+    let back: ClientConfig = toml::from_str(&toml::to_string_pretty(&app.config).unwrap()).unwrap();
+    assert_eq!(back.share_volumes.get("anna"), Some(&1.8), "survives a restart");
+
+    // Leaving forgets her client id, the saved volume stays.
+    app.control.muted_streams.lock().unwrap().insert(StreamKind::Shared.key(5));
+    message(&mut app, a, ServerMessage::UserLeft { client_id: 5 });
+    assert_eq!(gain(&app, StreamKind::Shared), None);
+    assert!(app.control.muted_streams.lock().unwrap().is_empty());
+    assert_eq!(app.config.share_volumes.get("anna"), Some(&1.8));
+}

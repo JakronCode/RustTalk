@@ -69,6 +69,63 @@ pub struct AudioControl {
     pub transmitting: AtomicBool,
     /// Ping and packet-loss stats for the connection panel.
     pub link: Arc<link::LinkStats>,
+    /// Incoming streams seen by playback ([`mixer_key`] -> level), for the volume mixer.
+    pub stream_meters: Mutex<HashMap<u64, StreamMeter>>,
+    /// Single streams muted from the volume mixer ([`mixer_key`]s, session only).
+    pub muted_streams: Mutex<HashSet<u64>>,
+}
+
+/// Last playback level of one incoming stream.
+#[derive(Clone, Copy, Debug)]
+pub struct StreamMeter {
+    /// Peak of the last 20 ms after the stream's own volume (1.0 = full scale).
+    pub level: f32,
+    /// Last packet of this stream.
+    pub heard: Instant,
+}
+
+/// Kind of an incoming audio stream: one mixer channel per user and kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StreamKind {
+    Voice,
+    /// Computer audio (screen share with sound, or "share audio" alone).
+    Shared,
+}
+
+impl StreamKind {
+    pub const ALL: [StreamKind; 2] = [StreamKind::Voice, StreamKind::Shared];
+
+    pub fn key(self, speaker: u64) -> u64 {
+        mixer_key(speaker, self == StreamKind::Shared)
+    }
+}
+
+/// Meter entries older than this are dropped (the mixer row disappears earlier).
+const METER_KEEP: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl AudioControl {
+    /// Records the level of one mixed chunk; never blocks the audio thread.
+    pub(crate) fn note_stream_levels(&self, levels: &[(u64, f32, Instant)]) {
+        let Ok(mut meters) = self.stream_meters.try_lock() else { return };
+        let now = Instant::now();
+        for &(key, level, heard) in levels {
+            meters.insert(key, StreamMeter { level, heard });
+        }
+        meters.retain(|_, m| now.duration_since(m.heard) < METER_KEEP);
+    }
+
+    /// Forgets meters and stream mutes (new voice server: client ids name other people).
+    pub fn clear_streams(&self) {
+        self.stream_meters.lock().unwrap().clear();
+        self.muted_streams.lock().unwrap().clear();
+    }
+
+    /// Forgets the streams of one speaker who left.
+    pub fn forget_speaker(&self, speaker: u64) {
+        let keys = StreamKind::ALL.map(|k| k.key(speaker));
+        self.stream_meters.lock().unwrap().retain(|k, _| !keys.contains(k));
+        self.muted_streams.lock().unwrap().retain(|k| !keys.contains(k));
+    }
 }
 
 impl AudioControl {
@@ -87,6 +144,8 @@ impl AudioControl {
             mic_level: Arc::new(AtomicU32::new(0)),
             transmitting: AtomicBool::new(false),
             link: Arc::new(link::LinkStats::default()),
+            stream_meters: Mutex::new(HashMap::new()),
+            muted_streams: Mutex::new(HashSet::new()),
         }
     }
 
@@ -149,7 +208,7 @@ pub type SharedMixer = Arc<Mutex<HashMap<u64, UserAudio>>>;
 /// Lokal stummgeschaltete Sprecher (nur clientseitig, kein Server-Eingriff).
 pub type LocalMuteSet = Arc<Mutex<HashSet<u64>>>;
 
-/// Per-speaker playback volume (client id -> gain, 1.0 = 100 %, max 2.0).
+/// Per-stream playback volume ([`mixer_key`] -> gain, 1.0 = 100 %, max 2.0).
 /// Local only; missing entry = 100 %.
 pub type UserVolumeMap = Arc<Mutex<HashMap<u64, f32>>>;
 

@@ -257,6 +257,17 @@ impl RustTalkApp {
                 }
             });
 
+        // Volume mixer docks right of the chat (icon in its top right corner); the chat narrows.
+        let below_stage = ui.available_rect_before_wrap();
+        let mixer_here = self.mixer_available(ch_id);
+        let show_mixer = mixer_here && self.config.mixer_open;
+        egui::SidePanel::right(super::mixer::MIXER_ID)
+            .resizable(true)
+            .default_width(420.0)
+            .width_range(300.0..=(ui.available_width() * 0.55).clamp(300.0, 640.0))
+            .frame(egui::Frame::default().fill(theme::SIDEBAR).inner_margin(egui::Margin { left: 12, right: 12, top: 8, bottom: 8 }))
+            .show_animated_inside(ui, show_mixer, |ui| self.ui_mixer(ui, &members));
+
         // Text feed below the stage.
         egui::TopBottomPanel::bottom(format!("voice_composer_{ch_id}"))
             .frame(egui::Frame::default().fill(theme::BG).inner_margin(egui::Margin { left: 16, right: 16, top: 8, bottom: 8 }))
@@ -267,6 +278,12 @@ impl RustTalkApp {
             ui.label(egui::RichText::new("Voice chat").size(16.0).strong().color(theme::HEADER));
             ui.label(egui::RichText::new("Messages and images shared here are visible to everyone in this channel.").color(theme::MUTED));
         });
+        // Drawn last so it stays on top of chat and mixer.
+        if mixer_here {
+            let size = egui::vec2(32.0, 32.0);
+            let rect = egui::Rect::from_min_size(below_stage.right_top() + egui::vec2(-size.x - 12.0, 6.0), size);
+            self.mixer_toggle(ui, rect);
+        }
     }
 
     /// Lobby: hint banner + join log.

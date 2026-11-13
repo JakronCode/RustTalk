@@ -731,16 +731,17 @@ impl RustTalkApp {
             ui.close_menu();
         }
         theme::menu_separator(ui);
-        ui.label(format!("{}  User Volume", icons::regular::SPEAKER_HIGH));
-        let mut pct = (self.user_volume(&user.name) * 100.0).round();
-        let slider = egui::Slider::new(&mut pct, 0.0..=crate::audio::MAX_VOLUME * 100.0)
-            .suffix(" %")
-            .step_by(5.0);
-        if ui.add(slider).changed() {
-            self.set_user_volume(user.id, &user.name, pct / 100.0);
-        }
-        if (pct - 100.0).abs() > 0.5 && ui.small_button("Reset to 100 %").clicked() {
-            self.set_user_volume(user.id, &user.name, 1.0);
+        ui.label(format!("{}  Voice Volume", icons::regular::SPEAKER_HIGH));
+        self.user_volume_slider(ui, user, StreamKind::Voice);
+        ui.label(format!("{}  Shared Audio Volume", icons::regular::MONITOR_PLAY))
+            .on_hover_text("Computer audio they share (with a screen or on its own)");
+        self.user_volume_slider(ui, user, StreamKind::Shared);
+        let changed = StreamKind::ALL.iter().any(|&k| (self.user_volume(&user.name, k) - 1.0).abs() > 0.005);
+        if changed && ui.small_button("Reset to 100 %").clicked() {
+            for kind in StreamKind::ALL {
+                self.set_user_volume(user.id, &user.name, kind, 1.0);
+            }
+            self.config.save();
         }
         self.moderation_menu(ui, user);
     }

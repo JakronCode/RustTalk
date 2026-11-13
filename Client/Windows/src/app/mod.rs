@@ -27,6 +27,7 @@ mod lifecycle;
 mod limits;
 mod links;
 mod media_ui;
+mod mixer;
 mod markdown;
 mod mention;
 mod moderation_ui;
@@ -52,7 +53,7 @@ use rusttalk_shared::protocol::{
 };
 
 use crate::audio::sfx::{self, Sound};
-use crate::audio::{capture, playback, AudioControl, AudioEngine, AudioSession, LocalMuteSet, TalkingMap, UserVolumeMap};
+use crate::audio::{capture, playback, AudioControl, AudioEngine, AudioSession, LocalMuteSet, StreamKind, TalkingMap, UserVolumeMap};
 use crate::config::{ClientConfig, ServerBookmark};
 use crate::hotkey;
 use crate::logo;
@@ -66,6 +67,7 @@ use session::{
     MAX_ACTIVE_SESSIONS, MAX_AUTO_CONNECTING, MAX_LINES_PER_CHANNEL, MAX_RECONNECT_ATTEMPTS,
 };
 use settings::SettingsPage;
+use mixer::volume_slider;
 
 // Phosphor icons (regular variant) as fallback font.
 mod icons {
@@ -596,14 +598,30 @@ impl RustTalkApp {
     /// Only for users of the voice server: the mixer is keyed by its client ids.
     fn apply_user_volume(&self, id: u64, name: &str) {
         let mut map = self.user_volumes.lock().unwrap();
-        match self.config.user_volumes.get(name) {
-            Some(&v) => {
-                map.insert(id, v.clamp(0.0, crate::audio::MAX_VOLUME));
-            }
-            None => {
-                map.remove(&id);
+        for kind in StreamKind::ALL {
+            match self.saved_volumes(kind).get(name) {
+                Some(&v) => {
+                    map.insert(kind.key(id), v.clamp(0.0, crate::audio::MAX_VOLUME));
+                }
+                None => {
+                    map.remove(&kind.key(id));
+                }
             }
         }
+    }
+
+    /// Saved volumes of one stream kind, by username.
+    fn saved_volumes(&self, kind: StreamKind) -> &std::collections::BTreeMap<String, f32> {
+        match kind {
+            StreamKind::Voice => &self.config.user_volumes,
+            StreamKind::Shared => &self.config.share_volumes,
+        }
+    }
+
+    /// Forgets the mixer state of a user who left voice.
+    fn forget_user_audio(&self, id: u64) {
+        self.user_volumes.lock().unwrap().retain(|k, _| crate::audio::mixer_speaker(*k) != id);
+        self.control.forget_speaker(id);
     }
 
     /// Ends our camera (when it is live) and screen share; they belong to the voice server.
@@ -688,24 +706,42 @@ impl RustTalkApp {
         }
     }
 
-    /// Playback volume of one user (1.0 = 100 %), saved by username.
-    fn user_volume(&self, name: &str) -> f32 {
-        self.config.user_volumes.get(name).copied().unwrap_or(1.0)
+    /// Playback volume of one user's stream (1.0 = 100 %), saved by username.
+    /// The config is the only source of truth; mixer panel and user menu both read it.
+    fn user_volume(&self, name: &str, kind: StreamKind) -> f32 {
+        self.saved_volumes(kind).get(name).copied().unwrap_or(1.0)
     }
 
-    /// Sets the playback volume of one user of the viewed server and remembers
-    /// it by username. The mixer only changes while this server has voice
-    /// (its client ids would name other people elsewhere).
-    fn set_user_volume(&mut self, id: u64, name: &str, volume: f32) {
+    /// Sets the playback volume of one user's stream of the viewed server and
+    /// remembers it by username. The mixer only changes while this server has
+    /// voice (its client ids would name other people elsewhere).
+    fn set_user_volume(&mut self, id: u64, name: &str, kind: StreamKind, volume: f32) {
         let v = volume.clamp(0.0, crate::audio::MAX_VOLUME);
+        let saved = match kind {
+            StreamKind::Voice => &mut self.config.user_volumes,
+            StreamKind::Shared => &mut self.config.share_volumes,
+        };
         if (v - 1.0).abs() < 0.005 {
-            self.config.user_volumes.remove(name);
+            saved.remove(name);
         } else {
-            self.config.user_volumes.insert(name.to_string(), v);
+            saved.insert(name.to_string(), v);
         }
         if self.viewing_voice() {
             self.apply_user_volume(id, name);
         }
+    }
+
+    /// Volume slider for one user's stream (user menu and mixer); saves when released.
+    fn user_volume_slider(&mut self, ui: &mut egui::Ui, user: &UserInfo, kind: StreamKind) -> egui::Response {
+        let mut pct = (self.user_volume(&user.name, kind) * 100.0).round();
+        let r = ui.add(volume_slider(&mut pct));
+        if r.changed() {
+            self.set_user_volume(user.id, &user.name, kind, pct / 100.0);
+        }
+        if r.drag_stopped() || (r.changed() && !r.dragged()) {
+            self.config.save();
+        }
+        r
     }
 
     /// Applies a picked message action (reply / edit / delete).
@@ -905,7 +941,7 @@ impl RustTalkApp {
                     if let Some(name) = leaving {
                         self.notify_presence(Some(&name), false);
                     }
-                    self.user_volumes.lock().unwrap().remove(&client_id);
+                    self.forget_user_audio(client_id);
                     self.clear_video_of(client_id, None);
                 }
                 if me {

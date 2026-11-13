@@ -773,6 +773,7 @@ impl RustTalkApp {
         self.talking.lock().unwrap().clear();
         self.local_muted.lock().unwrap().clear();
         self.user_volumes.lock().unwrap().clear();
+        self.control.clear_streams();
         let users: Vec<(u64, String)> = id
             .and_then(|id| self.session(id))
             .map(|s| s.users.values().map(|u| (u.id, u.name.clone())).collect())
