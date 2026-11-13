@@ -231,7 +231,7 @@ impl RustTalkApp {
     }
 
     fn save_channel_settings(&mut self, ch: &ChannelInfo, st: &ChannelSettings) {
-        let Some(tx) = self.srv.cmd_tx.clone() else { return };
+        let Some(tx) = self.srv.tx() else { return };
         let name = st.name.trim();
         if !name.is_empty() && name != ch.name {
             let _ = tx.send(Command::RenameChannel(ch.id, name.to_string()));

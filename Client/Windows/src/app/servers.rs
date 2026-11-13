@@ -2,8 +2,23 @@
 //! (persistent per server), reconnecting enrolled servers at startup, retries
 //! within limits, and the single voice session.
 //!
-//! API for the server switcher (`server_switcher.rs`): `server_rows`,
-//! `select_server`, `connect_server`, `disconnect_server`, `voice_server`.
+//! API for the server switcher: `server_rows`, `select_server`,
+//! `connect_server`, `disconnect_server`, `voice_server`.
+//!
+//! Voice policy: only our own voice join (`join_channel`) lets a server
+//! connection (session and generation) put us into voice. A move by the
+//! server into voice we did not ask for is answered with a request back to
+//! its lobby (at most every `BOUNCE_INTERVAL`) and never opens the
+//! microphone, on the viewed server too. Once in voice, the server's moves
+//! between voice channels keep it (moderators, AFK channel). It ends when we
+//! are moved out of voice, our channel (or the requested one) is deleted, the
+//! server says we left, voice is joined elsewhere, or the connection drops or
+//! is replaced: reconnects and startup bring back chat only, never voice.
+//!
+//! Mute and deafen are one global hardware state, told only to the voice
+//! server (before capture starts). A server we leave voice on is told once
+//! that we are muted and learns no later toggles; chat-only servers learn
+//! nothing.
 
 use super::session::{ServerRow, ServerStatus};
 use super::*;
@@ -92,12 +107,36 @@ impl RustTalkApp {
                     self.ctx.request_repaint(); // the rest next frame
                     break;
                 }
-                let Some(ev) = self.session(id).and_then(|s| s.event_rx.try_recv().ok()) else {
+                let Some(ev) = self
+                    .session_mut(id)
+                    .and_then(|s| s.event_rx.try_recv().ok())
+                else {
                     break;
                 };
                 self.handle_event(id, ev);
             }
+            if self
+                .session(id)
+                .and_then(|s| s.cmd_tx.as_ref())
+                .is_some_and(|c| c.take_refused())
+            {
+                self.report(
+                    id,
+                    "Not sent: the connection is busy. Try again in a moment.".into(),
+                );
+            }
         }
+    }
+
+    /// The server sent state outside `limits`: only it is disconnected, no retry.
+    pub(super) fn protocol_violation(&mut self, id: SessionId, reason: String) {
+        self.drop_connection(id);
+        if let Some(s) = self.session_mut(id) {
+            s.reconnect = None;
+            s.join_error = Some(join_error::JoinError::classify(&reason));
+            s.last_error = Some(reason.clone());
+        }
+        self.report(id, format!("Disconnected: {reason}"));
     }
 
     /// Forgets background sessions that hold nothing (rows come from bookmarks).
@@ -331,9 +370,7 @@ impl RustTalkApp {
             ));
             return false;
         }
-        if let Some(tx) = s.cmd_tx.take() {
-            let _ = tx.send(Command::Disconnect);
-        }
+        s.cmd_tx = None; // ends the old attempt at once
         s.reset_events();
         s.generation += 1;
         s.connected = false;
@@ -409,7 +446,7 @@ impl RustTalkApp {
             s.reconnect = Some(Reconnect {
                 attempt: 1,
                 next_at: Some(Instant::now()),
-                channel: None,
+                was_voice: false,
             });
         }
         // Nothing picked yet: show the last used server, else the first one.
@@ -477,9 +514,7 @@ impl RustTalkApp {
         }
         if let Some(s) = self.session_mut(id) {
             s.reset_events(); // late events of this connection are dropped
-            if let Some(tx) = s.cmd_tx.take() {
-                let _ = tx.send(Command::Disconnect);
-            }
+            s.cmd_tx = None; // ends the connection at once, also a stalled one
             s.clear_server_state();
         }
         if self.audio_owner == Some(id) {
@@ -533,7 +568,7 @@ impl RustTalkApp {
     }
 
     /// Error about server `id`: toast when viewed, prefixed with its name otherwise.
-    fn report(&mut self, id: SessionId, msg: String) {
+    pub(super) fn report(&mut self, id: SessionId, msg: String) {
         let msg = self.server_text(id, msg);
         self.set_error(msg);
     }
@@ -582,14 +617,10 @@ impl RustTalkApp {
         }
         let was_connected = s.connected;
         if was_connected && s.reconnect.is_none() {
-            let channel = s
-                .my_voice_channel()
-                .filter(|_| voice)
-                .map(|c| (c, s.channel_name(c)));
             s.reconnect = Some(Reconnect {
                 attempt: 1,
                 next_at: None,
-                channel,
+                was_voice: voice && s.my_voice_channel().is_some(),
             });
         }
         let failure = join_error::JoinError::classify(&reason);
@@ -629,35 +660,17 @@ impl RustTalkApp {
         }
     }
 
-    /// After a successful reconnect: back into the old voice channel, unless
-    /// voice moved to another server meanwhile. Never after a startup connect.
+    /// After a successful reconnect: chat only. Voice is never rejoined by
+    /// itself (the user may have walked away); the user is told instead.
     pub(super) fn restore_after_reconnect(&mut self, id: SessionId, rc: Reconnect) {
-        let viewed = self.srv.id == id;
-        if let (Some((channel, name)), false) = (rc.channel, self.voice_busy_elsewhere(id)) {
-            let target = self.session(id).and_then(|s| {
-                let ch = s
-                    .channels
-                    .get(&channel)
-                    .filter(|c| c.kind == ChannelKind::Voice && c.name == name)
-                    .or_else(|| {
-                        s.channels
-                            .values()
-                            .find(|c| c.kind == ChannelKind::Voice && c.name == name)
-                    })?;
-                Some((ch.id, s.cmd_tx.clone()?))
-            });
-            if let Some((target, tx)) = target {
-                self.set_voice_owner(Some(id));
-                let _ = tx.send(Command::JoinChannel(target));
-                if viewed {
-                    self.select_channel(target);
-                } else if let Some(s) = self.session_mut(id) {
-                    s.selected_channel = Some(target);
-                }
-            }
-        }
-        if viewed {
-            let name = self.srv.server_settings.name.clone();
+        let name = self.server_label(id);
+        if rc.was_voice {
+            let msg = self.server_text(
+                id,
+                format!("Reconnected to {name}. Voice ended - join a voice channel again to talk."),
+            );
+            self.set_status(msg);
+        } else if self.srv.id == id {
             self.set_status(format!("Reconnected to {name}"));
         }
     }
@@ -667,8 +680,17 @@ impl RustTalkApp {
     /// The server we are in a voice channel on (at most one).
     pub(super) fn voice(&self) -> Option<&ServerSession> {
         self.voice_owner
+            .filter(|id| self.voice_authorized(*id))
             .and_then(|id| self.session(id))
-            .filter(|s| s.connected && s.my_voice_channel().is_some())
+            .filter(|s| s.my_voice_channel().is_some())
+    }
+
+    /// We joined voice on this connection of `id` ourselves (maybe not confirmed yet).
+    pub(super) fn voice_authorized(&self, id: SessionId) -> bool {
+        self.voice_owner == Some(id)
+            && self
+                .session(id)
+                .is_some_and(|s| s.connected && s.generation == self.voice_generation)
     }
 
     /// Name of the server that has voice, for "voice on ..." indicators.
@@ -686,14 +708,14 @@ impl RustTalkApp {
     }
 
     /// Commands for the voice server (camera, screen, watching, keyframes).
-    pub(super) fn voice_tx(&self) -> Option<tokio::sync::mpsc::UnboundedSender<Command>> {
+    pub(super) fn voice_tx(&self) -> Option<net::CommandSender> {
         self.voice_owner
             .and_then(|id| self.session(id))
-            .and_then(|s| s.cmd_tx.clone())
+            .and_then(|s| s.tx())
     }
 
     /// Event queue of the voice server's connection (local media errors and own tiles).
-    pub(super) fn voice_events(&self) -> Option<std::sync::mpsc::SyncSender<NetEvent>> {
+    pub(super) fn voice_events(&self) -> Option<net::EventSender> {
         self.voice_owner
             .and_then(|id| self.session(id))
             .map(|s| s.event_tx.clone())
@@ -724,18 +746,21 @@ impl RustTalkApp {
         )
     }
 
-    /// Another server than `id` has us in voice.
-    pub(super) fn voice_busy_elsewhere(&self, id: SessionId) -> bool {
-        self.voice_owner.is_some_and(|owner| owner != id) && self.in_voice()
-    }
-
-    /// Makes `id` the voice server. Mixer state is keyed by client ids, so it
-    /// starts fresh for that server's users.
+    /// Makes `id` (its current connection) the voice server. Media, tiles and
+    /// mixer state are keyed by client ids, so they start fresh for its users.
     pub(super) fn set_voice_owner(&mut self, id: Option<SessionId>) {
-        if self.voice_owner == id {
+        let generation = id
+            .and_then(|id| self.session(id))
+            .map_or(0, |s| s.generation);
+        if self.voice_owner == id && self.voice_generation == generation {
             return;
         }
+        if self.voice_owner.is_some() {
+            self.end_voice_media();
+        }
         self.voice_owner = id;
+        self.voice_pending = None;
+        self.voice_generation = generation;
         self.talking.lock().unwrap().clear();
         self.local_muted.lock().unwrap().clear();
         self.user_volumes.lock().unwrap().clear();
@@ -751,21 +776,42 @@ impl RustTalkApp {
 
     /// The UI asks to join `channel_id` on the viewed server. Joining voice
     /// here first leaves voice on any other server; its camera, screen and
-    /// audio sharing stop and do not restart.
+    /// audio sharing stop and do not restart. This is the only way voice starts.
     pub(super) fn join_channel(&mut self, channel_id: u64) {
         let id = self.srv.id;
-        let Some(tx) = self.srv.cmd_tx.clone().filter(|_| self.srv.connected) else {
+        let Some(tx) = self.srv.tx().filter(|_| self.srv.connected) else {
             return;
         };
-        if self.srv.channel_kind(channel_id) == Some(ChannelKind::Voice) {
+        let voice = self.srv.channel_kind(channel_id) == Some(ChannelKind::Voice);
+        if voice && !self.voice_authorized(id) {
             if let Some(owner) = self.voice_owner.filter(|owner| *owner != id) {
                 if !self.leave_voice(owner) {
                     return;
                 }
             }
+            // The new voice server learns our mute state before capture starts.
+            let (muted, deafened) = self.mute_state();
+            if tx.send(Command::SetMute { muted, deafened }).is_err() {
+                return self.report(
+                    id,
+                    "Not sent: the connection is busy. Try again in a moment.".into(),
+                );
+            }
             self.set_voice_owner(Some(id));
         }
-        let _ = tx.send(Command::JoinChannel(channel_id));
+        if self.voice_owner == Some(id) {
+            // Lobby: a voice join still on its way is cancelled.
+            self.voice_pending = voice.then_some(channel_id);
+        }
+        if tx.send(Command::JoinChannel(channel_id)).is_err() {
+            if self.voice_pending.is_some() {
+                self.revoke_voice(id);
+            }
+            self.report(
+                id,
+                "Not sent: the connection is busy. Try again in a moment.".into(),
+            );
+        }
     }
 
     /// Leaves voice on `owner`: media stops first, then its server moves us to the lobby.
@@ -773,7 +819,7 @@ impl RustTalkApp {
         let in_voice = self
             .session(owner)
             .filter(|s| s.connected && s.my_voice_channel().is_some());
-        let lobby = in_voice.map(|s| (s.cmd_tx.clone(), s.spawn_channel_id()));
+        let lobby = in_voice.map(|s| (s.tx(), s.spawn_channel_id()));
         if let Some((None, _) | (_, None)) = lobby {
             let msg = format!("Could not leave voice on {}", self.server_label(owner));
             self.set_error(msg);
@@ -783,12 +829,42 @@ impl RustTalkApp {
         if let Some((Some(tx), Some(spawn))) = lobby {
             let _ = tx.send(Command::JoinChannel(spawn));
         }
-        if let Some(rc) = self.session_mut(owner).and_then(|s| s.reconnect.as_mut()) {
-            rc.channel = None; // a pending reconnect must not take voice back
-        }
         self.set_voice_owner(None);
+        self.send_idle_mute(owner);
         self.sync_voice_audio(); // notification sounds keep playing meanwhile
         true
+    }
+
+    /// Voice on `id` ends without our asking (moved out, channel deleted,
+    /// unrequested move): media stops, the voice join must be made again.
+    pub(super) fn revoke_voice(&mut self, id: SessionId) {
+        if self.voice_owner != Some(id) {
+            return;
+        }
+        self.end_voice_media();
+        self.set_voice_owner(None);
+        self.send_idle_mute(id);
+        self.sync_voice_audio();
+    }
+
+    /// Server `id` moved us into voice we did not ask for: back to its lobby,
+    /// at most every `BOUNCE_INTERVAL` so repeated moves cannot make us flood it.
+    pub(super) fn bounce_to_lobby(&mut self, id: SessionId) {
+        let label = self.server_label(id);
+        let Some(s) = self.session_mut(id) else {
+            return;
+        };
+        if s.bounced_at.is_some_and(|t| t.elapsed() < BOUNCE_INTERVAL) {
+            return;
+        }
+        let (Some(tx), Some(spawn)) = (s.cmd_tx.as_ref(), s.spawn_channel_id()) else {
+            return;
+        };
+        let _ = tx.send(Command::JoinChannel(spawn));
+        s.bounced_at = Some(Instant::now());
+        self.set_error(format!(
+            "{label} moved you into voice - you were sent back to its lobby. Join a voice channel yourself to talk."
+        ));
     }
 
     /// Stops everything that belongs to voice: own camera, screen and audio
@@ -818,16 +894,38 @@ impl RustTalkApp {
         self.control.transmitting.store(false, Ordering::Relaxed);
     }
 
-    /// Mute and deafen are global (one microphone): every connected server shows them.
-    pub(super) fn broadcast_mute(&self) {
-        let muted = self.control.self_muted.load(Ordering::Relaxed);
-        let deafened = self.control.self_deafened.load(Ordering::Relaxed);
-        for tx in self
-            .all_sessions()
-            .filter(|s| s.connected)
-            .filter_map(|s| s.cmd_tx.as_ref())
+    /// The global (hardware) mute and deafen state.
+    pub(super) fn mute_state(&self) -> (bool, bool) {
+        (
+            self.control.self_muted.load(Ordering::Relaxed),
+            self.control.self_deafened.load(Ordering::Relaxed),
+        )
+    }
+
+    /// A mute or deafen toggle: only the voice server learns it (see module docs).
+    pub(super) fn send_mute_state(&self) {
+        let (muted, deafened) = self.mute_state();
+        if let Some(tx) = self
+            .voice_owner
+            .filter(|id| self.voice_authorized(*id))
+            .and_then(|id| self.session(id))
+            .and_then(|s| s.cmd_tx.as_ref())
         {
             let _ = tx.send(Command::SetMute { muted, deafened });
+        }
+    }
+
+    /// We left voice on `id`: it shows us muted from now on, whatever we toggle later.
+    fn send_idle_mute(&self, id: SessionId) {
+        if let Some(tx) = self
+            .session(id)
+            .filter(|s| s.connected)
+            .and_then(|s| s.cmd_tx.as_ref())
+        {
+            let _ = tx.send(Command::SetMute {
+                muted: true,
+                deafened: false,
+            });
         }
     }
 

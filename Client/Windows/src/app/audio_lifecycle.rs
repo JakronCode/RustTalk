@@ -240,13 +240,13 @@ mod tests {
         }
     }
 
-    fn connect(app: &mut RustTalkApp) -> tokio::sync::mpsc::UnboundedReceiver<Command> {
+    fn connect(app: &mut RustTalkApp) -> crate::net::TestCommands {
         if app.srv.is_placeholder() {
             let id = app.ensure_session("voice.invalid:7331").unwrap();
             app.view_session(id);
         }
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        app.srv.cmd_tx = Some(tx);
+        let (conn, rx) = crate::net::Connection::test_pair();
+        app.srv.cmd_tx = Some(conn);
         app.handle_event(app.srv.id, connected());
         rx
     }
@@ -260,6 +260,12 @@ mod tests {
             client_id: 1,
             channel_id,
         }));
+    }
+
+    /// Our own voice join, confirmed by the server (the only way into voice).
+    fn join(app: &mut RustTalkApp, channel_id: u64) {
+        app.join_channel(channel_id);
+        move_to(app, channel_id);
     }
 
     fn assert_sound(app: &RustTalkApp, sound: Sound) {
@@ -291,7 +297,7 @@ mod tests {
         app.start_audio_selection(AudioShareSource::System);
         assert!(app.audio_picker.is_none());
         assert_eq!(devices.0.borrow().systems, 0);
-        move_to(&mut app, 2);
+        join(&mut app, 2);
         app.open_audio_picker();
         assert!(app.audio_picker.is_some());
         app.sync_shared_audio();
@@ -311,7 +317,7 @@ mod tests {
         let devices = Devices::new();
         let mut app = app();
         let _commands = connect(&mut app);
-        move_to(&mut app, 2);
+        join(&mut app, 2);
         app.toggle_audio_sharing();
         assert!(app.audio_picker.is_some());
         app.start_audio_selection(AudioShareSource::System);
@@ -332,7 +338,7 @@ mod tests {
         let _commands = connect(&mut app);
         app.toggle_audio_only(); // lobby cannot capture
         assert_eq!(devices.0.borrow().systems, 0);
-        move_to(&mut app, 2);
+        join(&mut app, 2);
         app.sync_shared_audio();
         assert_eq!(devices.0.borrow().systems, 0); // joining is not consent
         app.control.self_muted.store(true, Ordering::Relaxed);
@@ -360,14 +366,14 @@ mod tests {
         app.toggle_audio_only();
         move_to(&mut app, 1);
         assert_eq!(devices.0.borrow().systems, 0);
-        move_to(&mut app, 2);
+        join(&mut app, 2);
         app.toggle_audio_only();
         event(&mut app, NetEvent::Disconnected {
             reason: "lost".into(),
         });
         assert_eq!(devices.0.borrow().systems, 0);
         let _commands = connect(&mut app);
-        move_to(&mut app, 2);
+        join(&mut app, 2);
         app.sync_shared_audio();
         assert_eq!(devices.0.borrow().systems, 0);
         devices.0.borrow_mut().fail_system = true;
@@ -407,6 +413,12 @@ mod tests {
         let session = app.control.link.session();
         app.select_channel(2); // UI selection/request is not server confirmation.
         assert_eq!(devices.0.borrow().input_starts, 0);
+        move_to(&mut app, 2); // nor is a server move we did not ask for
+        assert_eq!(devices.0.borrow().input_starts, 0);
+        move_to(&mut app, 1); // server confirms the bounce to the lobby
+        app.srv.bounced_at = None;
+        app.join_channel(2);
+        assert_eq!(devices.0.borrow().input_starts, 0);
         move_to(&mut app, 2);
         assert_eq!(devices.0.borrow().inputs, 1);
         assert_sound(&app, Sound::Join);
@@ -417,10 +429,10 @@ mod tests {
         assert_eq!(devices.0.borrow().inputs, 0);
         assert_eq!(devices.0.borrow().outputs, 1);
         assert_sound(&app, Sound::Leave);
-        move_to(&mut app, 2);
+        join(&mut app, 2);
         move_to(&mut app, 3); // text channels cannot retain capture
         assert_eq!(devices.0.borrow().inputs, 0);
-        move_to(&mut app, 2);
+        join(&mut app, 2);
         event(&mut app, NetEvent::Message(ServerMessage::ChannelDeleted {
             channel_id: 2,
         }));
@@ -432,7 +444,10 @@ mod tests {
             &app.srv.audio_session.as_ref().unwrap().cipher
         ));
         assert_eq!(app.control.link.session(), session);
-        move_to(&mut app, 4);
+        move_to(&mut app, 4); // after the deletion: needs a new join
+        assert_eq!(devices.0.borrow().inputs, 0);
+        join(&mut app, 4);
+        assert_eq!(devices.0.borrow().inputs, 1);
         event(&mut app, NetEvent::Message(ServerMessage::UserLeft { client_id: 1 }));
         assert_eq!(devices.0.borrow().inputs, 0);
         app.disconnect_all();
@@ -444,7 +459,7 @@ mod tests {
         let devices = Devices::new();
         let mut app = app();
         let _commands = connect(&mut app);
-        move_to(&mut app, 2);
+        join(&mut app, 2);
         let old_tx = app.srv.event_tx.clone();
         let session = app.control.link.session();
         let cipher = app.srv.audio_session.as_ref().unwrap().cipher.clone();
@@ -453,20 +468,22 @@ mod tests {
         });
         assert_eq!(devices.0.borrow().inputs, 0);
         assert_eq!(devices.0.borrow().outputs, 0);
-        assert!(old_tx.send(connected()).is_err());
+        assert!(old_tx.try_send(connected(), 0).is_err());
         event(&mut app, connected()); // cancelled attempt, no command channel
         move_to(&mut app, 2);
         assert!(!app.srv.connected);
         assert_eq!(devices.0.borrow().inputs, 0);
         let mut commands = connect(&mut app);
-        assert!(matches!(commands.try_recv(), Ok(Command::JoinChannel(2))));
-        assert_eq!(devices.0.borrow().inputs, 0); // auto-rejoin still pending
+        assert!(commands.try_recv().is_none(), "a reconnect never rejoins voice by itself");
+        move_to(&mut app, 2); // the server still has us in voice
+        assert_eq!(devices.0.borrow().inputs, 0);
         assert_ne!(app.control.link.session(), session);
         assert!(!Arc::ptr_eq(
             &cipher,
             &app.srv.audio_session.as_ref().unwrap().cipher
         ));
-        move_to(&mut app, 2);
+        app.srv.bounced_at = None;
+        join(&mut app, 2);
         assert_eq!(devices.0.borrow().inputs, 1);
         event(&mut app, NetEvent::Message(ServerMessage::Removed {
             reason: "kicked".into(),
@@ -491,7 +508,7 @@ mod tests {
         app.apply_devices((Some("broken".into()), None));
         assert!(app.audio.is_some()); // previous output restored
         assert_eq!(devices.0.borrow().input_starts, 0);
-        move_to(&mut app, 2); // input fails; output-only fallback remains available
+        join(&mut app, 2); // input fails; output-only fallback remains available
         assert_eq!(devices.0.borrow().inputs, 0);
         assert_eq!(devices.0.borrow().outputs, 1);
         assert!(app.status_is_error);
@@ -539,7 +556,7 @@ mod tests {
             app.sync_mic_preview();
             assert_eq!(devices.0.borrow().inputs, expected);
         }
-        move_to(&mut app, 2);
+        join(&mut app, 2);
         app.sync_mic_preview();
         assert!(app.mic_monitor.is_none());
         assert_eq!(devices.0.borrow().inputs, 1);

@@ -50,7 +50,7 @@ impl RustTalkApp {
     pub(super) fn ui_sidebar(
         &mut self,
         ctx: &egui::Context,
-        cmd_tx: Option<&tokio::sync::mpsc::UnboundedSender<Command>>,
+        cmd_tx: Option<&net::CommandSender>,
     ) {
         let mut switch = None;
         let width = self.config.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
@@ -220,7 +220,7 @@ impl RustTalkApp {
     fn ui_channel_tree(
         &mut self,
         ui: &mut egui::Ui,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
+        cmd_tx: &net::CommandSender,
     ) {
         ui.spacing_mut().item_spacing.y = 2.0;
         let ctx = ui.ctx().clone();
@@ -331,7 +331,7 @@ impl RustTalkApp {
         pointer: egui::Pos2,
         tree_rect: egui::Rect,
         slots: &[DropSlot],
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
+        cmd_tx: &net::CommandSender,
     ) {
         ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
         let name = self.channel_name(drag.id);
@@ -959,7 +959,7 @@ impl RustTalkApp {
         }
         let muted = !self.control.self_muted.load(Ordering::Relaxed);
         self.control.self_muted.store(muted, Ordering::Relaxed);
-        self.broadcast_mute();
+        self.send_mute_state();
         self.notify(if muted { crate::audio::sfx::Sound::Mute } else { crate::audio::sfx::Sound::Unmute });
     }
 
@@ -972,7 +972,7 @@ impl RustTalkApp {
             self.control.self_muted.store(self.mute_before_deafen, Ordering::Relaxed);
         }
         self.control.self_deafened.store(new, Ordering::Relaxed);
-        self.broadcast_mute();
+        self.send_mute_state();
         self.notify(if new { crate::audio::sfx::Sound::Mute } else { crate::audio::sfx::Sound::Unmute });
     }
 }

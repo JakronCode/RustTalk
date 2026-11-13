@@ -41,7 +41,7 @@ impl RustTalkApp {
     pub(super) fn ui_main(
         &mut self,
         ctx: &egui::Context,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
+        cmd_tx: &net::CommandSender,
     ) {
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(theme::BG))
@@ -130,7 +130,7 @@ impl RustTalkApp {
         &mut self,
         ui: &mut egui::Ui,
         ch_id: u64,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
+        cmd_tx: &net::CommandSender,
     ) {
         // Composer FIRST as bottom panel (otherwise the scroll area pushes
         // it below the window edge).
@@ -152,7 +152,7 @@ impl RustTalkApp {
         &mut self,
         ui: &mut egui::Ui,
         ch_id: u64,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
+        cmd_tx: &net::CommandSender,
     ) {
         let members: Vec<UserInfo> = self
             .srv.channels
@@ -381,7 +381,7 @@ impl RustTalkApp {
         &mut self,
         ui: &mut egui::Ui,
         ch_id: u64,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
+        cmd_tx: &net::CommandSender,
     ) {
         if let Some((name, kb)) = self.pending_image.as_ref().map(|(n, b)| (n.clone(), b.len() / 1024)) {
             let mut clear = false;
@@ -483,14 +483,20 @@ impl RustTalkApp {
     }
 
     /// Sends text + attached image (as a reply if one is selected).
-    pub(super) fn send_chat(&mut self, ch_id: u64, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>) {
+    pub(super) fn send_chat(&mut self, ch_id: u64, cmd_tx: &net::CommandSender) {
         let text = self.chat_input.trim().to_string();
-        let image = self.pending_image.take().map(|(_, b)| b);
-        if text.is_empty() && image.is_none() {
+        if text.is_empty() && self.pending_image.is_none() {
             return;
         }
-        let reply_to = self.reply_to.take();
-        let _ = cmd_tx.send(Command::SendChat { channel_id: ch_id, text, image, reply_to });
+        // Kept until the command is queued: a busy connection loses nothing.
+        let image = self.pending_image.as_ref().map(|(_, b)| b.clone());
+        let reply_to = self.reply_to;
+        if cmd_tx.send(Command::SendChat { channel_id: ch_id, text, image, reply_to }).is_err() {
+            self.set_error("Not sent: the connection is busy. Try again in a moment.");
+            return;
+        }
+        self.pending_image = None;
+        self.reply_to = None;
         self.chat_input.clear();
     }
 

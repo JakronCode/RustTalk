@@ -16,7 +16,7 @@ fn run(app: &mut RustTalkApp, time: f64, events: Vec<egui::Event>) -> egui::Full
             ..Default::default()
         },
         |ctx| {
-            let tx = app.srv.cmd_tx.clone().filter(|_| app.srv.connected);
+            let tx = app.srv.tx().filter(|_| app.srv.connected);
             app.ui_sidebar(ctx, tx.as_ref());
             app.ui_remember_prompt(ctx);
         },
@@ -68,7 +68,7 @@ fn login_named(
     app: &mut RustTalkApp,
     address: &str,
     name: &str,
-) -> (SessionId, tokio::sync::mpsc::UnboundedReceiver<Command>) {
+) -> (SessionId, crate::net::TestCommands) {
     let r = login(app, address, 1);
     app.session_mut(r.0).unwrap().server_settings.name = name.into();
     r
@@ -279,6 +279,7 @@ fn disconnected_view_keeps_switcher_voice_and_disables_server_actions() {
     let (ib, _rb) = login_named(&mut app, &b, "Beta");
     app.view_session(ia);
     app.join_channel(2);
+    app.join_channel(2);
     moved(&mut app, ia, 1, 2);
     app.disconnect_server(&b);
     app.config.bookmarks.push(bookmark(&b));
@@ -355,6 +356,7 @@ fn add_server_keeps_connections_and_voice_and_leaves_without_disconnecting() {
     let (ia, mut ra) = login_named(&mut app, &a, "Alpha");
     let (ib, _rb) = login_named(&mut app, &b, "Beta");
     app.view_session(ia);
+    app.join_channel(2);
     app.join_channel(2);
     moved(&mut app, ia, 1, 2);
     let mut t = 0.0;

@@ -7,16 +7,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicUsize;
-use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rusttalk_shared::protocol::{ChannelInfo, ChannelKind, Role, ServerSettings, UserInfo};
 use rusttalk_shared::secure::ReplayWindow;
 
-use super::{join_error, moderation_ui, ChatLine};
+use super::{join_error, moderation_ui, ChatKind, ChatLine};
 use crate::audio::AudioSession;
-use crate::net::{Command, NetEvent};
+use crate::net::{self, CommandSender, Connection, EventReceiver, EventSender};
 
 pub(super) type SessionId = u64;
 
@@ -24,15 +23,18 @@ pub(super) type SessionId = u64;
 pub(super) const MAX_ACTIVE_SESSIONS: usize = 8;
 /// Automatic connection attempts (startup, retries) running at the same time.
 pub(super) const MAX_AUTO_CONNECTING: usize = 2;
-/// Network events waiting for the UI per session. Further video frames are
-/// dropped; other messages wait (TCP backpressure) instead of piling up.
-pub(super) const EVENT_QUEUE: usize = 256;
 /// Events handled per session and frame, so one busy server cannot starve the others.
 pub(super) const EVENTS_PER_FRAME: usize = 512;
 /// Chat lines kept per channel (the oldest are dropped).
 pub(super) const MAX_LINES_PER_CHANNEL: usize = 2_000;
 /// Image bytes kept in one session's chat; the oldest images are dropped first.
 pub(super) const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+/// Chat text bytes (with names and per-line overhead) kept in one session;
+/// the oldest lines are dropped first.
+pub(super) const MAX_TEXT_BYTES: usize = 8 * 1024 * 1024;
+/// A server that moves us into voice without our request is sent back to
+/// its lobby at most this often (a hostile one cannot make us flood it).
+pub(super) const BOUNCE_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Give up after this many failed attempts (~10 minutes with backoff).
 pub(super) const MAX_RECONNECT_ATTEMPTS: u32 = 25;
@@ -60,8 +62,9 @@ pub(super) struct Reconnect {
     pub attempt: u32,
     /// When the next attempt may start (`None` = attempt is running).
     pub next_at: Option<Instant>,
-    /// Voice channel we were in (id, name as fallback), rejoined afterwards.
-    pub channel: Option<(u64, String)>,
+    /// We were in voice when the connection broke. Voice is never rejoined
+    /// by itself; the user is told to join again.
+    pub was_voice: bool,
 }
 
 /// Connection state of one server, as the server switcher shows it.
@@ -112,11 +115,12 @@ pub(super) struct ServerSession {
     pub invite: Option<String>,
     /// Bumped for every connection attempt; binds async results to one attempt.
     pub generation: u64,
-    pub cmd_tx: Option<tokio::sync::mpsc::UnboundedSender<Command>>,
+    /// The running connection; dropping it ends the connection at once.
+    pub cmd_tx: Option<Connection>,
     /// Replaced on every attempt and disconnect: late events of an old
     /// attempt have no receiver any more.
-    pub event_tx: SyncSender<NetEvent>,
-    pub event_rx: Receiver<NetEvent>,
+    pub event_tx: EventSender,
+    pub event_rx: EventReceiver,
     /// Video bytes in this connection's send queue (see `net::connect`).
     pub upload_backlog: Arc<AtomicUsize>,
     /// Login finished (Welcome received). `cmd_tx` alone = connecting.
@@ -144,6 +148,8 @@ pub(super) struct ServerSession {
     pub chat: HashMap<u64, Vec<ChatLine>>,
     /// Image bytes held in `chat` (bounded by `MAX_IMAGE_BYTES`).
     pub image_bytes: usize,
+    /// Text bytes held in `chat` (bounded by `MAX_TEXT_BYTES`, see `line_bytes`).
+    pub text_bytes: usize,
     pub unread: HashSet<u64>,
     pub selected_channel: Option<u64>,
     pub collapsed: HashMap<u64, bool>,
@@ -160,10 +166,21 @@ pub(super) struct ServerSession {
     pub replay: Option<ReplayWindow>,
     /// Unsent composer text while another server is viewed.
     pub draft: String,
+    /// Last time we sent this server's unrequested voice move back to the lobby.
+    pub bounced_at: Option<Instant>,
 }
 
-fn event_channel() -> (SyncSender<NetEvent>, Receiver<NetEvent>) {
-    std::sync::mpsc::sync_channel(EVENT_QUEUE)
+fn event_channel() -> (EventSender, EventReceiver) {
+    net::event_queue()
+}
+
+/// Bytes a chat line counts against `MAX_TEXT_BYTES`.
+pub(super) fn line_bytes(l: &ChatLine) -> usize {
+    let from = match &l.kind {
+        ChatKind::Message { from, .. } => from.len(),
+        ChatKind::System => 0,
+    };
+    l.text.len() + from + super::limits::ITEM_OVERHEAD
 }
 
 impl ServerSession {
@@ -199,6 +216,7 @@ impl ServerSession {
             channels: HashMap::new(),
             chat: HashMap::new(),
             image_bytes: 0,
+            text_bytes: 0,
             unread: HashSet::new(),
             selected_channel: None,
             collapsed: HashMap::new(),
@@ -209,7 +227,13 @@ impl ServerSession {
             audio_session: None,
             replay: None,
             draft: String::new(),
+            bounced_at: None,
         }
+    }
+
+    /// A sender for this server's connection (dialogs, capture threads).
+    pub fn tx(&self) -> Option<CommandSender> {
+        self.cmd_tx.as_ref().map(Connection::sender)
     }
 
     /// Shown before any server was picked.
@@ -265,15 +289,26 @@ impl ServerSession {
         self.connected = false;
         self.users.clear();
         self.channels.clear();
-        self.chat.clear();
-        self.image_bytes = 0;
-        self.unread.clear();
+        self.clear_chat();
         self.selected_channel = None;
         self.admin = Default::default();
         self.open_permissions = true;
         self.gif_available = false;
         self.audio_session = None;
         self.replay = None;
+        self.bounced_at = None;
+    }
+
+    pub fn clear_chat(&mut self) {
+        self.chat.clear();
+        self.image_bytes = 0;
+        self.text_bytes = 0;
+        self.unread.clear();
+    }
+
+    /// Members listed in all channels (bounded by `limits::MAX_USERS`).
+    pub fn member_count(&self) -> usize {
+        self.channels.values().map(|c| c.user_ids.len()).sum()
     }
 
     pub fn my_channel(&self) -> Option<u64> {
@@ -334,12 +369,60 @@ impl ServerSession {
         }
         let lines = self.chat.entry(channel_id).or_default();
         self.image_bytes += line.image.as_ref().map_or(0, Vec::len);
+        self.text_bytes += line_bytes(&line);
         lines.push(line);
         if lines.len() > MAX_LINES_PER_CHANNEL {
             let old = lines.remove(0);
-            self.image_bytes -= old.image.as_ref().map_or(0, Vec::len);
+            self.forget(&old);
         }
+        self.trim_chat();
+        true
+    }
+
+    /// Server edit of a message: its new text counts against the budget too.
+    pub fn edit_line(&mut self, channel_id: u64, message_id: u64, text: String) {
+        let Some(line) = self
+            .chat
+            .get_mut(&channel_id)
+            .and_then(|v| v.iter_mut().find(|l| l.id == message_id))
+        else {
+            return;
+        };
+        self.text_bytes = self.text_bytes - line.text.len() + text.len();
+        line.text = text;
+        line.edited = true;
+        self.trim_chat();
+    }
+
+    /// The counters drop what a removed line held.
+    fn forget(&mut self, line: &ChatLine) {
+        self.image_bytes -= line.image.as_ref().map_or(0, Vec::len);
+        self.text_bytes -= line_bytes(line);
+    }
+
+    fn trim_chat(&mut self) {
         while self.image_bytes > MAX_IMAGE_BYTES && self.drop_oldest_image() {}
+        while self.text_bytes > MAX_TEXT_BYTES && self.drop_oldest_line() {}
+    }
+
+    /// The oldest line of all channels (by time, then id) goes.
+    fn drop_oldest_line(&mut self) -> bool {
+        let oldest = self
+            .chat
+            .iter()
+            .filter_map(|(ch, v)| v.first().map(|l| ((l.timestamp, l.id), *ch)))
+            .min()
+            .map(|(_, ch)| ch);
+        let Some(ch) = oldest else { return false };
+        let lines = self.chat.get_mut(&ch).unwrap();
+        let line = lines.remove(0);
+        // Eviction must also release old allocation capacity across quiet channels.
+        if lines.is_empty() {
+            self.chat.remove(&ch);
+        } else if lines.capacity() > lines.len().saturating_mul(2).max(32) {
+            lines.shrink_to_fit();
+        }
+        self.forget(&line);
         true
     }
 
@@ -351,21 +434,59 @@ impl ServerSession {
     }
 
     pub fn remove_line(&mut self, channel_id: u64, message_id: u64) {
-        if let Some(lines) = self.chat.get_mut(&channel_id) {
-            for l in lines.iter().filter(|l| l.id == message_id) {
-                self.image_bytes -= l.image.as_ref().map_or(0, Vec::len);
-            }
-            lines.retain(|l| l.id != message_id);
+        let Some(lines) = self.chat.get_mut(&channel_id) else {
+            return;
+        };
+        let (gone, kept): (Vec<ChatLine>, Vec<ChatLine>) = std::mem::take(lines)
+            .into_iter()
+            .partition(|l| l.id == message_id);
+        *lines = kept;
+        for l in &gone {
+            self.forget(l);
         }
     }
 
     pub fn remove_channel_chat(&mut self, channel_id: u64) {
-        if let Some(lines) = self.chat.remove(&channel_id) {
-            self.image_bytes -= lines
-                .iter()
-                .map(|l| l.image.as_ref().map_or(0, Vec::len))
-                .sum::<usize>();
+        for l in self.chat.remove(&channel_id).unwrap_or_default() {
+            self.forget(&l);
         }
+    }
+
+    /// Bytes this session holds for the server's state (tests check the budget).
+    #[cfg(test)]
+    pub fn retained_bytes(&self) -> usize {
+        use super::limits::{admin_bytes, ITEM_OVERHEAD};
+        let a = &self.admin;
+        let users: usize = self
+            .users
+            .values()
+            .map(|u| u.name.len() + u.streams.len() + ITEM_OVERHEAD)
+            .sum();
+        let channels: usize = self
+            .channels
+            .values()
+            .map(|c| c.name.len() + c.user_ids.len() * 8 + ITEM_OVERHEAD)
+            .sum();
+        let st = &self.server_settings;
+        let settings = st.icon.as_ref().map_or(0, Vec::len)
+            + [
+                &st.name,
+                &st.welcome_message,
+                &st.rules,
+                &st.join_message,
+                &st.leave_message,
+                &st.afk_notice,
+                &st.motd,
+            ]
+            .iter()
+            .map(|t| t.len())
+            .sum::<usize>();
+        users
+            + channels
+            + self.text_bytes
+            + self.image_bytes
+            + admin_bytes(&a.roles, &a.bans, &a.invites, &a.audit)
+            + settings
     }
 
     fn drop_oldest_image(&mut self) -> bool {

@@ -18,11 +18,23 @@ where
     let payload = bincode::serialize(msg)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     if payload.len() > MAX_FRAME_LEN as usize {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "frame too large"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "frame too large",
+        ));
     }
-    writer.write_all(&(payload.len() as u32).to_le_bytes()).await?;
+    writer
+        .write_all(&(payload.len() as u32).to_le_bytes())
+        .await?;
     writer.write_all(&payload).await?;
     writer.flush().await
+}
+
+/// Payload length `write_frame` would produce for `msg`.
+pub fn frame_len<T: Serialize>(msg: &T) -> std::io::Result<usize> {
+    bincode::serialized_size(msg)
+        .map(|n| n as usize)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 /// Liest ein Frame und deserialisiert es.
@@ -34,12 +46,20 @@ where
     R: AsyncRead + Unpin,
     T: DeserializeOwned,
 {
+    Ok(read_frame_sized(reader).await?.map(|(msg, _)| msg))
+}
+
+/// Like `read_frame`, plus the payload length (for memory budgets).
+pub async fn read_frame_sized<R, T>(reader: &mut R) -> std::io::Result<Option<(T, usize)>>
+where
+    R: AsyncRead + Unpin,
+    T: DeserializeOwned,
+{
     let mut len_buf = [0u8; 4];
-    match reader.read_exact(&mut len_buf).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(e),
+    if reader.read(&mut len_buf[..1]).await? == 0 {
+        return Ok(None);
     }
+    reader.read_exact(&mut len_buf[1..]).await?;
     let len = u32::from_le_bytes(len_buf);
     if len == 0 || len > MAX_FRAME_LEN {
         return Err(std::io::Error::new(
@@ -52,7 +72,7 @@ where
     reader.read_exact(&mut buf).await?;
     let msg = bincode::deserialize(&buf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    Ok(Some(msg))
+    Ok(Some((msg, len as usize)))
 }
 
 #[cfg(test)]
@@ -63,8 +83,12 @@ mod tests {
     #[tokio::test]
     async fn frame_roundtrip() {
         let (mut a, mut b) = duplex(4096);
-        write_frame(&mut a, &"erste Nachricht".to_string()).await.unwrap();
-        write_frame(&mut a, &vec![1u32, 2, 3, u32::MAX]).await.unwrap();
+        write_frame(&mut a, &"erste Nachricht".to_string())
+            .await
+            .unwrap();
+        write_frame(&mut a, &vec![1u32, 2, 3, u32::MAX])
+            .await
+            .unwrap();
 
         let first: Option<String> = read_frame(&mut b).await.unwrap();
         let second: Option<Vec<u32>> = read_frame(&mut b).await.unwrap();
@@ -85,9 +109,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sized_read_reports_the_payload_length() {
+        let (mut a, mut b) = duplex(4096);
+        let msg = vec![7u8; 100];
+        write_frame(&mut a, &msg).await.unwrap();
+        let got: Option<(Vec<u8>, usize)> = read_frame_sized(&mut b).await.unwrap();
+        assert_eq!(got, Some((msg.clone(), frame_len(&msg).unwrap())));
+    }
+
+    #[tokio::test]
+    async fn truncated_prefix_and_body_are_errors() {
+        for bytes in [vec![4, 0], vec![4, 0, 0, 0, 42]] {
+            let mut input = bytes.as_slice();
+            let error = read_frame::<_, u32>(&mut input).await.unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+        }
+    }
+
+    #[tokio::test]
     async fn oversized_length_is_rejected() {
         let (mut a, mut b) = duplex(64);
-        a.write_all(&(MAX_FRAME_LEN + 1).to_le_bytes()).await.unwrap();
+        a.write_all(&(MAX_FRAME_LEN + 1).to_le_bytes())
+            .await
+            .unwrap();
         let res: std::io::Result<Option<Vec<u8>>> = read_frame(&mut b).await;
         assert!(res.is_err());
     }

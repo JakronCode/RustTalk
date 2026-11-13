@@ -23,6 +23,7 @@ mod connection_ui;
 mod dev_input;
 mod join_error;
 mod lifecycle;
+mod limits;
 mod media_ui;
 mod markdown;
 mod moderation_ui;
@@ -58,8 +59,8 @@ use crate::video::{self, CameraDevice, ShareEntry, ShareSource, VideoCapture};
 
 use channel_settings::ChannelSettings;
 use session::{
-    reconnect_delay, retry_stagger, Reconnect, ServerSession, SessionId, EVENTS_PER_FRAME, MAX_ACTIVE_SESSIONS,
-    MAX_AUTO_CONNECTING, MAX_RECONNECT_ATTEMPTS,
+    reconnect_delay, retry_stagger, Reconnect, ServerSession, SessionId, BOUNCE_INTERVAL, EVENTS_PER_FRAME,
+    MAX_ACTIVE_SESSIONS, MAX_AUTO_CONNECTING, MAX_LINES_PER_CHANNEL, MAX_RECONNECT_ATTEMPTS,
 };
 use settings::SettingsPage;
 
@@ -140,6 +141,9 @@ fn mention_prefix(input: &str) -> Option<&str> {
 /// two-column grid, click = send. Searches go through the server.
 #[derive(Default)]
 struct GifPicker {
+    /// Bumped whenever the picker is reset: previews downloaded for an
+    /// older picker (another server's results) are dropped.
+    epoch: u64,
     open: bool,
     /// Text in the search field.
     query: String,
@@ -198,12 +202,23 @@ impl ScreenPicker {
     }
 }
 
-/// Nachrichten aus Hintergrund-Threads (GIPHY-Suche/Downloads).
+/// Nachrichten aus Hintergrund-Threads (GIPHY-Suche/Downloads), tagged
+/// with what they were started for: late ones never touch newer state.
 enum GiphyMsg {
-    Preview(String, Vec<u8>),
-    Full(Vec<u8>),
+    Preview { epoch: u64, url: String, bytes: Vec<u8> },
+    Full { request: u64, bytes: Vec<u8> },
     /// Download of the chosen GIF failed.
-    FullFailed(String),
+    FullFailed { request: u64, error: String },
+}
+
+/// Where the GIF that is downloading goes, bound to one connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GifTarget {
+    request: u64,
+    session: SessionId,
+    generation: u64,
+    channel: u64,
+    reply_to: Option<u64>,
 }
 
 pub struct RustTalkApp {
@@ -215,8 +230,13 @@ pub struct RustTalkApp {
     others: Vec<ServerSession>,
     next_session_id: SessionId,
     /// The only server we may be in voice on. Camera, screen, audio sharing,
-    /// video tiles, talking and per-user mixer state belong to it.
+    /// video tiles, talking and per-user mixer state belong to it. Set only
+    /// by our own voice join (see `servers::join_channel`), never by a server.
     voice_owner: Option<SessionId>,
+    /// Connection (generation) of `voice_owner` the voice join was made on.
+    voice_generation: u64,
+    /// Voice channel we asked for and the server has not confirmed yet.
+    voice_pending: Option<u64>,
     /// Session whose UDP socket the running audio engine (`audio`) uses.
     audio_owner: Option<SessionId>,
     /// Connection (session, attempt) whose replay window is in `control.link`.
@@ -315,8 +335,11 @@ pub struct RustTalkApp {
     /// Decoded pictures / keyframe needs from the decoder threads.
     video_tx: std::sync::mpsc::Sender<media_ui::DecodeMsg>,
     video_rx: std::sync::mpsc::Receiver<media_ui::DecodeMsg>,
-    /// Vom Bildschirm-Thread gesetzt, wenn er wegen eines Fehlers endet.
-    screen_failed: Arc<std::sync::atomic::AtomicBool>,
+    /// Set by the screen thread when it ends with an error: the screen epoch
+    /// it was started in (a newer share ignores it).
+    screen_failed: Arc<Mutex<Option<u64>>>,
+    /// Numbers the video tiles: decoder results name the tile they were made for.
+    next_video_view: u64,
     /// Vollbild-Ansicht eines Streams (None = normale Ansicht).
     fullscreen: Option<(u64, VideoKind)>,
     /// egui-Kontext fuer Repaints aus Capture-/Netzwerk-Threads.
@@ -364,8 +387,9 @@ pub struct RustTalkApp {
     toast_tx: std::sync::mpsc::Sender<(SessionId, u64)>,
     toast_rx: std::sync::mpsc::Receiver<(SessionId, u64)>,
     last_toast: Option<Instant>,
-    /// Where the GIF that is downloading goes: (channel, reply_to).
-    gif_target: Option<(u64, Option<u64>)>,
+    /// Where the GIF that is downloading goes.
+    gif_target: Option<GifTarget>,
+    next_gif_request: u64,
     /// Screen rect of the GIF button (the picker opens above it).
     gif_button_rect: Option<egui::Rect>,
     giphy_tx: std::sync::mpsc::Sender<GiphyMsg>,
@@ -416,6 +440,8 @@ impl RustTalkApp {
             others: Vec::new(),
             next_session_id: 1,
             voice_owner: None,
+            voice_generation: 0,
+            voice_pending: None,
             audio_owner: None,
             link_conn: None,
             startup_pending: false,
@@ -472,7 +498,8 @@ impl RustTalkApp {
             video_epoch: Arc::new([std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)]),
             video_tx,
             video_rx,
-            screen_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            screen_failed: Arc::new(Mutex::new(None)),
+            next_video_view: 0,
             fullscreen: None,
             ctx,
             cam: None,
@@ -504,6 +531,7 @@ impl RustTalkApp {
             toast_rx,
             last_toast: None,
             gif_target: None,
+            next_gif_request: 0,
             gif_button_rect: None,
             giphy_tx: giphy_tx.clone(),
             giphy_rx,
@@ -665,7 +693,7 @@ impl RustTalkApp {
     }
 
     /// Applies a picked message action (reply / edit / delete).
-    fn apply_chat_action(&mut self, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>) {
+    fn apply_chat_action(&mut self, cmd_tx: &net::CommandSender) {
         let Some(action) = self.chat_action.take() else { return };
         match action {
             ChatAction::Reply(id) => {
@@ -733,10 +761,13 @@ impl RustTalkApp {
             } => {
                 let viewed = self.srv.id == id;
                 let username = self.config.username.clone();
-                let Some(s) = self.session_mut(id) else { return };
-                if s.cmd_tx.is_none() {
-                    return; // attempt was cancelled meanwhile; the net thread ends on its own
+                if self.session(id).is_none_or(|s| s.cmd_tx.is_none()) {
+                    return; // attempt was cancelled meanwhile
                 }
+                if let Err(e) = limits::welcome(&settings, &users, &channels, &spawn_log, &chat_history) {
+                    return self.protocol_violation(id, e);
+                }
+                let Some(s) = self.session_mut(id) else { return };
                 s.connected = true;
                 s.gif_available = gif_search;
                 // Pinned before Hello (the user trusted it), nothing to learn here.
@@ -751,9 +782,7 @@ impl RustTalkApp {
                 s.my_id = my_id;
                 s.channels = channels.into_iter().map(|c| (c.id, c)).collect();
                 s.users = users.into_iter().map(|u| (u.id, u)).collect();
-                s.chat.clear();
-                s.image_bytes = 0;
-                s.unread.clear();
+                s.clear_chat();
                 // Spawn-Log in die Spawn-Ansicht laden.
                 if let Some(spawn_id) = s.spawn_channel_id() {
                     for e in spawn_log {
@@ -763,7 +792,17 @@ impl RustTalkApp {
                 }
                 // Persistierten Chat-Verlauf in die Channels laden
                 // ("eigene" Nachrichten per Name erkannt – kein Account-System).
+                // Only the newest lines a channel keeps, so loading stays linear.
+                let mut left: HashMap<u64, usize> = HashMap::new();
+                for rec in &chat_history {
+                    *left.entry(rec.channel_id).or_default() += 1;
+                }
                 for rec in chat_history {
+                    let Some(n) = left.get_mut(&rec.channel_id) else { continue };
+                    *n -= 1;
+                    if *n >= MAX_LINES_PER_CHANNEL {
+                        continue;
+                    }
                     let own = rec.from_name == username;
                     s.push_line(rec.channel_id, ChatLine {
                         id: rec.id,
@@ -783,18 +822,12 @@ impl RustTalkApp {
                 let rc = s.reconnect.take();
                 let remember = std::mem::take(&mut s.remember);
                 let (key, name) = (s.key.clone(), s.server_settings.name.clone());
-                let tx = s.cmd_tx.clone();
                 if viewed {
                     self.config.invite = None;
                     self.prepare_all_names();
                     self.set_status(format!("Connected to {name}"));
                 }
-                // Mute and deafen are global (one microphone): this server learns them too.
-                let muted = self.control.self_muted.load(Ordering::Relaxed);
-                let deafened = self.control.self_deafened.load(Ordering::Relaxed);
-                if let (true, Some(tx)) = (muted || deafened, tx) {
-                    let _ = tx.send(Command::SetMute { muted, deafened });
-                }
+                // A login is chat only; mute metadata goes to the voice owner.
                 if remember {
                     self.enroll(&key, &name);
                 }
@@ -815,15 +848,22 @@ impl RustTalkApp {
 
     fn handle_server_message(&mut self, id: SessionId, msg: ServerMessage) {
         let viewed = self.srv.id == id;
-        let voice = self.voice_owner == Some(id);
+        let voice = self.voice_authorized(id);
+        let pending = self.voice_pending;
+        let Some(s) = self.session(id) else { return };
+        if let Err(e) = limits::message(s, &msg) {
+            return self.protocol_violation(id, e);
+        }
         let Some(s) = self.session_mut(id) else { return };
         match msg {
             ServerMessage::Welcome { .. } => {} // kommt nur via NetEvent::Connected
             ServerMessage::UserJoined { user } => {
+                // Listed in one channel at most: member lists stay bounded by the users.
+                for ch in s.channels.values_mut() {
+                    ch.user_ids.retain(|&uid| uid != user.id);
+                }
                 if let Some(ch) = s.channels.get_mut(&user.channel_id) {
-                    if !ch.user_ids.contains(&user.id) {
-                        ch.user_ids.push(user.id);
-                    }
+                    ch.user_ids.push(user.id);
                 }
                 let (uid, name) = (user.id, user.name.clone());
                 s.users.insert(user.id, user);
@@ -851,6 +891,7 @@ impl RustTalkApp {
                     self.clear_video_of(client_id, None);
                 }
                 if me {
+                    self.revoke_voice(id);
                     self.sync_voice_audio();
                 }
             }
@@ -859,6 +900,9 @@ impl RustTalkApp {
                 s.channels.insert(channel.id, channel);
             }
             ServerMessage::ChannelDeleted { channel_id } => {
+                // Our voice channel (or the one we asked for) is gone: so is the
+                // voice join. A later move into another channel needs a new one.
+                let ends_voice = voice && (s.my_channel() == Some(channel_id) || pending == Some(channel_id));
                 let was_category = s.channels.get(&channel_id).is_some_and(|c| c.kind.is_group());
                 s.channels.remove(&channel_id);
                 if was_category {
@@ -875,7 +919,9 @@ impl RustTalkApp {
                 if s.selected_channel == Some(channel_id) {
                     s.selected_channel = s.spawn_channel_id();
                 }
-                if voice {
+                if ends_voice {
+                    self.revoke_voice(id);
+                } else if voice {
                     self.sync_voice_audio();
                 }
             }
@@ -973,12 +1019,7 @@ impl RustTalkApp {
                     self.giphy.results.clear();
                 }
             }
-            ServerMessage::ChatEdited { channel_id, message_id, text } => {
-                if let Some(line) = s.chat.get_mut(&channel_id).and_then(|v| v.iter_mut().find(|l| l.id == message_id)) {
-                    line.text = text;
-                    line.edited = true;
-                }
-            }
+            ServerMessage::ChatEdited { channel_id, message_id, text } => s.edit_line(channel_id, message_id, text),
             ServerMessage::ChatDeleted { channel_id, message_id } => {
                 s.remove_line(channel_id, message_id);
                 if viewed {
@@ -1076,26 +1117,27 @@ impl RustTalkApp {
     /// `client_id` moved to `channel_id` on server `id`.
     fn on_user_moved(&mut self, id: SessionId, client_id: u64, channel_id: u64) {
         let viewed = self.srv.id == id;
-        let mut voice = self.voice_owner == Some(id);
-        let busy_elsewhere = self.voice_busy_elsewhere(id);
-        let label = self.server_label(id);
+        let mut voice = self.voice_authorized(id);
         let Some(s) = self.session(id) else { return };
+        if !s.users.contains_key(&client_id) {
+            return; // unknown users would grow the member lists without bound
+        }
         let me = client_id == s.my_id;
         let name = s.users.get(&client_id).map(|u| u.name.clone());
         let old_channel = s.users.get(&client_id).map(|u| u.channel_id);
         let previous_voice = s.my_voice_channel();
         let into_voice = s.channel_kind(channel_id) == Some(ChannelKind::Voice);
-        let (tx, spawn) = (s.cmd_tx.clone(), s.spawn_channel_id());
-        if me && into_voice && !voice {
-            if viewed && !busy_elsewhere {
-                // Moved into voice on the server we look at (as with one server).
-                self.set_voice_owner(Some(id));
-                voice = true;
-            } else if let (Some(tx), Some(spawn)) = (tx, spawn) {
-                // One voice session only, and a server in the background never
-                // opens the microphone: back to its lobby.
-                let _ = tx.send(Command::JoinChannel(spawn));
-                self.set_error(format!("{label} moved you into voice - you were sent back to its lobby"));
+        if me && into_voice {
+            // Only our own voice join lets a server put us into voice; once
+            // there, its moves between voice channels keep it (moderators, AFK).
+            let requested = self.voice_pending == Some(channel_id) || previous_voice.is_some();
+            if voice && requested {
+                self.voice_pending = None;
+            } else {
+                // Never opens the microphone, also not on the viewed server.
+                self.revoke_voice(id);
+                voice = false;
+                self.bounce_to_lobby(id);
             }
         }
         if voice {
@@ -1146,8 +1188,8 @@ impl RustTalkApp {
             s.system_line(channel_id, line, Self::now(), open);
         }
         if me && voice {
-            if now_voice.is_none() {
-                self.set_voice_owner(None); // left voice: the next voice join decides again
+            if now_voice.is_none() && previous_voice.is_some() {
+                self.revoke_voice(id); // left voice: the next voice join decides again
             }
             self.sync_voice_audio();
             if now_voice.is_some() && previous_voice != now_voice {
@@ -1283,7 +1325,7 @@ impl RustTalkApp {
     /// Every frame, whichever server is viewed: media follows the voice server.
     fn media_upkeep(&mut self) {
         // Screen thread ended with an error (e.g. window closed).
-        if self.screen_failed.swap(false, Ordering::Relaxed) && self.screen.is_some() {
+        if self.take_screen_failure() && self.screen.is_some() {
             self.screen = None;
             self.after_source_stopped(VideoKind::Screen);
         }
@@ -1297,7 +1339,7 @@ impl RustTalkApp {
     }
 
     fn ui_connected(&mut self, ctx: &egui::Context) {
-        let cmd_tx = self.srv.cmd_tx.clone().expect("connected");
+        let cmd_tx = self.srv.tx().expect("connected");
         self.apply_chat_action(&cmd_tx);
 
         // Fullscreen: only the stream + member bar. Ends when the stream is gone
