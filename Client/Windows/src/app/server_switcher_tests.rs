@@ -450,9 +450,13 @@ fn unread_is_plain_text_only_when_unread_and_state_stays_readable_when_narrow() 
         chat(&mut app, ib, lobby, "hi");
         let out = settle(&mut app, &mut t);
         assert!(text_at(&out, "New messages").is_some(), "label at {width}");
-        assert!(
-            text_at(&out, "Connected").is_some(),
-            "state still shown at {width}"
+        assert_eq!(
+            all_text(&out)
+                .iter()
+                .filter(|text| text.as_str() == "Connected")
+                .count(),
+            2,
+            "both rows retain their complete connection state at {width}"
         );
         assert!(text_at(&out, "Alpha").is_none());
         let pos = pos_of(&out, "New messages");

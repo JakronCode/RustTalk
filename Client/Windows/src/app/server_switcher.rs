@@ -228,8 +228,20 @@ fn text_width(ui: &egui::Ui, text: &str, font: &egui::FontId) -> f32 {
 }
 
 fn server_row(ui: &mut egui::Ui, row: &ServerRow) -> Option<SwitchAction> {
+    let (status, status_color) = status_text(row);
+    let status_font = egui::FontId::proportional(11.5);
+    let text_w = (ui.available_width() - ACTION_W - 36.0).max(24.0);
+    let unread_w = if row.unread {
+        text_width(ui, UNREAD_LABEL, &status_font) + 14.0
+    } else {
+        0.0
+    };
+    let wrap_unread = row.unread && text_width(ui, &status, &status_font) + unread_w > text_w;
     let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), ROW_H),
+        egui::vec2(
+            ui.available_width(),
+            ROW_H + if wrap_unread { 16.0 } else { 0.0 },
+        ),
         egui::Sense::hover(),
     );
     let (select_rect, action_rect) = rect.split_left_right_at_x(rect.right() - ACTION_W);
@@ -237,7 +249,6 @@ fn server_row(ui: &mut egui::Ui, row: &ServerRow) -> Option<SwitchAction> {
     let select = ui.interact(select_rect, id, egui::Sense::click());
     let toggle = ui.interact(action_rect, id.with("toggle"), egui::Sense::click());
 
-    let (status, status_color) = status_text(row);
     let (live, tip) = toggle_label(row);
     select.widget_info(|| {
         let mut label = format!("{}, {status}", row.name);
@@ -277,15 +288,13 @@ fn server_row(ui: &mut egui::Ui, row: &ServerRow) -> Option<SwitchAction> {
         name_w = (name_w - 22.0).max(24.0);
     }
     let name_font = egui::FontId::proportional(14.5);
-    let status_font = egui::FontId::proportional(11.5);
-    let text_w = (action_rect.left() - rect.left() - 36.0).max(24.0);
-    let unread_w = if row.unread {
-        text_width(ui, UNREAD_LABEL, &status_font) + 14.0
-    } else {
-        0.0
-    };
     let name = elide(ui, &row.name, &name_font, name_w);
-    let status_line = elide(ui, &status, &status_font, (text_w - unread_w).max(24.0));
+    let status_line = elide(
+        ui,
+        &status,
+        &status_font,
+        (text_w - if wrap_unread { 0.0 } else { unread_w }).max(24.0),
+    );
     let status_w = text_width(ui, &status_line, &status_font);
     let p = ui.painter();
     p.text(
@@ -308,7 +317,12 @@ fn server_row(ui: &mut egui::Ui, row: &ServerRow) -> Option<SwitchAction> {
     );
     if row.unread {
         p.text(
-            rect.left_top() + egui::vec2(32.0 + status_w + 14.0, 27.0),
+            rect.left_top()
+                + if wrap_unread {
+                    egui::vec2(32.0, 43.0)
+                } else {
+                    egui::vec2(32.0 + status_w + 14.0, 27.0)
+                },
             egui::Align2::LEFT_TOP,
             UNREAD_LABEL,
             status_font,
