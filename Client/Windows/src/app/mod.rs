@@ -349,7 +349,7 @@ pub struct RustTalkApp {
     mod_dialog: Option<moderation_ui::ModDialog>,
     /// Started via an invite link: connect right away.
     connect_on_start: bool,
-    /// "Connect and remember?" question for a saved server not remembered yet.
+    /// "Reconnect on start?" question for a saved server not remembered yet.
     remember_prompt: Option<server_switcher::RememberPrompt>,
     /// Focus the password field on the next frame.
     focus_password: bool,

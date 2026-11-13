@@ -121,7 +121,7 @@ pub(super) struct ServerSession {
     pub upload_backlog: Arc<AtomicUsize>,
     /// Login finished (Welcome received). `cmd_tx` alone = connecting.
     pub connected: bool,
-    /// The user chose "Connect and remember": a successful login enrolls the
+    /// The user chose "Reconnect on start": a successful login enrolls the
     /// server for startup. Only that choice sets it; plain connects never do.
     pub remember: bool,
     pub reconnect: Option<Reconnect>,

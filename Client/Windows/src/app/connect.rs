@@ -175,8 +175,6 @@ impl RustTalkApp {
         }
         if !self.show_connect_form {
             ui.add_space(8.0);
-            super::server_switcher::reconnect_note(ui);
-            ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if theme::ghost_button_sized(ui, format!("{}  Settings", icons::regular::GEAR_SIX), egui::vec2(0.0, 32.0)).clicked() {
                     self.open_settings(SettingsPage::Voice);
@@ -413,8 +411,6 @@ impl RustTalkApp {
             }
             self.request_connect();
         }
-        ui.add_space(4.0);
-        super::server_switcher::reconnect_note(ui);
         if let Some(rc) = &self.srv.reconnect {
             ui.add_space(4.0);
             let attempt = rc.attempt;
