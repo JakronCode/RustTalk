@@ -158,6 +158,12 @@ fn mark_inline_code(text: &str, depth: usize, budget: &mut usize, code: &mut [bo
                 continue;
             }
         }
+        // Links are atomic in the renderer too; their text is sent as typed.
+        if let Some((len, _)) = super::links::detect(rest, text[..pos].chars().next_back()) {
+            code[pos..pos + len].fill(true);
+            pos += len;
+            continue;
+        }
         if let Some(m) = ["`", "**", "__", "~~", "*", "_"]
             .into_iter()
             .find(|m| rest.starts_with(m))
@@ -514,6 +520,11 @@ mod tests {
         assert_eq!(replace_shortcodes("`:rofl:` :rofl:"), "`:rofl:` 🤣");
         assert_eq!(replace_shortcodes("\\`:rofl:`"), "\\`🤣`");
         assert_eq!(replace_shortcodes("``:rofl:`"), "``:rofl:`");
+        assert_eq!(
+            replace_shortcodes("https://example.com/:rofl:/x_y_ :rofl:"),
+            "https://example.com/:rofl:/x_y_ 🤣",
+            "links are sent as typed"
+        );
         assert_eq!(
             replace_shortcodes("```\n:rofl:\n```\n:rofl:"),
             "```\n:rofl:\n```\n🤣"

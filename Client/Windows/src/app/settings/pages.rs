@@ -28,6 +28,7 @@ impl RustTalkApp {
             SectionId::Sounds => self.section_sounds(ui),
             SectionId::SpokenNames => self.section_spoken_names(ui),
             SectionId::Encryption => self.section_encryption(ui),
+            SectionId::Links => self.section_links(ui),
             SectionId::Data => section_data(ui),
             SectionId::Developer => section_developer(ui),
             SectionId::Version => section_version(ui),
@@ -931,6 +932,76 @@ impl RustTalkApp {
             self.config.known_servers.remove(&a);
             self.config.save();
         }
+    }
+
+    fn section_links(&mut self, ui: &mut egui::Ui) {
+        let now = links::now();
+        hint(ui, "Links in chat never load anything by themselves. Untrusted links show the full address for confirmation. Trusted HTTPS sites open directly only when no warning applies.");
+        hint(ui, &format!(
+            "Trusted sites open without asking, for exactly that protocol, name and port. Download, address and threat feed warnings still ask. Trust expires after {} days (at most {} sites).",
+            links::TRUST_DAYS,
+            links::MAX_TRUSTED
+        ));
+        if self.config.trusted_links.is_empty() {
+            hint(ui, "No trusted sites.");
+        }
+        let mut remove = None;
+        for (origin, at) in &self.config.trusted_links {
+            let age = now.saturating_sub(*at) / 86_400;
+            let left = links::TRUST_DAYS.saturating_sub(age);
+            setting_row(ui, origin, Some(&format!("Trusted {age} days ago, expires in {left} days")), false, |ui| {
+                if ghost_button(ui, "Remove").clicked() {
+                    remove = Some(origin.clone());
+                }
+            });
+        }
+        if let Some(origin) = remove {
+            self.config.trusted_links.remove(&origin);
+            self.config.save();
+        }
+        if !self.config.trusted_links.is_empty() && ghost_button(ui, "Remove all trusted sites").clicked() {
+            self.config.trusted_links.clear();
+            self.config.save();
+        }
+
+        ui.add_space(dense(12.0, 8.0));
+        ui.label(egui::RichText::new("Threat feed (optional)").strong().color(theme::HEADER));
+        hint(ui, "Import a list of known malicious web addresses that you downloaded yourself, for example the URLhaus plain-text URL list or hostfile (free account and Auth-Key at auth.abuse.ch, not-for-profit use; commercial use may need a Spamhaus subscription). RustTalk only reads the file on this computer: it never sends chat links anywhere and never downloads the feed. Plain URL lists, hosts files and URLhaus CSV are understood; at most 32 MiB.");
+        hint(ui, "A link that is not on the list is not necessarily safe. New threats appear before any list has them.");
+        let status = self.threat_feed.status(now);
+        let color = match self.threat_feed {
+            links::FeedState::Failed(_) => theme::RED,
+            links::FeedState::Ready(_) => theme::TEXT,
+            links::FeedState::Off => theme::MUTED,
+        };
+        ui.add(egui::Label::new(egui::RichText::new(status).color(color)).wrap());
+        ui.horizontal_wrapped(|ui| {
+            if ui.button(format!("{}  Import feed file...", icons::regular::FILE_ARROW_UP)).clicked() {
+                if let Some(path) = rfd::FileDialog::new().set_title("Import threat feed").pick_file() {
+                    match path.to_str() {
+                        None => self.set_error("Threat feed not imported: the file path must be valid Unicode."),
+                        Some(p) => match links::FeedState::load(Some(p)) {
+                            links::FeedState::Failed(e) => self.set_error(format!("Threat feed not imported: {e}")),
+                            state => {
+                                self.threat_feed = state;
+                                self.config.threat_feed = Some(p.to_owned());
+                                self.config.save();
+                            }
+                        },
+                    }
+                }
+            }
+            if self.config.threat_feed.is_some() {
+                if ui.button("Reload").on_hover_text("Read the same file again, e.g. after downloading a fresh copy").clicked() {
+                    self.threat_feed = links::FeedState::load(self.config.threat_feed.as_deref());
+                }
+                if ghost_button(ui, "Remove feed").clicked() {
+                    self.config.threat_feed = None;
+                    self.threat_feed = links::FeedState::Off;
+                    self.config.save();
+                }
+            }
+        });
     }
 }
 

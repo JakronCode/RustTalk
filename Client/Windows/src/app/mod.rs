@@ -25,6 +25,7 @@ mod emoji;
 mod join_error;
 mod lifecycle;
 mod limits;
+mod links;
 mod media_ui;
 mod markdown;
 mod mention;
@@ -374,6 +375,9 @@ pub struct RustTalkApp {
     connect_on_start: bool,
     /// "Reconnect on start?" question for a saved server not remembered yet.
     remember_prompt: Option<server_switcher::RememberPrompt>,
+    /// Clicked chat link waiting for confirmation.
+    link_prompt: Option<links::Prompt>,
+    threat_feed: links::FeedState,
     /// Focus the password field on the next frame.
     focus_password: bool,
     /// Original address of the saved server being edited.
@@ -420,7 +424,10 @@ impl RustTalkApp {
         app
     }
 
-    fn with_config(ctx: egui::Context, config: ClientConfig, connect_on_start: bool) -> Self {
+    fn with_config(ctx: egui::Context, mut config: ClientConfig, connect_on_start: bool) -> Self {
+        links::prune(&mut config.trusted_links, links::now());
+        // shortcut: a large feed (max 32 MiB) is parsed on the UI thread at start, move to a worker if that shows.
+        let threat_feed = links::FeedState::load(config.threat_feed.as_deref());
         let control = Arc::new(AudioControl::new(config.voice_activation, config.vad_threshold));
         control.set_output_volume(config.output_volume);
         control.set_input_volume(config.input_volume);
@@ -526,6 +533,8 @@ impl RustTalkApp {
             mod_dialog: None,
             connect_on_start,
             remember_prompt: None,
+            link_prompt: None,
+            threat_feed,
             focus_password: false,
             editing_bookmark: None,
             server_nickname,
@@ -1316,6 +1325,7 @@ impl eframe::App for RustTalkApp {
         self.ui_screen_picker(ctx);
         self.ui_update_dialog(ctx, false);
         self.ui_remember_prompt(ctx);
+        self.ui_links(ctx);
 
         self.sync_mic_preview();
         if self.audio.is_none() {
