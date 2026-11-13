@@ -1080,6 +1080,62 @@ async fn server_restart_keeps_state() {
     std::fs::remove_file(&db).ok();
 }
 
+/// Audio sharing status: voice only, announced once per change, ends when leaving the channel.
+#[tokio::test]
+async fn audio_sharing_status_follows_voice_membership() {
+    let port = free_port();
+    let _server = spawn_server(port, "[[channels]]\nname = \"Funkturm\"\nkind = \"voice\"\n");
+    wait_for_port(port);
+
+    let (mut a, wa) = connect(port, "alice", None).await;
+    let (mut b, _wb) = connect(port, "bob", None).await;
+    drain(&mut a, 500).await;
+    drain(&mut b, 500).await;
+
+    send(&mut a, &ClientMessage::SetAudioSharing { sharing: true }).await;
+    assert!(matches!(recv(&mut a, 2000).await, Some(ServerMessage::Error { .. })), "not in voice");
+    assert!(drain(&mut b, 300).await.is_empty(), "a refused request is not announced");
+
+    for conn in [&mut a, &mut b] {
+        send(conn, &ClientMessage::JoinChannel { channel_id: 2 }).await;
+    }
+    drain(&mut a, 500).await;
+    drain(&mut b, 500).await;
+
+    send(&mut a, &ClientMessage::SetAudioSharing { sharing: true }).await;
+    send(&mut a, &ClientMessage::SetAudioSharing { sharing: true }).await;
+    for conn in [&mut a, &mut b] {
+        let msgs = drain(conn, 500).await;
+        let changes: Vec<_> = msgs
+            .iter()
+            .filter(|m| matches!(m, ServerMessage::AudioSharingChanged { client_id, sharing: true } if *client_id == wa.client_id))
+            .collect();
+        assert_eq!(changes.len(), 1, "announced once: {msgs:?}");
+    }
+
+    send(&mut a, &ClientMessage::JoinChannel { channel_id: 1 }).await;
+    for conn in [&mut a, &mut b] {
+        let msgs = drain(conn, 500).await;
+        assert!(
+            msgs.iter().any(|m| matches!(m, ServerMessage::AudioSharingChanged { client_id, sharing: false } if *client_id == wa.client_id)),
+            "leaving voice ends audio sharing: {msgs:?}"
+        );
+    }
+
+    // Flipping it over and over is cut off instead of flooding everyone.
+    send(&mut a, &ClientMessage::JoinChannel { channel_id: 2 }).await;
+    drain(&mut a, 300).await;
+    drain(&mut b, 300).await;
+    for i in 0..40 {
+        send(&mut a, &ClientMessage::SetAudioSharing { sharing: i % 2 == 0 }).await;
+    }
+    let msgs = drain(&mut b, 1000).await;
+    let changes = msgs.iter().filter(|m| matches!(m, ServerMessage::AudioSharingChanged { .. })).count();
+    assert!(changes <= 10, "bounded broadcasts, got {changes}");
+    let errors = drain(&mut a, 300).await;
+    assert!(errors.iter().any(|m| matches!(m, ServerMessage::Error { .. })), "the flood is refused with an error");
+}
+
 /// Video-Relay: Sharing-Status + JPEG-Frames kommen bei Channel-Mitgliedern an.
 #[tokio::test]
 async fn video_relay_und_sharing() {

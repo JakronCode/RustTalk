@@ -7,17 +7,17 @@
 //! like a voice (per-user mute/volume apply), without the talking indicator.
 
 use std::net::UdpSocket;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use audiopus::coder::Encoder;
 use audiopus::{Application, Bitrate, Channels, SampleRate, Signal};
 #[cfg(windows)]
 use cpal::traits::DeviceTrait;
-use ringbuf::traits::{Consumer, Split};
-use ringbuf::{HeapProd, HeapRb};
+use ringbuf::traits::{Consumer, Observer, Split};
+use ringbuf::{HeapCons, HeapProd, HeapRb};
 use rusttalk_shared::audio_packet::{seal_packet, AudioHeader, FLAG_SCREEN_AUDIO, FRAME_SAMPLES, SAMPLE_RATE};
 use rusttalk_shared::secure::{PacketCipher, DIR_TO_SERVER};
 
@@ -32,11 +32,87 @@ const SILENCE_RMS: f32 = 5e-4;
 /// Keep sending this many silent frames after sound (fade-outs, short pauses).
 const SILENCE_HANGOVER: u32 = 25; // 0.5 s
 
+/// One captured stream. Its `stop` is set by whoever ends it (capture failure or app exit).
+struct Source {
+    cons: HeapCons<f32>,
+    stop: Arc<AtomicBool>,
+    buf: [f32; FRAME_SAMPLES],
+    have: usize,
+    /// Mixed on the clock; re-primed (one frame of cushion) after an underrun.
+    primed: bool,
+    waited: u8,
+}
+
+/// More than this much audio piled up in one source is cut back to two frames.
+const MAX_BACKLOG: usize = FRAME_SAMPLES * 6;
+/// One mix tick.
+const FRAME_PERIOD: Duration = Duration::from_millis(20);
+
+impl Source {
+    fn channel() -> (HeapProd<f32>, Self) {
+        let (prod, cons) = HeapRb::<f32>::new(SAMPLE_RATE as usize * 2).split();
+        (prod, Self { cons, stop: Arc::new(AtomicBool::new(false)), buf: [0.0; FRAME_SAMPLES], have: 0, primed: false, waited: 0 })
+    }
+
+    /// A stopped source with less than a frame left is done; its tail is dropped.
+    fn finished(&self) -> bool {
+        self.stop.load(Ordering::Relaxed) && self.have < FRAME_SAMPLES && self.cons.is_empty()
+    }
+
+    /// Refills `buf`; true when this tick has a whole frame of this source to mix.
+    fn next_frame(&mut self) -> bool {
+        self.have += self.cons.pop_slice(&mut self.buf[self.have..]);
+        let backlog = self.cons.occupied_len();
+        if backlog > MAX_BACKLOG {
+            self.cons.skip(backlog - FRAME_SAMPLES * 2);
+            self.have += self.cons.pop_slice(&mut self.buf[self.have..]);
+        }
+        let full = self.have == FRAME_SAMPLES;
+        if !full {
+            self.primed = false;
+            self.waited = 0;
+            return false;
+        }
+        if !self.primed {
+            self.waited = self.waited.saturating_add(1);
+            self.primed = self.cons.occupied_len() >= FRAME_SAMPLES || self.waited > 2 || self.stop.load(Ordering::Relaxed);
+        }
+        self.primed
+    }
+}
+
+/// When the last packet went out, for the "sound is flowing" indicator.
+#[derive(Clone)]
+struct Activity {
+    started: Instant,
+    /// Milliseconds since `started` plus one; 0 = nothing sent yet.
+    last_sent: Arc<AtomicU64>,
+}
+
+impl Activity {
+    fn new() -> Self {
+        Self { started: Instant::now(), last_sent: Arc::default() }
+    }
+
+    fn note(&self) {
+        self.last_sent.store(self.started.elapsed().as_millis() as u64 + 1, Ordering::Relaxed);
+    }
+
+    fn recent(&self) -> bool {
+        let last = self.last_sent.load(Ordering::Relaxed);
+        last != 0 && (self.started.elapsed().as_millis() as u64 + 1).saturating_sub(last) < SOUND_LIT_MS
+    }
+}
+
+/// Silence is not sent, so a packet in this window means sound.
+pub const SOUND_LIT_MS: u64 = 400;
+
 /// Running "share audio"; dropping it stops everything.
 pub struct ScreenAudio {
+    activity: Activity,
     _stream: Option<super::DeviceStream>,
-    #[cfg(any(windows, target_os = "linux"))]
-    capture_worker: Option<std::thread::JoinHandle<()>>,
+    capture_workers: Vec<std::thread::JoinHandle<()>>,
+    source_stops: Vec<Arc<AtomicBool>>,
     worker: Option<std::thread::JoinHandle<()>>,
     stop: Arc<AtomicBool>,
     tap: RenderTap,
@@ -45,10 +121,10 @@ pub struct ScreenAudio {
 impl Drop for ScreenAudio {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        for stop in &self.source_stops { stop.store(true, Ordering::Relaxed); }
         *self.tap.lock().unwrap() = None;
         if let Some(worker) = self.worker.take() { let _ = worker.join(); }
-        #[cfg(any(windows, target_os = "linux"))]
-        if let Some(worker) = self.capture_worker.take() { let _ = worker.join(); }
+        for worker in self.capture_workers.drain(..) { let _ = worker.join(); }
     }
 }
 
@@ -56,6 +132,11 @@ impl ScreenAudio {
     #[cfg(test)]
     pub fn simulate_failure(&self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Sound is going out right now.
+    pub fn sending(&self) -> bool {
+        self.activity.recent()
     }
 
     pub fn failed(&self) -> bool {
@@ -68,69 +149,93 @@ impl ScreenAudio {
     }
 
     pub fn start_source(udp: UdpSocket, token: u64, cipher: Arc<PacketCipher>, link: Arc<super::link::LinkStats>, output_device: Option<&str>, tap: RenderTap, source: &super::share_source::AudioShareSource) -> Result<Self> {
-        use super::share_source::AudioShareSource;
+        use super::share_source::{AudioShareSource, MAX_MIX};
         #[cfg(test)]
         if let Some(stream) = super::test_devices::open(super::test_devices::Kind::System, output_device) {
-            return Ok(Self { _stream: Some(stream?), #[cfg(any(windows, target_os = "linux"))] capture_worker: None, worker: None, stop: Arc::new(AtomicBool::new(false)), tap });
+            return Ok(Self { activity: Activity::new(), _stream: Some(stream?), capture_workers: vec![], source_stops: vec![], worker: None, stop: Arc::new(AtomicBool::new(false)), tap });
         }
         #[cfg(not(windows))]
         let _ = output_device; // Linux captures the system default output, not a CPAL device.
         anyhow::ensure!(cfg!(any(windows, target_os = "linux")), "System audio capture is not supported on this platform");
+        if let AudioShareSource::Applications(apps) = source {
+            anyhow::ensure!(!apps.is_empty() && apps.len() <= MAX_MIX, "Pick between 1 and {MAX_MIX} applications");
+            anyhow::ensure!(apps.iter().enumerate().all(|(i, a)| !apps[..i].contains(a)), "Application selected twice");
+        }
         let stop = Arc::new(AtomicBool::new(false));
-        let (prod, cons) = HeapRb::<f32>::new(SAMPLE_RATE as usize * 2).split();
+        // Dropping `audio` on any early return stops the captures already running.
+        let mut audio = Self { activity: Activity::new(), _stream: None, capture_workers: vec![], source_stops: vec![], worker: None, stop: stop.clone(), tap: tap.clone() };
+        let mut sources = Vec::new();
         #[cfg(windows)]
-        let mut capture_worker = None;
-        #[cfg(windows)]
-        let stream = if let AudioShareSource::Application(application) = source {
-            capture_worker = Some(super::windows_audio::start(application.clone(), prod, stop.clone())?);
-            None
-        } else {
-            let device = super::playback::pick_output_device(output_device)?;
-            let supported = device.default_output_config().context("Output device has no format")?;
-            let stream = super::capture::build_stream_for(&device, &supported, prod, stop.clone())
-                .context("Could not record the computer audio")?;
-            #[cfg(test)]
-            let stream = super::DeviceStream::Hardware { _stream: stream };
-            Some(stream)
-        };
-        #[cfg(not(windows))]
-        let stream = None;
+        match source {
+            AudioShareSource::Applications(apps) => for application in apps {
+                let (prod, src) = Source::channel();
+                audio.source_stops.push(src.stop.clone());
+                audio.capture_workers.push(super::windows_audio::start(application.clone(), prod, src.stop.clone())?);
+                sources.push(src);
+            },
+            AudioShareSource::System => {
+                let (prod, src) = Source::channel();
+                audio.source_stops.push(src.stop.clone());
+                let device = super::playback::pick_output_device(output_device)?;
+                let supported = device.default_output_config().context("Output device has no format")?;
+                let stream = super::capture::build_stream_for(&device, &supported, prod, src.stop.clone())
+                    .context("Could not record the computer audio")?;
+                #[cfg(test)]
+                let stream = super::DeviceStream::Hardware { _stream: stream };
+                audio._stream = Some(stream);
+                sources.push(src);
+            }
+        }
         #[cfg(target_os = "linux")]
-        let capture_worker = Some(super::system_audio::start(prod, stop.clone(), match source {
-            AudioShareSource::System => None,
-            AudioShareSource::Application(application) => Some(application.clone()),
-        })?);
+        {
+            let targets: Vec<Option<super::share_source::ApplicationSource>> = match source {
+                AudioShareSource::System => vec![None],
+                AudioShareSource::Applications(apps) => apps.iter().cloned().map(Some).collect(),
+            };
+            for target in targets {
+                let (prod, src) = Source::channel();
+                audio.source_stops.push(src.stop.clone());
+                audio.capture_workers.push(super::system_audio::start(prod, src.stop.clone(), target)?);
+                sources.push(src);
+            }
+        }
 
         let (render_prod, render_cons) = HeapRb::<f32>::new(SAMPLE_RATE as usize).split();
-        let worker = std::thread::Builder::new()
+        audio.worker = Some(std::thread::Builder::new()
             .name("screen-audio".into())
             .spawn({
                 let stop = stop.clone();
-                move || encode_loop(cons, render_cons, udp, token, cipher, link, stop)
+                let activity = audio.activity.clone();
+                move || encode_loop(sources, render_cons, udp, token, cipher, link, stop, activity)
             })
-            .context("screen audio thread");
-        let worker = match worker {
-            Ok(worker) => worker,
-            Err(e) => {
-                stop.store(true, Ordering::Relaxed);
-                #[cfg(any(windows, target_os = "linux"))]
-                if let Some(worker) = capture_worker { let _ = worker.join(); }
-                return Err(e);
-            }
-        };
+            .context("screen audio thread")?);
         *tap.lock().unwrap() = Some(render_prod);
-        Ok(Self { _stream: stream, #[cfg(any(windows, target_os = "linux"))] capture_worker, worker: Some(worker), stop, tap })
+        Ok(audio)
     }
 }
 
+/// One 20 ms tick: sums a frame of every source that has one (a stalled or silent source
+/// contributes nothing) and clamps to full scale.
+fn mix_tick(sources: &mut [Source], frame: &mut [f32; FRAME_SAMPLES]) {
+    frame.fill(0.0);
+    for s in sources.iter_mut() {
+        if s.next_frame() {
+            for (out, v) in frame.iter_mut().zip(&s.buf) { *out += v; }
+            s.have = 0;
+        }
+    }
+    for v in frame.iter_mut() { *v = v.clamp(-1.0, 1.0); }
+}
+
 fn encode_loop(
-    mut cons: ringbuf::HeapCons<f32>,
+    mut sources: Vec<Source>,
     mut render: ringbuf::HeapCons<f32>,
     udp: UdpSocket,
     token: u64,
     cipher: Arc<PacketCipher>,
     link: Arc<super::link::LinkStats>,
     stop: Arc<AtomicBool>,
+    activity: Activity,
 ) {
     let encoder = match Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Audio) {
         Ok(mut e) => {
@@ -149,16 +254,26 @@ fn encode_loop(
     };
     let mut aec = EchoCanceller::new();
     let mut frame = [0f32; FRAME_SAMPLES];
-    let mut have = 0usize;
     let mut opus = [0u8; 1500];
     let (mut seq, mut ts, mut quiet) = (1u32, 0u32, SILENCE_HANGOVER);
+    let mut next = Instant::now();
     while !stop.load(Ordering::Relaxed) {
-        have += cons.pop_slice(&mut frame[have..]);
-        if have < FRAME_SAMPLES {
-            std::thread::sleep(Duration::from_millis(3));
+        let now = Instant::now();
+        if now < next {
+            std::thread::sleep((next - now).min(Duration::from_millis(5)));
             continue;
         }
-        have = 0;
+        next += FRAME_PERIOD;
+        if now > next + Duration::from_millis(100) {
+            next = now + FRAME_PERIOD; // fell behind: do not burst to catch up
+        }
+        // An app that closed leaves the mix; the last source ending ends the share.
+        sources.retain(|s| !s.finished());
+        if sources.is_empty() {
+            stop.store(true, Ordering::Relaxed);
+            break;
+        }
+        mix_tick(&mut sources, &mut frame);
         // Remove what RustTalk itself plays (the other people's voices).
         if let Some(a) = aec.as_mut() {
             for half in frame.chunks_mut(AEC_FRAME) {
@@ -179,6 +294,7 @@ fn encode_loop(
             header.flags |= FLAG_SCREEN_AUDIO;
             let _ = udp.send(&seal_packet(&header, &cipher, DIR_TO_SERVER, &opus[..len]));
             link.audio_sent.fetch_add(1, Ordering::Relaxed);
+            activity.note();
             seq = seq.wrapping_add(1);
         } else {
             stop.store(true, Ordering::Relaxed);
@@ -210,7 +326,7 @@ mod tests {
         sender.connect(receiver.local_addr().unwrap()).unwrap();
         let cipher = Arc::new(PacketCipher::new(&[7; 32]).unwrap());
         let voice = seal_packet(&AudioHeader::new(42, 1, 0), &cipher, DIR_TO_SERVER, b"voice");
-        let (mut prod, cons) = HeapRb::<f32>::new(FRAME_SAMPLES * 3).split();
+        let (mut prod, source) = Source::channel();
         prod.push_slice(&[0.3; FRAME_SAMPLES * 3]);
         let (render_prod, render_cons) = HeapRb::<f32>::new(FRAME_SAMPLES).split();
         let tap = Arc::new(Mutex::new(Some(render_prod)));
@@ -218,9 +334,9 @@ mod tests {
         let worker = std::thread::spawn({
             let cipher = cipher.clone();
             let stop = stop.clone();
-            move || encode_loop(cons, render_cons, sender, 42, cipher, Arc::new(super::super::link::LinkStats::default()), stop)
+            move || encode_loop(vec![source], render_cons, sender, 42, cipher, Arc::new(super::super::link::LinkStats::default()), stop, Activity::new())
         });
-        let audio = ScreenAudio { _stream: Some(stream), #[cfg(any(windows, target_os = "linux"))] capture_worker: None, worker: Some(worker), stop: stop.clone(), tap: tap.clone() };
+        let audio = ScreenAudio { activity: Activity::new(), _stream: Some(stream), capture_workers: vec![], source_stops: vec![], worker: Some(worker), stop: stop.clone(), tap: tap.clone() };
         let mut buf = [0; 1500];
         let n = receiver.recv(&mut buf).unwrap();
         let (header, _) = decode(&buf[..n]).unwrap();
@@ -231,6 +347,88 @@ mod tests {
         assert!(stop.load(Ordering::Relaxed));
         assert!(tap.lock().unwrap().is_none());
         assert_eq!(devices.0.borrow().systems, 0);
+    }
+
+    fn feed(prod: &mut HeapProd<f32>, value: f32, frames: usize) {
+        use ringbuf::traits::Producer;
+        prod.push_slice(&vec![value; FRAME_SAMPLES * frames]);
+    }
+
+    #[test]
+    fn sources_are_summed_clamped_and_a_stalled_one_does_not_block() {
+        let (mut a_prod, a) = Source::channel();
+        let (mut b_prod, b) = Source::channel();
+        let mut sources = vec![a, b];
+        let mut frame = [0.0; FRAME_SAMPLES];
+        mix_tick(&mut sources, &mut frame);
+        assert!(frame.iter().all(|v| *v == 0.0), "nothing buffered yet");
+        feed(&mut a_prod, 0.25, 3);
+        mix_tick(&mut sources, &mut frame);
+        assert!(frame.iter().all(|v| *v == 0.25), "a silent source must not stall the mix");
+        feed(&mut b_prod, 0.5, 3);
+        mix_tick(&mut sources, &mut frame);
+        assert!(frame.iter().all(|v| *v == 0.75));
+        let (mut c_prod, c) = Source::channel();
+        let (mut d_prod, d) = Source::channel();
+        feed(&mut c_prod, 0.9, 3);
+        feed(&mut d_prod, 0.9, 3);
+        mix_tick(&mut [c, d], &mut frame);
+        assert!(frame.iter().all(|v| *v == 1.0), "sum must not exceed full scale");
+    }
+
+    #[test]
+    fn staggered_sources_give_one_mixed_frame_per_tick() {
+        use ringbuf::traits::Producer;
+        let (mut a_prod, a) = Source::channel();
+        let (mut b_prod, b) = Source::channel();
+        let mut sources = vec![a, b];
+        let mut frame = [0.0; FRAME_SAMPLES];
+        // b delivers 10 ms (half a frame) behind a, in 480-sample blocks.
+        feed(&mut a_prod, 0.25, 2);
+        b_prod.push_slice(&[0.5; FRAME_SAMPLES / 2]);
+        mix_tick(&mut sources, &mut frame);
+        assert!(frame.iter().all(|v| *v == 0.25), "b has no whole frame yet");
+        b_prod.push_slice(&[0.5; FRAME_SAMPLES * 2]);
+        mix_tick(&mut sources, &mut frame);
+        assert!(frame.iter().all(|v| *v == 0.75), "both sources land in the same packet");
+    }
+
+    #[test]
+    fn partial_delivery_never_shifts_a_source_and_backlog_is_bounded() {
+        use ringbuf::traits::Producer;
+        let (mut prod, source) = Source::channel();
+        let mut sources = vec![source];
+        let mut frame = [0.0; FRAME_SAMPLES];
+        prod.push_slice(&[0.3; FRAME_SAMPLES - 1]);
+        mix_tick(&mut sources, &mut frame);
+        assert!(frame.iter().all(|v| *v == 0.0), "a partial frame waits");
+        assert_eq!(sources[0].have, FRAME_SAMPLES - 1);
+        feed(&mut prod, 0.3, 40);
+        mix_tick(&mut sources, &mut frame);
+        assert!(sources[0].cons.occupied_len() <= MAX_BACKLOG, "a burst is cut back");
+    }
+
+    #[test]
+    fn a_stopped_source_with_a_partial_tail_ends_and_so_does_the_share() {
+        use ringbuf::traits::Producer;
+        let (mut prod, source) = Source::channel();
+        let (_render_prod, render_cons) = HeapRb::<f32>::new(FRAME_SAMPLES).split();
+        prod.push_slice(&[0.1; 10]);
+        source.stop.store(true, Ordering::Relaxed);
+        let stop = Arc::new(AtomicBool::new(false));
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender.connect("127.0.0.1:9").unwrap();
+        let cipher = Arc::new(PacketCipher::new(&[7; 32]).unwrap());
+        let worker = std::thread::spawn({
+            let stop = stop.clone();
+            move || encode_loop(vec![source], render_cons, sender, 1, cipher, Arc::new(super::super::link::LinkStats::default()), stop, Activity::new())
+        });
+        let start = Instant::now();
+        while !stop.load(Ordering::Relaxed) {
+            assert!(start.elapsed() < Duration::from_secs(2), "sharing must end when its only source is gone");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        worker.join().unwrap();
     }
 
     #[cfg(target_os = "linux")]

@@ -1,12 +1,14 @@
 //! Audio source chooser. Discovery never opens a recording stream.
 use super::theme::IconState;
 use super::*;
-use crate::audio::share_source::{self, AudioApplication, AudioShareSource};
+use crate::audio::share_source::{self, AudioApplication, AudioShareSource, MAX_MIX};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 pub(super) struct AudioPicker {
     selected: AudioShareSource,
+    /// A selected app stopped playing and left the selection.
+    dropped: bool,
     applications: Vec<AudioApplication>,
     textures: Vec<Option<egui::TextureHandle>>,
     pending: Option<Receiver<anyhow::Result<Vec<AudioApplication>>>>,
@@ -24,6 +26,7 @@ impl AudioPicker {
     fn new(selected: AudioShareSource) -> Self {
         let mut picker = Self {
             selected,
+            dropped: false,
             applications: vec![],
             textures: vec![],
             pending: None,
@@ -62,6 +65,11 @@ impl AudioPicker {
                         self.applications = apps;
                         self.textures.clear();
                         self.error = None;
+                        if let AudioShareSource::Applications(list) = &mut self.selected {
+                            let before = list.len();
+                            list.retain(|s| self.applications.iter().any(|app| &app.source == s));
+                            self.dropped = list.len() < before;
+                        }
                     }
                     Err(e) => {
                         self.applications.clear();
@@ -102,13 +110,31 @@ impl AudioPicker {
             .collect();
     }
 
+    fn selected_apps(&self) -> &[share_source::ApplicationSource] {
+        match &self.selected {
+            AudioShareSource::Applications(list) => list,
+            AudioShareSource::System => &[],
+        }
+    }
+
+    /// Adds or removes one app from the mix; picking an app leaves "System audio".
+    fn toggle_app(&mut self, source: share_source::ApplicationSource) {
+        if let AudioShareSource::Applications(list) = &mut self.selected {
+            if let Some(i) = list.iter().position(|s| *s == source) {
+                list.remove(i);
+            } else if list.len() < MAX_MIX {
+                list.push(source);
+            }
+        } else {
+            self.selected = AudioShareSource::Applications(vec![source]);
+        }
+    }
+
     fn selection_available(&self) -> bool {
-        self.selected == AudioShareSource::System
-            || (self.pending.is_none()
-                && self
-                    .applications
-                    .iter()
-                    .any(|app| self.selected == AudioShareSource::Application(app.source.clone())))
+        match &self.selected {
+            AudioShareSource::System => true,
+            AudioShareSource::Applications(list) => self.pending.is_none() && !list.is_empty(),
+        }
     }
 }
 
@@ -123,10 +149,10 @@ impl RustTalkApp {
         self.screen_audio.is_some() || self.audio_only
     }
 
-    /// Audio button: stops immediately while sharing; the dialog opens only when capture is off.
+    /// Audio button: always opens the dialog; it holds "Stop sharing" and the mix while sharing.
     pub(super) fn toggle_audio_sharing(&mut self) {
-        if self.audio_sharing_active() {
-            self.stop_shared_audio();
+        if self.audio_picker.is_some() {
+            self.audio_picker = None;
         } else {
             self.open_audio_picker();
         }
@@ -154,7 +180,7 @@ impl RustTalkApp {
         let mut close = false;
         let mut start = None;
         let mut stop = false;
-        egui::Window::new(format!("{}  Share audio", icons::regular::SPEAKER_HIGH))
+        egui::Window::new(format!("{}  Share audio", icons::regular::MUSIC_NOTES))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -176,6 +202,7 @@ impl RustTalkApp {
                         "Everything on the default output"
                     }),
                     picker.selected == system,
+                    false,
                 )
                 .clicked()
                 {
@@ -196,6 +223,7 @@ impl RustTalkApp {
                     });
                 });
                 ui.add_space(4.0);
+                let mut toggled = None;
                 let listed = picker.pending.is_none() && !picker.applications.is_empty();
                 egui::ScrollArea::vertical()
                     .max_height(264.0)
@@ -203,13 +231,13 @@ impl RustTalkApp {
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 6.0;
                         for (i, app) in picker.applications.iter().enumerate() {
-                            let source = AudioShareSource::Application(app.source.clone());
                             let icon = match picker.textures.get(i) {
                                 Some(Some(tex)) => RowIcon::Image(tex),
                                 _ => RowIcon::Letter(&app.label),
                             };
-                            if source_row(ui, icon, &app.label, app.detail.as_deref(), picker.selected == source).clicked() {
-                                picker.selected = source;
+                            let on = picker.selected_apps().contains(&app.source);
+                            if source_row(ui, icon, &app.label, app.detail.as_deref(), on, true).clicked() {
+                                toggled = Some(app.source.clone());
                             }
                         }
                         if picker.pending.is_some() && picker.applications.is_empty() {
@@ -218,19 +246,24 @@ impl RustTalkApp {
                             hint(ui, "Nothing is playing audio right now. Start playback in an app, then refresh.");
                         }
                     });
+                if let Some(source) = toggled {
+                    picker.toggle_app(source);
+                }
                 if let Some(error) = &picker.error {
                     ui.colored_label(theme::RED, error);
                 }
-                let gone = matches!(picker.selected, AudioShareSource::Application(_))
-                    && picker.pending.is_none()
-                    && !picker.selection_available();
-                if gone {
-                    ui.colored_label(theme::YELLOW, "That app stopped playing audio. Pick another source.");
-                } else if matches!(picker.selected, AudioShareSource::Application(_)) {
+                let count = picker.selected_apps().len();
+                if picker.dropped {
+                    ui.colored_label(theme::YELLOW, "An app stopped playing audio and left the selection.");
+                } else if count >= MAX_MIX {
+                    hint(ui, &format!("Up to {MAX_MIX} apps can be mixed."));
+                } else if count > 1 {
+                    hint(ui, &format!("Mixing {count} apps into one stream."));
+                } else if count == 1 {
                     hint(ui, if cfg!(windows) {
-                        "Includes the app's helper processes."
+                        "Pick more apps to mix them. Includes helper processes."
                     } else {
-                        "Only this stream. Sharing ends when it closes."
+                        "Pick more apps to mix them. An app that closes leaves the mix."
                     });
                 }
                 ui.add_space(12.0);
@@ -244,7 +277,7 @@ impl RustTalkApp {
                         let ready = picker.selection_available();
                         let go = ui
                             .add_enabled_ui(ready, |ui| {
-                                theme::primary_button(ui, &format!("{}  Share audio", icons::regular::SPEAKER_HIGH))
+                                theme::primary_button(ui, &format!("{}  {}", icons::regular::MUSIC_NOTES, if active { "Apply" } else { "Share audio" }))
                             })
                             .inner;
                         if go.clicked() {
@@ -284,6 +317,7 @@ fn source_row(
     title: &str,
     subtitle: Option<&str>,
     selected: bool,
+    multi: bool,
 ) -> egui::Response {
     let (rect, resp) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 52.0), egui::Sense::click());
@@ -383,6 +417,14 @@ fn source_row(
             egui::FontId::proportional(22.0),
             accent,
         );
+    } else if multi {
+        painter.text(
+            egui::pos2(rect.right() - 14.0, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            icons::regular::CIRCLE,
+            egui::FontId::proportional(22.0),
+            theme::MUTED.gamma_multiply(0.5),
+        );
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -397,6 +439,7 @@ mod tests {
         let mut app = RustTalkApp::with_config(ctx.clone(), ClientConfig::default(), false);
         app.audio_picker = Some(AudioPicker {
             selected: AudioShareSource::System,
+            dropped: false,
             applications: ["Firefox", "Discord", "Limusic", "Scrcpy"]
                 .into_iter()
                 .enumerate()
@@ -459,6 +502,7 @@ mod tests {
     fn system_selection_needs_no_discovery_or_capture() {
         let picker = AudioPicker {
             selected: AudioShareSource::System,
+            dropped: false,
             applications: vec![],
             textures: vec![],
             pending: None,

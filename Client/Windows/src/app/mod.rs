@@ -359,6 +359,9 @@ pub struct RustTalkApp {
     screen_audio: Option<crate::audio::screen_audio::ScreenAudio>,
     /// Starting it failed: don't retry until the share stops.
     screen_audio_failed: bool,
+    /// Last audio-sharing status sent to the voice server (resent only when it changes).
+    audio_flag_sent: bool,
+    audio_flag_at: Option<Instant>,
     audio_only: bool,
     shared_audio_source: crate::audio::share_source::AudioShareSource,
     audio_picker: Option<audio_picker::AudioPicker>,
@@ -527,6 +530,8 @@ impl RustTalkApp {
             screen: None,
             screen_audio: None,
             screen_audio_failed: false,
+            audio_flag_sent: false,
+            audio_flag_at: None,
             audio_only: false,
             shared_audio_source: Default::default(),
             audio_picker: None,
@@ -1125,6 +1130,11 @@ impl RustTalkApp {
                     self.clear_video_of(client_id, None);
                 }
             }
+            ServerMessage::AudioSharingChanged { client_id, sharing } => {
+                if let Some(u) = s.users.get_mut(&client_id) {
+                    u.audio_sharing = sharing;
+                }
+            }
             ServerMessage::VideoFrame { from_id, kind, data } => {
                 // Video tiles belong to the voice server only.
                 if !voice {
@@ -1406,6 +1416,7 @@ impl RustTalkApp {
             self.start_screen_share(src);
         }
         self.sync_shared_audio();
+        self.sync_audio_flag();
     }
 
     fn ui_connected(&mut self, ctx: &egui::Context) {

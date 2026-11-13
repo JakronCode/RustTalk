@@ -421,6 +421,11 @@ async fn message_loop(
                     });
                 }
             }
+            ClientMessage::SetAudioSharing { sharing } => match st.set_audio_sharing(client_id, sharing) {
+                Ok(true) => st.broadcast(&ServerMessage::AudioSharingChanged { client_id, sharing }),
+                Ok(false) => {}
+                Err(message) => st.send_to(client_id, &ServerMessage::Error { message }),
+            },
             ClientMessage::VideoFrame { kind, data } => {
                 if data.len() > MAX_MEDIA_BYTES {
                     // Uebergrosse Frames verwerfen (kein Fehler-Spam pro Frame).
