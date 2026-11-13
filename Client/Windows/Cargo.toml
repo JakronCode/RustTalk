@@ -41,6 +41,8 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy", "dump-load"] }
+# Emoji names, groups and GitHub shortcodes for the picker and :aliases:
+emojis = "0.9"
 
 # Windows-only capture and desktop integration are omitted from the Linux client.
 [target.'cfg(windows)'.dependencies]
