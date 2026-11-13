@@ -15,13 +15,7 @@ impl RustTalkApp {
     pub(super) fn tile_menu_button(&mut self, ui: &mut egui::Ui, tile: egui::Rect, tile_hovered: bool, user: &UserInfo, kind: Option<VideoKind>) {
         let popup_id = ui.make_persistent_id(("tile_menu", user.id, kind));
         let open = ui.memory(|m| m.is_popup_open(popup_id));
-        let rect = egui::Rect::from_center_size(tile.right_bottom() + egui::vec2(-22.0, -20.0), egui::vec2(30.0, 24.0));
-        let resp = ui.interact(rect, popup_id.with("btn"), egui::Sense::click());
-        if tile_hovered || resp.hovered() || open {
-            let p = ui.painter();
-            p.rect_filled(rect, 8.0, if resp.hovered() || open { theme::SELECTED } else { egui::Color32::from_black_alpha(160) });
-            p.text(rect.center(), egui::Align2::CENTER_CENTER, icons::regular::DOTS_THREE, egui::FontId::proportional(18.0), egui::Color32::WHITE);
-        }
+        let rect = egui::Rect::from_center_size(tile.right_bottom() + egui::vec2(-22.0, -22.0), egui::vec2(30.0, 30.0));
         #[cfg(debug_assertions)]
         let dev_open = {
             let mut want = DEV_TILE_MENU.lock().unwrap();
@@ -29,10 +23,13 @@ impl RustTalkApp {
         };
         #[cfg(not(debug_assertions))]
         let dev_open = false;
+        if !(tile_hovered || open || dev_open) {
+            return;
+        }
+        let resp = super::stage::round_button(ui, rect, icons::regular::DOTS_THREE, "More options", open);
         if resp.clicked() || dev_open {
             ui.memory_mut(|m| m.toggle_popup(popup_id));
         }
-        let resp = resp.on_hover_text("More options");
         egui::popup_below_widget(ui, popup_id, &resp, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
             self.user_menu(ui, user);
         });
@@ -96,9 +93,6 @@ impl RustTalkApp {
                             .clicked()
                         {
                             self.open_channel_settings(ch_id);
-                        }
-                        if kind == ChannelKind::Voice {
-                            self.stage_layout_controls(ui, ch_id);
                         }
                         let searching = self.chat_search.is_some();
                         let state = if searching { theme::IconState::Active } else { theme::IconState::Normal };
@@ -168,6 +162,8 @@ impl RustTalkApp {
         // chat below stays usable; without video it stays compact.
         let full = ui.available_height();
         let stage_h = if has_video { (full * 0.62).max(260.0) } else { 260.0f32.min(full * 0.5) };
+        // Room for the layout buttons under the tiles.
+        let stage_h = if members.len() > 1 { (stage_h + super::stage::CONTROLS_BAND).min(full * 0.75) } else { stage_h };
         egui::TopBottomPanel::top(format!("stage_{ch_id}"))
             .exact_height(stage_h)
             .frame(egui::Frame::default().fill(theme::DARK).inner_margin(egui::Margin::same(16)))
@@ -755,8 +751,10 @@ pub(super) fn video_tile(
     speaking: bool,
     me: bool,
     show_name: bool,
+    clickable: bool,
 ) -> egui::Response {
-    let resp = ui.interact(rect, ui.id().with(("stage_tile", user.id, kind)), egui::Sense::click());
+    let sense = if clickable { egui::Sense::click() } else { egui::Sense::hover() };
+    let resp = ui.interact(rect, ui.id().with(("stage_tile", user.id, kind)), sense);
     let p = ui.painter();
     p.rect_filled(rect, 10.0, egui::Color32::BLACK);
     match tex {
@@ -787,13 +785,11 @@ pub(super) fn video_tile(
     } else if resp.hovered() {
         p.rect_stroke(rect, 10.0, egui::Stroke::new(2.0_f32, theme::accent()), egui::StrokeKind::Inside);
     }
-    if resp.hovered() {
-        // Bottom right belongs to the "..." menu button; fullscreen hint next to it.
-        let c = rect.right_bottom() + egui::vec2(if me { -20.0 } else { -56.0 }, -20.0);
-        p.circle_filled(c, 14.0, egui::Color32::from_black_alpha(150));
-        p.text(c, egui::Align2::CENTER_CENTER, icons::regular::CORNERS_OUT, egui::FontId::proportional(16.0), egui::Color32::WHITE);
+    if clickable {
+        resp.on_hover_text("Click for fullscreen").on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        resp
     }
-    resp.on_hover_text("Click for fullscreen").on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Stable id of the message input of a channel (for focusing it).

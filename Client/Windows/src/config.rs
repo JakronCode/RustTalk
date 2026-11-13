@@ -174,6 +174,27 @@ pub struct ClientConfig {
     /// Presenter layout: cut the presenter out of their camera picture (locally).
     #[serde(default)]
     pub remove_background: bool,
+    /// Stage: show only people with a camera or screen share (locally).
+    #[serde(default)]
+    pub stage_hide_idle: bool,
+    /// Stage: pick the layout by itself (Presenter while someone whose screen we watch also
+    /// shares a camera). Choosing a layout by hand turns it off.
+    #[serde(default = "default_true")]
+    pub stage_auto: bool,
+    /// Presenter layout: corner of the camera over the screen (dragged, locally).
+    #[serde(default)]
+    pub presenter_cam_corner: CamCorner,
+}
+
+/// Corner of the presented screen where the presenter's camera sits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CamCorner {
+    #[default]
+    BottomLeft,
+    BottomRight,
+    TopLeft,
+    TopRight,
 }
 
 /// Local layout of the voice stage. Only the mode is saved: who is focused
@@ -283,6 +304,9 @@ impl Default for ClientConfig {
             threat_feed: None,
             stage_mode: StageMode::Grid,
             remove_background: false,
+            stage_hide_idle: false,
+            stage_auto: true,
+            presenter_cam_corner: CamCorner::BottomLeft,
         }
     }
 }
@@ -431,6 +455,9 @@ mod tests {
             threat_feed: Some("feeds/urlhaus.txt".into()),
             stage_mode: StageMode::Presenter,
             remove_background: true,
+            stage_hide_idle: true,
+            stage_auto: false,
+            presenter_cam_corner: CamCorner::TopRight,
         };
         let text = toml::to_string_pretty(&cfg).unwrap();
         let back: ClientConfig = toml::from_str(&text).unwrap();
@@ -450,6 +477,9 @@ mod tests {
         assert_eq!(back.sidebar_width, 320.0);
         assert_eq!(back.stage_mode, StageMode::Presenter);
         assert!(back.remove_background);
+        assert!(back.stage_hide_idle);
+        assert!(!back.stage_auto);
+        assert_eq!(back.presenter_cam_corner, CamCorner::TopRight);
         assert!(!back.animate_gifs);
         assert!(!back.flash_taskbar && !back.sound_leave && back.sound_join);
         assert!(!back.announce_names);

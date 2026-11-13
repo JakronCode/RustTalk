@@ -6,7 +6,7 @@ use super::media_ui::kind_icon;
 use super::theme;
 use super::views::{grid_rects, member_card, name_pill, stage_grid, video_tile, watch_tile};
 use super::*;
-use crate::config::StageMode;
+use crate::config::{CamCorner, StageMode};
 
 /// One stage tile: a user's screen, camera, or (`None`) their avatar card.
 pub(super) type TileKey = (u64, Option<VideoKind>);
@@ -22,6 +22,8 @@ const ASPECT: f32 = 16.0 / 9.0;
 const GAP: f32 = 12.0;
 /// Tiles beside the focused one are at least this fraction of its size.
 const STRIP: f32 = 0.25;
+/// Height kept free under the tiles for the layout buttons.
+pub(super) const CONTROLS_BAND: f32 = 50.0;
 /// Camera overlay width relative to the presented screen.
 const OVERLAY: f32 = 0.25;
 
@@ -114,6 +116,20 @@ pub(super) fn resolve_presenter(
     }
 }
 
+/// First user with a screen and a camera whose screen we watch (`me` counts as watched).
+pub(super) fn pick_auto_presenter(
+    candidates: &[(u64, Vec<VideoKind>)],
+    me: u64,
+    watching_screen: impl Fn(u64) -> bool,
+) -> Option<u64> {
+    candidates
+        .iter()
+        .find(|(id, streams)| {
+            presenter_blocker(streams).is_none() && (*id == me || watching_screen(*id))
+        })
+        .map(|(id, _)| *id)
+}
+
 /// Focus layout: the big 16:9 rect plus `n_others` tiles in a strip to the
 /// right or below it, whichever leaves the big one larger.
 pub(super) fn focus_rects(
@@ -159,8 +175,8 @@ pub(super) fn focus_rects(
     (main, grid_rects(n_others, cols, tile, gap, strip))
 }
 
-/// Camera overlay in the bottom left of the presented picture.
-pub(super) fn overlay_rect(content: egui::Rect, cam_aspect: f32) -> egui::Rect {
+/// Camera overlay in a corner of the presented picture.
+pub(super) fn overlay_rect(content: egui::Rect, cam_aspect: f32, corner: CamCorner) -> egui::Rect {
     let aspect = if cam_aspect.is_finite() && cam_aspect > 0.2 {
         cam_aspect
     } else {
@@ -172,8 +188,77 @@ pub(super) fn overlay_rect(content: egui::Rect, cam_aspect: f32) -> egui::Rect {
     }
     let margin = (content.width() * 0.02).clamp(6.0, 16.0);
     let size = egui::vec2(w, w / aspect);
-    let top = (content.bottom() - margin - size.y).max(content.top());
-    egui::Rect::from_min_size(egui::pos2(content.left() + margin, top), size)
+    let left = match corner {
+        CamCorner::BottomLeft | CamCorner::TopLeft => content.left() + margin,
+        CamCorner::BottomRight | CamCorner::TopRight => (content.right() - margin - size.x).max(content.left()),
+    };
+    let top = match corner {
+        CamCorner::TopLeft | CamCorner::TopRight => content.top() + margin,
+        CamCorner::BottomLeft | CamCorner::BottomRight => (content.bottom() - margin - size.y).max(content.top()),
+    };
+    egui::Rect::from_min_size(egui::pos2(left, top), size)
+}
+
+/// The corner of `content` closest to the middle of a dragged camera.
+pub(super) fn nearest_corner(content: egui::Rect, cam: egui::Rect) -> CamCorner {
+    let c = cam.center();
+    match (c.x < content.center().x, c.y < content.center().y) {
+        (true, true) => CamCorner::TopLeft,
+        (false, true) => CamCorner::TopRight,
+        (true, false) => CamCorner::BottomLeft,
+        (false, false) => CamCorner::BottomRight,
+    }
+}
+
+/// A round button's rectangle around `center`.
+fn round_rect(center: egui::Pos2, diameter: f32) -> egui::Rect {
+    egui::Rect::from_center_size(center, egui::vec2(diameter, diameter))
+}
+
+/// The one button style of the stage (tile overlays, camera, layout buttons): dark circle,
+/// accent coloured on hover with a ring, darker while pressed, hand cursor and always a
+/// tooltip. `active` = green, for a layout that is switched on.
+pub(super) fn round_button(ui: &mut egui::Ui, rect: egui::Rect, icon: &str, tip: &str, active: bool) -> egui::Response {
+    let center = rect.center();
+    let diameter = rect.width().min(rect.height());
+    let id = ui.id().with(("round_button", tip, center.x.round() as i32, center.y.round() as i32));
+    let resp = ui.interact(rect, id, egui::Sense::click());
+    let hot = resp.hovered();
+    let (fill, fg) = if resp.is_pointer_button_down_on() {
+        (theme::accent().gamma_multiply(0.75), theme::on_accent())
+    } else if hot {
+        (theme::accent(), theme::on_accent())
+    } else if active {
+        (theme::GREEN, egui::Color32::WHITE)
+    } else {
+        (egui::Color32::from_black_alpha(170), egui::Color32::WHITE)
+    };
+    let radius = diameter / 2.0 + if hot { 1.5 } else { 0.0 };
+    let p = ui.painter();
+    p.circle_filled(center, radius, fill);
+    if hot {
+        p.circle_stroke(center, radius, egui::Stroke::new(1.5_f32, egui::Color32::from_white_alpha(200)));
+    }
+    p.text(center, egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(diameter * 0.55), fg);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip)
+}
+
+/// A button centre moved left of `avoid` (the presenter's camera) when it would sit under it.
+fn dodge(center: egui::Pos2, diameter: f32, avoid: Option<egui::Rect>) -> egui::Pos2 {
+    match avoid {
+        Some(r) if round_rect(center, diameter).intersects(r.expand(6.0)) => {
+            egui::pos2(r.left() - 8.0 - diameter / 2.0, center.y)
+        }
+        _ => center,
+    }
+}
+
+/// Where the presenter's camera sits on the presented screen `content` (also while dragged).
+fn cam_rect_at(content: egui::Rect, aspect: f32, corner: CamCorner, offset: egui::Vec2) -> egui::Rect {
+    let r = overlay_rect(content, aspect, corner).translate(offset);
+    let dx = (content.left() - r.left()).max(0.0) - (r.right() - content.right()).max(0.0);
+    let dy = (content.top() - r.top()).max(0.0) - (r.bottom() - content.bottom()).max(0.0);
+    r.translate(egui::vec2(dx, dy))
 }
 
 fn tile_label(user: &UserInfo, kind: Option<VideoKind>) -> String {
@@ -212,19 +297,49 @@ impl RustTalkApp {
         tiles
     }
 
+    /// Someone whose screen we watch (or our own) who also shares a camera: the automatic
+    /// layout presents them.
+    fn auto_presenter(&self, users: &[UserInfo]) -> Option<u64> {
+        let candidates: Vec<(u64, Vec<VideoKind>)> =
+            users.iter().map(|u| (u.id, self.streams_of(u))).collect();
+        pick_auto_presenter(&candidates, self.srv.my_id, |id| {
+            self.watching.contains(&(id, VideoKind::Screen))
+        })
+    }
+
+    /// The layout in effect: the chosen one, or in automatic mode Presenter while there is
+    /// someone to present, else Grid.
+    pub(super) fn stage_mode(&self, users: &[UserInfo]) -> StageMode {
+        if !self.config.stage_auto {
+            self.config.stage_mode
+        } else if self.auto_presenter(users).is_some() {
+            StageMode::Presenter
+        } else {
+            StageMode::Grid
+        }
+    }
+
+    /// Who the Presenter layout shows: the pick, else (automatic) the person we watch.
+    fn presenter_pick(&self, users: &[UserInfo]) -> Option<u64> {
+        self.stage_pick
+            .presenter
+            .or_else(|| self.config.stage_auto.then(|| self.auto_presenter(users)).flatten())
+    }
+
     /// The presenter whose screen `key` is, while the Presenter layout shows
     /// them with their camera (fullscreen keeps the camera on top).
     pub(super) fn presenter_of(&self, key: (u64, VideoKind)) -> Option<UserInfo> {
-        if self.config.stage_mode != StageMode::Presenter || key.1 != VideoKind::Screen {
+        if key.1 != VideoKind::Screen {
             return None;
         }
         let user = self.srv.users.get(&key.0)?;
-        let candidates: Vec<(u64, Vec<VideoKind>)> = self
-            .channel_members(user.channel_id)
-            .iter()
-            .map(|u| (u.id, self.streams_of(u)))
-            .collect();
-        (resolve_presenter(&candidates, self.stage_pick.presenter) == Presenting::Both(key.0))
+        let members = self.channel_members(user.channel_id);
+        if self.stage_mode(&members) != StageMode::Presenter {
+            return None;
+        }
+        let candidates: Vec<(u64, Vec<VideoKind>)> =
+            members.iter().map(|u| (u.id, self.streams_of(u))).collect();
+        (resolve_presenter(&candidates, self.presenter_pick(&members)) == Presenting::Both(key.0))
             .then(|| user.clone())
     }
 
@@ -250,107 +365,104 @@ impl RustTalkApp {
         }
     }
 
-    /// Channel header: layout dropdown (Grid / Focus / Presenter) and, for
-    /// Focus / Presenter, a dropdown with who is shown.
-    pub(super) fn stage_layout_controls(&mut self, ui: &mut egui::Ui, ch_id: u64) {
-        let mode = self.config.stage_mode;
-        let popup_id = ui.make_persistent_id("stage_layout_menu");
-        let text = format!(
-            "{}  {}  {}",
-            mode.icon(),
-            mode.label(),
-            icons::regular::CARET_DOWN
-        );
-        let resp = ui
-            .add(
-                egui::Button::new(egui::RichText::new(text).color(theme::TEXT))
-                    .min_size(egui::vec2(0.0, 28.0)),
-            )
-            .on_hover_text("Stage layout (only on your screen)");
-        if resp.clicked() {
-            ui.memory_mut(|m| m.toggle_popup(popup_id));
-        }
+    /// Grid and Focus buttons plus a "..." menu (Presenter, video only, who is shown) in the
+    /// bottom right corner of the stage.
+    pub(super) fn stage_controls(&mut self, ui: &mut egui::Ui, area: egui::Rect, ch_id: u64) {
+        let mode = self.stage_mode(&self.channel_members(ch_id));
         let mut picked = None;
-        egui::popup_below_widget(
-            ui,
-            popup_id,
-            &resp,
-            egui::PopupCloseBehavior::CloseOnClickOutside,
+        let mut more = None;
+        let mut toggle_idle = false;
+        let mut toggle_auto = false;
+        // Built from the right so the pill is exactly as wide as its buttons.
+        let bg = ui.painter().add(egui::Shape::Noop);
+        let anchor = egui::Rect::from_min_max(
+            egui::pos2(area.right() - 10.0 - 300.0, area.bottom() - 10.0 - 32.0 - 8.0),
+            egui::pos2(area.right() - 10.0, area.bottom() - 10.0),
+        );
+        let inner = ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(anchor.shrink(4.0))
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
             |ui| {
-                ui.set_min_width(260.0);
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(egui::RichText::new("Layout").strong().color(theme::HEADER));
-                theme::menu_separator(ui);
-                for m in [StageMode::Grid, StageMode::Focus, StageMode::Presenter] {
-                    let icon = if m == mode {
-                        icons::regular::CHECK
-                    } else {
-                        m.icon()
-                    };
-                    if theme::menu_item(ui, icon, m.label(), false)
-                        .on_hover_text(m.hint())
-                        .clicked()
-                    {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let mut button = |ui: &mut egui::Ui, icon: &str, tip: &str, active: bool| {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
+                    round_button(ui, rect, icon, tip, active)
+                };
+                // Lit while something from the menu is in effect.
+                more = Some(button(
+                    ui,
+                    icons::regular::DOTS_THREE,
+                    "More: Presenter layout, video only, who is shown",
+                    mode == StageMode::Presenter || self.config.stage_hide_idle,
+                ));
+                for m in [StageMode::Focus, StageMode::Grid] {
+                    let tip = format!("{}: {} (only on your screen)", m.label(), m.hint());
+                    if button(ui, m.icon(), &tip, m == mode).clicked() {
                         picked = Some(m);
                     }
                 }
             },
         );
-        if let Some(m) = picked {
-            ui.memory_mut(|mem| mem.close_popup());
-            if m != mode {
-                self.config.stage_mode = m;
-                self.config.save();
-            }
-        }
-        if mode == StageMode::Grid {
-            return;
-        }
-        let members = self.channel_members(ch_id);
-        let tiles = self.stage_tiles(&members);
-        let keys: Vec<TileKey> = tiles.iter().map(|(u, k)| (u.id, *k)).collect();
-        let candidates: Vec<(u64, Vec<VideoKind>)> =
-            members.iter().map(|u| (u.id, self.streams_of(u))).collect();
-        let name_of = |id: u64| {
-            members
-                .iter()
-                .find(|u| u.id == id)
-                .map(|u| u.name.clone())
-                .unwrap_or_default()
-        };
-        let current = match mode {
-            StageMode::Focus => resolve_focus(&keys, self.stage_pick.focus)
-                .map(|i| tile_label(&tiles[i].0, tiles[i].1)),
-            _ => match resolve_presenter(&candidates, self.stage_pick.presenter) {
-                Presenting::Both(id) | Presenting::ScreenOnly(id) => Some(name_of(id)),
-                Presenting::Nobody => None,
-            },
-        };
-        let popup_id = ui.make_persistent_id("stage_target_menu");
-        let mut toggle_cutout = false;
-        let text = format!(
-            "{}  {}",
-            current.unwrap_or_else(|| "Nobody".into()),
-            icons::regular::CARET_DOWN
+        ui.painter().set(
+            bg,
+            egui::epaint::RectShape::filled(
+                inner.response.rect.expand(4.0),
+                10.0,
+                egui::Color32::from_black_alpha(170),
+            ),
         );
-        let resp = ui
-            .add(
-                egui::Button::new(egui::RichText::new(text).color(theme::TEXT))
-                    .min_size(egui::vec2(0.0, 28.0)),
-            )
-            .on_hover_text(format!("Who {} shows (only on your screen)", mode.label()));
+        let Some(resp) = more else { return };
+        let popup_id = ui.make_persistent_id("stage_target_menu");
         if resp.clicked() {
             ui.memory_mut(|m| m.toggle_popup(popup_id));
         }
+        let members = self.channel_members(ch_id);
+        let tiles = self.stage_tiles(&members);
+        let candidates: Vec<(u64, Vec<VideoKind>)> =
+            members.iter().map(|u| (u.id, self.streams_of(u))).collect();
+        let mut toggle_cutout = false;
         let mut chosen = None;
-        egui::popup_below_widget(
+        egui::popup::popup_above_or_below_widget(
             ui,
             popup_id,
             &resp,
+            egui::AboveOrBelow::Above,
             egui::PopupCloseBehavior::CloseOnClickOutside,
             |ui| {
                 ui.set_min_width(300.0);
                 ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(egui::RichText::new("Layout").strong().color(theme::HEADER));
+                theme::menu_separator(ui);
+                let auto = self.config.stage_auto;
+                let icon = if auto { icons::regular::CHECK_SQUARE } else { icons::regular::SQUARE };
+                if theme::menu_item(ui, icon, "Automatic layout", false)
+                    .on_hover_text("Presenter while you watch someone's screen and they share a camera, else Grid")
+                    .clicked()
+                {
+                    toggle_auto = true;
+                }
+                let presenter = StageMode::Presenter;
+                let icon = if mode == presenter { icons::regular::CHECK } else { presenter.icon() };
+                if theme::menu_item(ui, icon, presenter.label(), false)
+                    .on_hover_text(presenter.hint())
+                    .clicked()
+                {
+                    // A toggle: again switches back to the layout before it.
+                    picked = Some(if mode == presenter { self.stage_flat } else { presenter });
+                }
+                let hiding = self.config.stage_hide_idle;
+                let icon = if hiding { icons::regular::CHECK_SQUARE } else { icons::regular::SQUARE };
+                if theme::menu_item(ui, icon, "Only camera and screen shares", false)
+                    .on_hover_text("Hides people without a camera or screen share (only on your screen)")
+                    .clicked()
+                {
+                    toggle_idle = true;
+                }
+                if mode == StageMode::Grid {
+                    return;
+                }
+                theme::menu_separator(ui);
                 ui.label(
                     egui::RichText::new(format!("{} on", mode.label()))
                         .strong()
@@ -369,7 +481,9 @@ impl RustTalkApp {
                             } else {
                                 kind.map(kind_icon).unwrap_or(icons::regular::USER)
                             };
-                            if theme::menu_item(ui, icon, &tile_label(user, *kind), false).clicked()
+                            if theme::menu_item(ui, icon, &tile_label(user, *kind), false)
+                                .on_hover_text("Show this one large")
+                                .clicked()
                             {
                                 chosen = Some((user.id, *kind));
                             }
@@ -393,7 +507,7 @@ impl RustTalkApp {
                                     theme::menu_item(ui, icon, &label, false)
                                 })
                                 .inner;
-                            if item.clicked() {
+                            if item.clone().on_hover_text("Present this person").clicked() {
                                 chosen = Some((user.id, None));
                             }
                             if let Some(why) = blocker {
@@ -419,6 +533,7 @@ impl RustTalkApp {
                     "Automatic",
                     false,
                 )
+                .on_hover_text("Pick the best one by itself")
                 .clicked()
                 {
                     self.stage_pick = match mode {
@@ -452,6 +567,27 @@ impl RustTalkApp {
                 }
             },
         );
+        if toggle_idle {
+            self.config.stage_hide_idle = !self.config.stage_hide_idle;
+            self.config.save();
+        }
+        if toggle_auto {
+            self.config.stage_auto = !self.config.stage_auto;
+            if !self.config.stage_auto {
+                self.config.stage_mode = mode; // keep what is shown now
+            }
+            self.config.save();
+        }
+        if let Some(m) = picked {
+            if m != mode || self.config.stage_auto {
+                if mode != StageMode::Presenter {
+                    self.stage_flat = mode;
+                }
+                self.config.stage_mode = m;
+                self.config.stage_auto = false;
+                self.config.save();
+            }
+        }
         if toggle_cutout {
             self.config.remove_background = !self.config.remove_background;
             self.config.save();
@@ -470,6 +606,35 @@ impl RustTalkApp {
         tiles: &[(UserInfo, Option<VideoKind>)],
         speaking_of: &dyn Fn(&UserInfo) -> bool,
     ) {
+        // The layout buttons get their own band under the tiles.
+        let full = area;
+        let all = tiles;
+        let visible: Vec<(UserInfo, Option<VideoKind>)> = if self.config.stage_hide_idle {
+            all.iter().filter(|(_, kind)| kind.is_some()).cloned().collect()
+        } else {
+            all.to_vec()
+        };
+        let tiles = &visible[..];
+        let controls = all.len() > 1;
+        // On a very short stage the buttons float over the corner instead of squeezing the tiles.
+        let area = if controls && area.height() >= 2.0 * CONTROLS_BAND + 60.0 {
+            egui::Rect::from_min_max(area.min, egui::pos2(area.max.x, (area.max.y - CONTROLS_BAND).max(area.min.y)))
+        } else {
+            area
+        };
+        if tiles.is_empty() {
+            let p = ui.painter();
+            let galley = p.layout_no_wrap(
+                "Nobody has a camera or screen share on".into(),
+                egui::FontId::proportional(14.0),
+                theme::MUTED,
+            );
+            p.galley(area.center() - galley.size() / 2.0, galley, theme::MUTED);
+            if controls {
+                self.stage_controls(ui, full, all.first().map_or(0, |(u, _)| u.channel_id));
+            }
+            return;
+        }
         let keys: Vec<TileKey> = tiles.iter().map(|(u, k)| (u.id, *k)).collect();
         let mut placed: Vec<(usize, egui::Rect)> = Vec::new();
         let mut overlay: Option<(egui::Rect, usize)> = None;
@@ -483,7 +648,18 @@ impl RustTalkApp {
             out.extend(others.into_iter().zip(rects));
             out
         };
-        match self.config.stage_mode {
+        let users: Vec<UserInfo> = {
+            let mut seen: Vec<UserInfo> = Vec::new();
+            for (u, _) in all {
+                if !seen.iter().any(|s| s.id == u.id) {
+                    seen.push(u.clone());
+                }
+            }
+            seen
+        };
+        let mode_now = self.stage_mode(&users);
+        self.stage_now = mode_now;
+        match mode_now {
             StageMode::Focus => {
                 if let Some(i) = resolve_focus(&keys, self.stage_pick.focus) {
                     placed = big(i, &[]);
@@ -500,7 +676,7 @@ impl RustTalkApp {
                     seen
                 };
                 let find = |id: u64, k: VideoKind| keys.iter().position(|t| *t == (id, Some(k)));
-                match resolve_presenter(&candidates, self.stage_pick.presenter) {
+                match resolve_presenter(&candidates, self.presenter_pick(&users)) {
                     Presenting::Both(id) => {
                         if let (Some(screen), Some(cam)) =
                             (find(id, VideoKind::Screen), find(id, VideoKind::Camera))
@@ -521,15 +697,23 @@ impl RustTalkApp {
             }
             StageMode::Grid => {}
         }
+        let main_tile = placed.first().map(|(i, _)| *i);
         if placed.is_empty() {
-            let (cols, tile) = stage_grid(tiles.len(), area.size(), GAP);
-            placed = grid_rects(tiles.len(), cols, tile, GAP, area)
+            // The hint gets its own line above the tiles.
+            let grid_area = if hint.is_some() {
+                egui::Rect::from_min_max(egui::pos2(area.min.x, (area.min.y + 30.0).min(area.max.y)), area.max)
+            } else {
+                area
+            };
+            let (cols, tile) = stage_grid(tiles.len(), grid_area.size(), GAP);
+            placed = grid_rects(tiles.len(), cols, tile, GAP, grid_area)
                 .into_iter()
                 .enumerate()
                 .collect();
         }
 
         let mut open_fs = None;
+        let mut focus_click = None;
         for (i, rect) in placed.iter().copied() {
             let (user, kind) = &tiles[i];
             let show_name = overlay.is_none_or(|(_, cam)| tiles[cam].0.id != user.id);
@@ -541,6 +725,8 @@ impl RustTalkApp {
                 speaking_of(user),
                 show_name,
                 &mut open_fs,
+                main_tile == Some(i),
+                &mut focus_click,
             );
         }
         if let Some((main, cam)) = overlay {
@@ -560,8 +746,17 @@ impl RustTalkApp {
             p.rect_filled(pill, 8.0, egui::Color32::from_black_alpha(190));
             p.galley(pill.center() - galley.size() / 2.0, galley, theme::HEADER);
         }
+        if let Some((user, kind)) = focus_click {
+            self.config.stage_mode = StageMode::Focus;
+            self.config.stage_auto = false;
+            self.config.save();
+            self.pick_stage_target(StageMode::Focus, user, kind);
+        }
         if let Some(key) = open_fs {
             self.enter_fullscreen(key);
+        }
+        if controls {
+            self.stage_controls(ui, full, all.first().map_or(0, |(u, _)| u.channel_id));
         }
     }
 
@@ -576,6 +771,8 @@ impl RustTalkApp {
         speaking: bool,
         show_name: bool,
         open_fs: &mut Option<(u64, VideoKind)>,
+        main: bool,
+        focus_click: &mut Option<(u64, Option<VideoKind>)>,
     ) {
         let me = user.id == self.srv.my_id;
         // Speaking ring only on the person's camera, not on screen shares.
@@ -593,6 +790,7 @@ impl RustTalkApp {
                     .video_frames
                     .get(&(user.id, kind))
                     .and_then(|v| v.tex.clone());
+                // Only the big tile is one big fullscreen button; small ones get a real button.
                 let resp = video_tile(
                     ui,
                     rect,
@@ -602,29 +800,29 @@ impl RustTalkApp {
                     cam_speaking,
                     me,
                     show_name,
+                    main,
                 );
                 if resp.clicked() {
                     *open_fs = Some((user.id, kind));
                 }
-                // Watching someone else: "stop watching" in the top right corner.
+                if ui.rect_contains_pointer(rect) {
+                    let at = rect.right_bottom() + egui::vec2(if me { -22.0 } else { -60.0 }, -22.0);
+                    if round_button(ui, round_rect(at, 30.0), icons::regular::CORNERS_OUT, "Fullscreen", false).clicked() {
+                        *open_fs = Some((user.id, kind));
+                    }
+                }
+                // Watching someone else: "stop watching" in the top right corner
+                // (next to the focus button on small tiles).
                 if !me && (resp.hovered() || ui.rect_contains_pointer(rect)) {
-                    let b = egui::Rect::from_center_size(
-                        rect.right_top() + egui::vec2(-22.0, 22.0),
-                        egui::vec2(30.0, 30.0),
-                    );
-                    let stop = ui
-                        .put(
-                            b,
-                            egui::Button::new(
-                                egui::RichText::new(icons::regular::EYE_SLASH)
-                                    .size(16.0)
-                                    .color(egui::Color32::WHITE),
-                            )
-                            .fill(egui::Color32::from_black_alpha(160))
-                            .corner_radius(15.0),
-                        )
-                        .on_hover_text("Stop watching");
-                    if stop.clicked() {
+                    let x = if main { -22.0 } else { -64.0 };
+                    let mut at = rect.right_top() + egui::vec2(x, 22.0);
+                    // Presenter: the camera over the screen may sit in this corner.
+                    if main && kind == VideoKind::Screen && self.stage_now == StageMode::Presenter {
+                        let has_cam = self.streams_of(user).contains(&VideoKind::Camera);
+                        let cam = has_cam.then(|| self.presenter_cam_rect(rect, user.id));
+                        at = dodge(at, 30.0, cam);
+                    }
+                    if round_button(ui, round_rect(at, 30.0), icons::regular::EYE_SLASH, "Stop watching", false).clicked() {
                         self.unwatch(user.id, kind);
                     }
                 }
@@ -632,6 +830,14 @@ impl RustTalkApp {
             }
             None => member_card(ui, rect, user, speaking, me),
         };
+        // Hovering a small tile: a button to focus it (the tile itself keeps its own click).
+        if !main && ui.rect_contains_pointer(rect) {
+            let at = rect.right_top() + egui::vec2(-22.0, 22.0);
+            let focus = round_button(ui, round_rect(at, 30.0), StageMode::Focus.icon(), "Focus on this", false);
+            if focus.clicked() {
+                *focus_click = Some((user.id, kind));
+            }
+        }
         if user.audio_sharing && kind != Some(VideoKind::Screen) {
             let lit = self.shared_audio_lit(user);
             let badge = egui::Rect::from_center_size(rect.left_top() + egui::vec2(24.0, 24.0), egui::vec2(28.0, 28.0));
@@ -654,7 +860,19 @@ impl RustTalkApp {
         }
     }
 
-    /// The presenter's camera, small in the bottom left of their screen.
+    /// Rectangle of `user_id`'s camera over their presented screen `content`.
+    fn presenter_cam_rect(&self, content: egui::Rect, user_id: u64) -> egui::Rect {
+        let key = (user_id, VideoKind::Camera);
+        let watched = user_id == self.srv.my_id || self.watching.contains(&key);
+        let aspect = watched
+            .then(|| self.video_frames.get(&key).and_then(|v| v.tex.clone()))
+            .flatten()
+            .map(|t| t.size_vec2())
+            .map_or(ASPECT, |s| s.x / s.y);
+        cam_rect_at(content, aspect, self.config.presenter_cam_corner, self.cam_drag)
+    }
+
+    /// The presenter's camera, small in a corner of their screen.
     pub(super) fn presenter_overlay(
         &mut self,
         ui: &mut egui::Ui,
@@ -674,12 +892,25 @@ impl RustTalkApp {
             .as_ref()
             .map(|t| t.size_vec2())
             .map_or(ASPECT, |s| s.x / s.y);
-        let rect = overlay_rect(content, aspect);
+        let corner = self.config.presenter_cam_corner;
+        let moved = |offset: egui::Vec2| cam_rect_at(content, aspect, corner, offset);
         let resp = ui.interact(
-            rect,
+            moved(self.cam_drag),
             ui.id().with(("presenter_cam", user.id)),
-            egui::Sense::click(),
+            egui::Sense::click_and_drag(),
         );
+        if resp.dragged() {
+            self.cam_drag += resp.drag_delta();
+        }
+        let rect = moved(self.cam_drag);
+        if resp.drag_stopped() {
+            // Snap to the closest corner.
+            self.config.presenter_cam_corner = nearest_corner(content, rect);
+            self.config.save();
+            self.cam_drag = egui::Vec2::ZERO;
+        } else if !resp.dragged() {
+            self.cam_drag = egui::Vec2::ZERO;
+        }
         // Cut out: only the person on top of the screen, no frame around them.
         let cut = watched && self.config.remove_background;
         if cut {
@@ -732,9 +963,19 @@ impl RustTalkApp {
                 egui::StrokeKind::Inside,
             );
         }
-        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        // Hovering someone else's camera: a small "stop watching" button in the corner.
+        if watched && user.id != self.srv.my_id && ui.rect_contains_pointer(rect) && !resp.dragged() {
+            let at = rect.right_top() + egui::vec2(-16.0, 16.0);
+            let stop = round_button(ui, round_rect(at, 24.0), icons::regular::EYE_SLASH, "Stop watching the camera", false);
+            if stop.clicked() {
+                self.unwatch(user.id, VideoKind::Camera);
+                return;
+            }
+        }
+        let cursor = if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab };
+        let resp = resp.on_hover_cursor(cursor);
         if watched {
-            if resp.on_hover_text("Click for fullscreen").clicked() {
+            if resp.on_hover_text("Click for fullscreen, drag to move").clicked() {
                 *open_fs = Some(key);
             }
         } else if resp.on_hover_text("Click to watch the camera").clicked() {
@@ -814,6 +1055,324 @@ mod tests {
         outer.expand(0.5).contains_rect(r)
     }
 
+    fn user(id: u64, name: &str) -> UserInfo {
+        UserInfo {
+            id,
+            name: name.into(),
+            channel_id: 2,
+            muted: false,
+            deafened: false,
+            sharing: false,
+            audio_sharing: false,
+            role: Default::default(),
+            streams: vec![],
+        }
+    }
+
+    /// Runs the stage in a 1200x700 screen; returns the stage area and what was drawn.
+    fn run_stage_out(
+        ctx: &egui::Context,
+        app: &mut RustTalkApp,
+        tiles: &[(UserInfo, Option<VideoKind>)],
+        time: f64,
+        events: Vec<egui::Event>,
+    ) -> (egui::Rect, egui::FullOutput) {
+        let mut area = egui::Rect::NOTHING;
+        let out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 700.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    area = ui.max_rect();
+                    app.ui_stage_tiles(ui, area, tiles, &|_| false);
+                });
+            },
+        );
+        (area, out)
+    }
+
+    fn run_stage(
+        ctx: &egui::Context,
+        app: &mut RustTalkApp,
+        tiles: &[(UserInfo, Option<VideoKind>)],
+        time: f64,
+        events: Vec<egui::Event>,
+    ) -> egui::Rect {
+        run_stage_out(ctx, app, tiles, time, events).0
+    }
+
+    /// Centre of a drawn text, e.g. a menu entry.
+    fn text_pos(out: &egui::FullOutput, text: &str) -> Option<egui::Pos2> {
+        out.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(t) if t.galley.job.text == text => {
+                Some(t.pos + t.galley.size() / 2.0)
+            }
+            _ => None,
+        })
+    }
+
+    fn click_at(ctx: &egui::Context, app: &mut RustTalkApp, tiles: &[(UserInfo, Option<VideoKind>)], pos: egui::Pos2, t: &mut f64) {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        for events in [vec![egui::Event::PointerMoved(pos)], vec![button(true)], vec![button(false)]] {
+            *t += 0.1;
+            run_stage(ctx, app, tiles, *t, events);
+        }
+    }
+
+    /// Centre of a stage button, found by its icon: 0 Grid, 1 Focus, 2 "...".
+    fn button_pos(ctx: &egui::Context, app: &mut RustTalkApp, tiles: &[(UserInfo, Option<VideoKind>)], n: usize, t: &mut f64) -> egui::Pos2 {
+        *t += 0.1;
+        let (_, out) = run_stage_out(ctx, app, tiles, *t, vec![]);
+        let icon = [StageMode::Grid.icon(), StageMode::Focus.icon(), icons::regular::DOTS_THREE][n];
+        text_pos(&out, icon).expect("stage button")
+    }
+
+    #[test]
+    fn stage_buttons_switch_layout_and_a_tile_click_focuses_it() {
+        let ctx = egui::Context::default();
+        let mut app = RustTalkApp::with_config(ctx.clone(), ClientConfig::default(), false);
+        let tiles: Vec<_> = (1..=3).map(|i| (user(i, &format!("user{i}")), None)).collect();
+        app.config.stage_mode = StageMode::Grid;
+        let mut t = 0.0;
+        let area = run_stage(&ctx, &mut app, &tiles, t, vec![]);
+        let pos = button_pos(&ctx, &mut app, &tiles, 1, &mut t);
+        click_at(&ctx, &mut app, &tiles, pos, &mut t);
+        assert_eq!(app.config.stage_mode, StageMode::Focus);
+        let pos = button_pos(&ctx, &mut app, &tiles, 0, &mut t);
+        click_at(&ctx, &mut app, &tiles, pos, &mut t);
+        assert_eq!(app.config.stage_mode, StageMode::Grid);
+        // Presenter lives in the "..." menu.
+        let pos = button_pos(&ctx, &mut app, &tiles, 2, &mut t);
+        click_at(&ctx, &mut app, &tiles, pos, &mut t);
+        t += 0.1;
+        let (_, out) = run_stage_out(&ctx, &mut app, &tiles, t, vec![]);
+        let presenter = text_pos(&out, "Presenter").expect("menu lists Presenter");
+        click_at(&ctx, &mut app, &tiles, presenter, &mut t);
+        assert_eq!(app.config.stage_mode, StageMode::Presenter);
+        // Presenter is a toggle: the same entry goes back to the layout before it (Focus here).
+        app.config.stage_mode = StageMode::Presenter;
+        app.stage_flat = StageMode::Focus;
+        t += 0.1;
+        run_stage_out(&ctx, &mut app, &tiles, t, vec![]); // the menu grows: let it settle
+        t += 0.1;
+        let (_, out) = run_stage_out(&ctx, &mut app, &tiles, t, vec![]);
+        let again = text_pos(&out, "Presenter").expect("menu still open");
+        click_at(&ctx, &mut app, &tiles, again, &mut t);
+        assert_eq!(app.config.stage_mode, StageMode::Focus);
+        let pos = button_pos(&ctx, &mut app, &tiles, 0, &mut t);
+        click_at(&ctx, &mut app, &tiles, pos, &mut t); // closes the open menu
+        let pos = button_pos(&ctx, &mut app, &tiles, 0, &mut t);
+        click_at(&ctx, &mut app, &tiles, pos, &mut t);
+        assert_eq!(app.config.stage_mode, StageMode::Grid);
+        // Back in Grid, clicking a person tile focuses it.
+        let tile_area = egui::Rect::from_min_max(area.min, egui::pos2(area.max.x, area.max.y - CONTROLS_BAND));
+        let (cols, tile) = stage_grid(3, tile_area.size(), GAP);
+        let first = grid_rects(3, cols, tile, GAP, tile_area)[0];
+        assert!(!first.intersects(egui::Rect::from_min_size(
+            area.right_bottom() - egui::vec2(160.0, 50.0),
+            egui::vec2(160.0, 50.0)
+        )), "tiles stay clear of the buttons");
+        // The tile itself does not focus ...
+        click_at(&ctx, &mut app, &tiles, first.center(), &mut t);
+        assert_eq!(app.config.stage_mode, StageMode::Grid);
+        // ... the button that appears on hover does.
+        click_at(&ctx, &mut app, &tiles, first.right_top() + egui::vec2(-22.0, 22.0), &mut t);
+        assert_eq!(app.config.stage_mode, StageMode::Focus);
+    }
+
+    #[test]
+    fn hovering_a_watched_presenter_camera_offers_stop_watching() {
+        let ctx = egui::Context::default();
+        let mut app = RustTalkApp::with_config(ctx.clone(), ClientConfig::default(), false);
+        let other = user(app.srv.my_id + 7, "other");
+        app.watching.insert((other.id, VideoKind::Camera));
+        let content = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(1000.0, 562.0));
+        let mut t = 0.0;
+        let mut frame = |app: &mut RustTalkApp, events: Vec<egui::Event>| {
+            t += 0.1;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 700.0))),
+                    time: Some(t),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        app.presenter_overlay(ui, content, &other, false, &mut None);
+                    });
+                },
+            );
+        };
+        let cam = overlay_rect(content, ASPECT, CamCorner::BottomLeft);
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![egui::Event::PointerMoved(cam.center())]);
+        let stop = cam.right_top() + egui::vec2(-16.0, 16.0);
+        let button = |pressed| egui::Event::PointerButton {
+            pos: stop,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(&mut app, vec![egui::Event::PointerMoved(stop)]);
+        frame(&mut app, vec![button(true)]);
+        frame(&mut app, vec![button(false)]);
+        assert!(!app.watching.contains(&(other.id, VideoKind::Camera)), "stopped watching");
+    }
+
+    #[test]
+    fn dragging_the_presenter_camera_snaps_it_to_the_closest_corner() {
+        let ctx = egui::Context::default();
+        let mut app = RustTalkApp::with_config(ctx.clone(), ClientConfig::default(), false);
+        let me = user(app.srv.my_id, "me");
+        let content = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(1000.0, 562.0));
+        let mut t = 0.0;
+        let mut frame = |app: &mut RustTalkApp, events: Vec<egui::Event>| {
+            t += 0.1;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 700.0))),
+                    time: Some(t),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        app.presenter_overlay(ui, content, &me, false, &mut None);
+                    });
+                },
+            );
+        };
+        assert_eq!(app.config.presenter_cam_corner, CamCorner::BottomLeft);
+        frame(&mut app, vec![]);
+        let start = overlay_rect(content, ASPECT, CamCorner::BottomLeft).center();
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(&mut app, vec![egui::Event::PointerMoved(start)]);
+        frame(&mut app, vec![button(start, true)]);
+        let target = egui::pos2(content.right() - 150.0, content.top() + 120.0);
+        for step in 1..=5 {
+            let pos = start + (target - start) * (step as f32 / 5.0);
+            frame(&mut app, vec![egui::Event::PointerMoved(pos)]);
+        }
+        assert_eq!(app.config.presenter_cam_corner, CamCorner::BottomLeft, "only snaps on release");
+        frame(&mut app, vec![button(target, false)]);
+        assert_eq!(app.config.presenter_cam_corner, CamCorner::TopRight);
+        assert_eq!(app.cam_drag, egui::Vec2::ZERO);
+        // A plain click (no movement) leaves the corner alone.
+        let now = overlay_rect(content, ASPECT, CamCorner::TopRight).center();
+        frame(&mut app, vec![egui::Event::PointerMoved(now)]);
+        frame(&mut app, vec![button(now, true)]);
+        frame(&mut app, vec![button(now, false)]);
+        assert_eq!(app.config.presenter_cam_corner, CamCorner::TopRight);
+    }
+
+    #[test]
+    fn a_small_video_tile_is_not_a_fullscreen_button_but_has_one() {
+        let ctx = egui::Context::default();
+        let mut app = RustTalkApp::with_config(ctx.clone(), ClientConfig::default(), false);
+        app.config.stage_mode = StageMode::Grid;
+        let me = user(app.srv.my_id, "me");
+        let tiles = vec![(me, Some(VideoKind::Camera)), (user(app.srv.my_id + 1, "other"), None)];
+        let mut t = 0.0;
+        let area = run_stage(&ctx, &mut app, &tiles, t, vec![]);
+        let tile_area = egui::Rect::from_min_max(area.min, egui::pos2(area.max.x, area.max.y - CONTROLS_BAND));
+        let (cols, tile) = stage_grid(2, tile_area.size(), GAP);
+        let first = grid_rects(2, cols, tile, GAP, tile_area)[0];
+        click_at(&ctx, &mut app, &tiles, first.center(), &mut t);
+        assert_eq!(app.fullscreen, None, "the tile itself is no button");
+        click_at(&ctx, &mut app, &tiles, first.right_bottom() + egui::vec2(-20.0, -20.0), &mut t);
+        assert_eq!(app.fullscreen, Some((app.srv.my_id, VideoKind::Camera)), "its own fullscreen button is");
+    }
+
+    #[test]
+    fn a_button_moves_left_of_the_camera_that_would_cover_it() {
+        let content = area(1000.0, 560.0);
+        let corner_button = egui::pos2(content.right() - 22.0, content.top() + 22.0);
+        let cam_top_right = cam_rect_at(content, ASPECT, CamCorner::TopRight, egui::Vec2::ZERO);
+        let moved = dodge(corner_button, 30.0, Some(cam_top_right));
+        assert!(moved.x < cam_top_right.left(), "left of the camera");
+        assert!(!round_rect(moved, 30.0).intersects(cam_top_right));
+        assert_eq!(moved.y, corner_button.y);
+        let cam_bottom_left = cam_rect_at(content, ASPECT, CamCorner::BottomLeft, egui::Vec2::ZERO);
+        assert_eq!(dodge(corner_button, 30.0, Some(cam_bottom_left)), corner_button, "no camera there: stays");
+        assert_eq!(dodge(corner_button, 30.0, None), corner_button);
+    }
+
+    #[test]
+    fn automatic_layout_presents_someone_we_watch_who_also_has_a_camera() {
+        use VideoKind::{Camera, Screen};
+        let both = vec![Screen, Camera];
+        let candidates = vec![(1, vec![Camera]), (2, both.clone()), (3, vec![Screen]), (4, both.clone())];
+        assert_eq!(pick_auto_presenter(&candidates, 9, |_| false), None, "nothing watched");
+        assert_eq!(pick_auto_presenter(&candidates, 9, |id| id == 3), None, "screen only: no camera to put on top");
+        assert_eq!(pick_auto_presenter(&candidates, 9, |id| id == 4), Some(4));
+        assert_eq!(pick_auto_presenter(&candidates, 9, |_| true), Some(2), "first in stage order");
+        assert_eq!(pick_auto_presenter(&candidates, 2, |_| false), Some(2), "our own screen counts as watched");
+    }
+
+    #[test]
+    fn choosing_a_layout_by_hand_ends_the_automatic_one() {
+        let ctx = egui::Context::default();
+        let mut app = RustTalkApp::with_config(ctx.clone(), ClientConfig::default(), false);
+        assert!(app.config.stage_auto, "automatic by default");
+        let tiles: Vec<_> = (1..=3).map(|i| (user(i, &format!("user{i}")), None)).collect();
+        let mut t = 0.0;
+        let pos = button_pos(&ctx, &mut app, &tiles, 1, &mut t);
+        click_at(&ctx, &mut app, &tiles, pos, &mut t);
+        assert!(!app.config.stage_auto);
+        assert_eq!(app.config.stage_mode, StageMode::Focus);
+        // The menu entry turns automatic back on.
+        let pos = button_pos(&ctx, &mut app, &tiles, 2, &mut t);
+        click_at(&ctx, &mut app, &tiles, pos, &mut t);
+        t += 0.1;
+        run_stage_out(&ctx, &mut app, &tiles, t, vec![]);
+        t += 0.1;
+        let (_, out) = run_stage_out(&ctx, &mut app, &tiles, t, vec![]);
+        let entry = text_pos(&out, "Automatic layout").expect("menu entry");
+        click_at(&ctx, &mut app, &tiles, entry, &mut t);
+        assert!(app.config.stage_auto);
+    }
+
+    #[test]
+    fn hiding_people_without_video_keeps_the_menu_to_bring_them_back() {
+        let ctx = egui::Context::default();
+        let mut app = RustTalkApp::with_config(ctx.clone(), ClientConfig::default(), false);
+        let tiles: Vec<_> = (1..=3).map(|i| (user(i, &format!("user{i}")), None)).collect();
+        app.config.stage_mode = StageMode::Grid;
+        let mut t = 0.0;
+        let area = run_stage(&ctx, &mut app, &tiles, t, vec![]);
+        let toggle = |app: &mut RustTalkApp, t: &mut f64, tiles: &[(UserInfo, Option<VideoKind>)]| {
+            let pos = button_pos(&ctx, app, tiles, 2, t);
+            click_at(&ctx, app, tiles, pos, t);
+            *t += 0.1;
+            let (_, out) = run_stage_out(&ctx, app, tiles, *t, vec![]);
+            let entry = text_pos(&out, "Only camera and screen shares").expect("menu entry");
+            click_at(&ctx, app, tiles, entry, t);
+        };
+        assert!(!app.config.stage_hide_idle);
+        toggle(&mut app, &mut t, &tiles);
+        assert!(app.config.stage_hide_idle, "nobody has video: stage is empty but the menu stays");
+        // Close the menu, then bring everyone back with the same entry.
+        let pos = button_pos(&ctx, &mut app, &tiles, 0, &mut t);
+        click_at(&ctx, &mut app, &tiles, pos, &mut t);
+        toggle(&mut app, &mut t, &tiles);
+        assert!(!app.config.stage_hide_idle, "the same entry shows everyone again");
+    }
+
     #[test]
     fn focus_strip_goes_beside_on_wide_and_below_on_tall_areas() {
         let wide = area(1400.0, 450.0);
@@ -837,6 +1396,8 @@ mod tests {
             (800.0, 600.0),
             (500.0, 900.0),
             (300.0, 200.0),
+            (1700.0, 150.0),
+            (1700.0, 90.0),
         ] {
             for n in 0..9 {
                 let a = area(w, h);
@@ -871,16 +1432,26 @@ mod tests {
     #[test]
     fn overlay_is_a_quarter_in_the_bottom_left() {
         let content = area(1600.0, 900.0);
-        let r = overlay_rect(content, ASPECT);
+        let r = overlay_rect(content, ASPECT, CamCorner::BottomLeft);
         assert!(inside(content, r));
         assert!((r.width() - 400.0).abs() < 0.5);
         assert!(r.left() - content.left() < 20.0 && content.bottom() - r.bottom() < 20.0);
         // Portrait camera on a flat strip: limited by height, still inside.
         let flat = area(1600.0, 300.0);
-        let r = overlay_rect(flat, 9.0 / 16.0);
+        let r = overlay_rect(flat, 9.0 / 16.0, CamCorner::BottomLeft);
         assert!(inside(flat, r) && r.height() <= 300.0 * 0.45 + 0.5);
         // Broken sizes fall back to 16:9.
-        assert!(overlay_rect(content, f32::NAN).width() > 0.0);
+        assert!(overlay_rect(content, f32::NAN, CamCorner::BottomLeft).width() > 0.0);
+        for corner in [CamCorner::BottomLeft, CamCorner::BottomRight, CamCorner::TopLeft, CamCorner::TopRight] {
+            let r = overlay_rect(content, ASPECT, corner);
+            assert!(inside(content, r), "{corner:?}");
+            assert_eq!(nearest_corner(content, r), corner, "a camera in a corner snaps to that corner");
+        }
+        let near_top_right = egui::Rect::from_center_size(
+            egui::pos2(content.right() - 100.0, content.top() + 100.0),
+            egui::vec2(400.0, 225.0),
+        );
+        assert_eq!(nearest_corner(content, near_top_right), CamCorner::TopRight);
     }
 
     #[test]

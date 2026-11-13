@@ -334,6 +334,12 @@ pub struct RustTalkApp {
     stage_pick: stage::StagePick,
     /// Camera the Presenter overlay cut out this frame (applied next frame).
     cutout_key: Option<(u64, VideoKind)>,
+    /// Presenter camera while it is being dragged (offset from its corner).
+    cam_drag: egui::Vec2,
+    /// Layout to go back to when Presenter is switched off again.
+    stage_flat: crate::config::StageMode,
+    /// Layout in effect on the last stage frame.
+    stage_now: crate::config::StageMode,
     /// Recently ended streams: late frames must not bring the tile back
     /// (otherwise the last picture stays frozen on screen).
     video_stopped: HashMap<(u64, VideoKind), Instant>,
@@ -518,6 +524,9 @@ impl RustTalkApp {
             watching: HashSet::new(),
             stage_pick: Default::default(),
             cutout_key: None,
+            cam_drag: egui::Vec2::ZERO,
+            stage_flat: crate::config::StageMode::Grid,
+            stage_now: crate::config::StageMode::Grid,
             video_stopped: HashMap::new(),
             video_epoch: Arc::new([std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)]),
             video_tx,
