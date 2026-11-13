@@ -11,8 +11,8 @@ name: rusttalk
 services:
   rusttalk:
     # Minor tag: gets patch releases of this version line when you pull. Pin a
-    # digest (ghcr.io/rusttalkcrew/rusttalk-server:0.11@sha256:...) to freeze it.
-    image: ghcr.io/rusttalkcrew/rusttalk-server:0.11
+    # digest (ghcr.io/rusttalkcrew/rusttalk-server:0.12@sha256:...) to freeze it.
+    image: ghcr.io/rusttalkcrew/rusttalk-server:0.12
     restart: unless-stopped
     ports:
       - "7331:7331/tcp"   # control channel (TLS)
