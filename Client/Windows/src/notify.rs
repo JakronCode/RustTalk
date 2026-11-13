@@ -12,6 +12,17 @@ use tauri_winrt_notification::Toast;
 #[cfg(windows)]
 use crate::install::{self, Mode};
 
+/// Whether the taskbar flash is allowed. Off on Linux: winit asks Wayland compositors for an
+/// xdg-activation token there, which can pull focus across apps and workspaces.
+pub const TASKBAR_ATTENTION: bool = cfg!(not(target_os = "linux"));
+
+/// Flashes the taskbar entry; no-op where [`TASKBAR_ATTENTION`] is off.
+pub fn request_attention(ctx: &eframe::egui::Context, kind: eframe::egui::UserAttentionType) {
+    if TASKBAR_ATTENTION {
+        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::RequestUserAttention(kind));
+    }
+}
+
 /// Shows a toast; `on_click` runs (on another thread) when it is clicked.
 #[cfg(windows)]
 pub fn show(title: String, body: String, on_click: impl Fn() + Send + 'static) {
@@ -93,6 +104,22 @@ pub fn message_text(from: &str, channel: &str, text: &str, has_image: bool, prev
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passive_attention_does_not_activate_linux_windows() {
+        use eframe::egui::{Context, RawInput, UserAttentionType, ViewportCommand};
+
+        for kind in [UserAttentionType::Informational, UserAttentionType::Critical] {
+            let ctx = Context::default();
+            let output = ctx.run(RawInput::default(), |ctx| request_attention(ctx, kind));
+            let commands: Vec<_> = output.viewport_output.values().flat_map(|v| &v.commands).collect();
+            if cfg!(target_os = "linux") {
+                assert!(commands.is_empty(), "passive notifications must not activate a window");
+            } else {
+                assert!(commands.iter().any(|cmd| matches!(cmd, ViewportCommand::RequestUserAttention(k) if *k == kind)));
+            }
+        }
+    }
 
     #[test]
     #[ignore = "shows a real desktop notification"]

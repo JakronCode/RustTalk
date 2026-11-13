@@ -978,9 +978,7 @@ impl RustTalkApp {
                         self.message_toast(id, channel_id, &from_name, &text, has_image, mentioned);
                     }
                     if !focused && self.config.flash_taskbar {
-                        self.ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
-                            egui::UserAttentionType::Informational,
-                        ));
+                        crate::notify::request_attention(&self.ctx, egui::UserAttentionType::Informational);
                     }
                 }
             }
