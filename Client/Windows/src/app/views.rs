@@ -407,9 +407,10 @@ impl RustTalkApp {
             }
         }
         self.composer_context_bar(ui, ch_id);
-        self.mention_suggestions(ui, ch_id);
         let name = self.channel_name(ch_id);
-        egui::Frame::default()
+        let focused = ui.memory(|m| m.has_focus(composer_id(ch_id)));
+        self.mention_keys(ui.ctx(), ch_id, focused);
+        let frame = egui::Frame::default()
             .fill(theme::INPUT)
             .corner_radius(8.0)
             .inner_margin(egui::Margin::symmetric(8, 6))
@@ -434,7 +435,7 @@ impl RustTalkApp {
                             .frame(false)
                             .desired_width(ui.available_width() - right_w),
                     );
-                    // After Reply / Edit / a picked @name: type right away, cursor at the end.
+                    // After Reply / Edit: type right away, cursor at the end.
                     if std::mem::take(&mut self.focus_composer) {
                         resp.request_focus();
                         if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), resp.id) {
@@ -488,6 +489,7 @@ impl RustTalkApp {
                     });
                 });
             });
+        self.mention_popup(ui.ctx(), ch_id, focused, frame.response.rect);
     }
 
     /// Sends text + attached image (as a reply if one is selected).
@@ -620,42 +622,6 @@ impl RustTalkApp {
         }
         if confirm || cancel || !open {
             self.confirm_delete_msg = None;
-        }
-    }
-
-    /// While typing "@na": buttons for matching users (click completes the name).
-    fn mention_suggestions(&mut self, ui: &mut egui::Ui, _ch_id: u64) {
-        let Some(raw) = mention_prefix(&self.chat_input) else { return };
-        let typed_len = raw.len(); // bytes of the original text (not of the lowercase copy)
-        let prefix = raw.to_lowercase();
-        let mut names: Vec<String> = self
-            .srv.users
-            .values()
-            .filter(|u| u.id != self.srv.my_id && u.name.to_lowercase().starts_with(&prefix))
-            .map(|u| u.name.clone())
-            .collect();
-        names.sort_by_key(|n| n.to_lowercase());
-        names.dedup();
-        names.truncate(6);
-        if names.is_empty() {
-            return;
-        }
-        let mut pick = None;
-        ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new(icons::regular::AT).color(theme::MUTED));
-            for n in &names {
-                if ui.small_button(n).clicked() {
-                    pick = Some(n.clone());
-                }
-            }
-        });
-        if let Some(name) = pick {
-            let cut = self.chat_input.len() - typed_len - 1; // remove '@' + the typed prefix
-            if self.chat_input.is_char_boundary(cut) {
-                self.chat_input.truncate(cut);
-                self.chat_input.push_str(&format!("@{name} "));
-            }
-            self.focus_composer = true;
         }
     }
 
@@ -1182,6 +1148,80 @@ mod tests {
     use super::*;
 
 
+
+    #[test]
+    fn batched_mention_keys_do_not_send_or_cancel_reply() {
+        use super::super::servers::tests::{app, login};
+        use egui::text::{CCursor, CCursorRange};
+        let key = |key| egui::Event::Key {
+            key, physical_key: None, pressed: true, repeat: false, modifiers: Default::default(),
+        };
+        for (mut events, expected) in [
+            (vec![key(egui::Key::ArrowDown), key(egui::Key::Enter)], "@Anton "),
+            (vec![key(egui::Key::ArrowDown), key(egui::Key::Escape)], "@an"),
+            (vec![key(egui::Key::ArrowDown), key(egui::Key::ArrowUp), key(egui::Key::Tab)], "@Anna "),
+            (vec![key(egui::Key::Enter), key(egui::Key::Enter)], "@Anna "),
+            (vec![egui::Event::Text("t".into()), key(egui::Key::Enter)], "@Anton "),
+            (vec![egui::Event::Paste("t".into()), key(egui::Key::Tab)], "@Anton "),
+            (vec![key(egui::Key::Enter), egui::Event::Text("t".into())], "@Anna t"),
+            (vec![egui::Event::Text("t".into()), key(egui::Key::ArrowDown), key(egui::Key::Enter)], "@Anton "),
+            (vec![egui::Event::Text("t".into()), key(egui::Key::Enter), egui::Event::PointerMoved(egui::Pos2::ZERO)], "@Anna "),
+            (vec![egui::Event::Text("t".into()), key(egui::Key::Escape), egui::Event::PointerMoved(egui::Pos2::ZERO)], "@Anna "),
+        ] {
+            let mut app = app();
+            let (session, mut commands) = login(&mut app, "test.invalid:7331", 1);
+            app.view_session(session);
+            for (id, name) in [(2, "Anna"), (3, "Anton")] {
+                app.srv.users.insert(id, UserInfo {
+                    id, name: name.into(), channel_id: 1, muted: false,
+                    deafened: false, sharing: false, role: Default::default(), streams: vec![],
+                });
+            }
+            app.chat_input = "@an".into();
+            app.reply_to = Some(42);
+            let sender = app.srv.cmd_tx.as_ref().unwrap().sender();
+            let ctx = egui::Context::default();
+            let id = composer_id(3);
+            let draw = |app: &mut RustTalkApp, events| {
+                let mut input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                    events, focused: true, ..Default::default()
+                };
+                input.viewports.entry(egui::ViewportId::ROOT).or_default().focused = Some(true);
+                ctx.run(input, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        ui.add_space(300.0);
+                        app.composer(ui, 3, &sender);
+                    });
+                })
+            };
+            draw(&mut app, vec![]);
+            let mut state = egui::TextEdit::load_state(&ctx, id).unwrap();
+            state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(3))));
+            state.store(&ctx, id);
+            ctx.memory_mut(|m| m.request_focus(id));
+            draw(&mut app, vec![]);
+            let output = draw(&mut app, vec![]);
+            if matches!(events.last(), Some(egui::Event::PointerMoved(_))) {
+                let pos = output.shapes.iter().find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.job.text == "Anna" => Some(text.pos + text.galley.size() / 2.0),
+                    _ => None,
+                }).expect("first suggestion rendered");
+                events.pop();
+                events.push(egui::Event::PointerMoved(pos));
+                events.push(egui::Event::PointerButton {
+                    pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default(),
+                });
+            }
+            while commands.try_recv().is_some() {}
+            draw(&mut app, events);
+            draw(&mut app, vec![]); // deferred popup actions use the updated text/cursor
+            assert_eq!(app.chat_input, expected);
+            assert_eq!(app.reply_to, Some(42));
+            assert!(commands.try_recv().is_none(), "completion must not send a chat command");
+            assert!(ctx.memory(|m| m.has_focus(id)));
+        }
+    }
 
     #[test]
     fn context_menu_stays_with_message_after_preceding_deletion() {

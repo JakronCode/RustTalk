@@ -28,6 +28,7 @@ mod limits;
 mod links;
 mod media_ui;
 mod markdown;
+mod mention;
 mod moderation_ui;
 mod poke;
 mod server_settings;
@@ -131,12 +132,6 @@ fn mentions(text: &str, name: &str) -> bool {
         start = end;
     }
     false
-}
-
-/// The "@prefix" being typed at the end of the input, if any.
-fn mention_prefix(input: &str) -> Option<&str> {
-    let last = input.rsplit(char::is_whitespace).next()?;
-    last.strip_prefix('@')
 }
 
 /// GIF picker popup (Discord style): trending on open, search while typing,
@@ -266,6 +261,8 @@ pub struct RustTalkApp {
     chat_action: Option<ChatAction>,
     /// Focus the message input in the next frame (after Reply / Edit).
     focus_composer: bool,
+    /// @mention popup above the composer.
+    mention: mention::MentionPopup,
     new_channel_name: String,
     new_channel_kind: ChannelKind,
     new_channel_parent: Option<u64>,
@@ -469,6 +466,7 @@ impl RustTalkApp {
             chat_search: None,
             chat_action: None,
             focus_composer: false,
+            mention: Default::default(),
             new_channel_name: String::new(),
             new_channel_kind: ChannelKind::Text,
             new_channel_parent: None,
@@ -754,6 +752,7 @@ impl RustTalkApp {
             self.reply_to = None;
             self.editing = None;
             self.chat_search = None;
+            self.mention = Default::default();
         }
         self.srv.selected_channel = Some(id);
         self.srv.unread.remove(&id);
@@ -1557,10 +1556,6 @@ mod tests {
         assert!(mentions("@annabelle and @anna", "anna"), "second occurrence");
         assert!(!mentions("anna without at", "anna"));
         assert!(!mentions("@", ""));
-        assert_eq!(mention_prefix("hi @an"), Some("an"));
-        assert_eq!(mention_prefix("@"), Some(""));
-        assert_eq!(mention_prefix("hi @anna "), None, "finished with a space");
-        assert_eq!(mention_prefix("mail@x"), None);
     }
 
     #[test]
