@@ -182,14 +182,24 @@ pub struct LinkStats {
 
 impl LinkStats {
     /// New session (new key, server counters start at 0 again).
+    #[cfg(test)]
     pub fn reset(&self) {
+        self.switch(ReplayWindow::default());
+    }
+
+    /// Hands the link to another UDP session together with that session's
+    /// replay window (default = a new connection). Returns the window of the
+    /// session that had it, so a connection that gets the link back later
+    /// still rejects its old packets.
+    pub fn switch(&self, window: ReplayWindow) -> ReplayWindow {
         let mut r = self.replay.lock().unwrap();
         r.id = r.id.wrapping_add(1);
         r.started = Instant::now();
-        r.window = ReplayWindow::default();
+        let old = std::mem::replace(&mut r.window, window);
         self.history.lock().unwrap().clear();
         self.audio_sent.store(0, Ordering::Relaxed);
         self.audio_received.store(0, Ordering::Relaxed);
+        old
     }
 
     /// Current session id; a receive thread takes it once at start.
@@ -394,6 +404,21 @@ mod tests {
         assert!(link.view(Instant::now()).0.is_empty(), "old sample ignored");
         link.record(new, sample(Instant::now(), 1.0, Counters::default()));
         assert_eq!(link.view(Instant::now()).0.len(), 1);
+    }
+
+    #[test]
+    fn switching_back_restores_the_replay_window() {
+        let link = LinkStats::default();
+        let a = link.session();
+        assert_eq!(link.accept(a, 7), Some(true));
+        let saved_a = link.switch(ReplayWindow::default()); // another server takes the link
+        let b = link.session();
+        assert_eq!(link.accept(a, 8), None, "A's receiver stops");
+        assert_eq!(link.accept(b, 7), Some(true), "B has its own counters");
+        link.switch(saved_a); // voice moves back to the same A connection
+        let a2 = link.session();
+        assert_eq!(link.accept(a2, 7), Some(false), "A's old packet is still a replay");
+        assert_eq!(link.accept(a2, 9), Some(true));
     }
 
     #[test]

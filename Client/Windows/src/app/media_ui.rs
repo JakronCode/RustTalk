@@ -25,15 +25,15 @@ impl RustTalkApp {
             self.leave_fullscreen();
             return;
         }
-        let streamer = self.users.get(&uid).map(|u| u.name.clone()).unwrap_or_default();
+        let streamer = self.srv.users.get(&uid).map(|u| u.name.clone()).unwrap_or_default();
         let members: Vec<UserInfo> = self
-            .users
+            .srv.users
             .get(&uid)
-            .and_then(|u| self.channels.get(&u.channel_id))
+            .and_then(|u| self.srv.channels.get(&u.channel_id))
             .map(|c| c.user_ids.clone())
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|id| self.users.get(&id).cloned())
+            .filter_map(|id| self.srv.users.get(&id).cloned())
             .collect();
         let talking: HashMap<u64, Instant> = self.talking.lock().unwrap().clone();
         let self_transmitting = self.control.transmitting.load(Ordering::Relaxed);
@@ -64,7 +64,7 @@ impl RustTalkApp {
                             let talking_now = talking
                                 .get(&user.id)
                                 .is_some_and(|t| t.elapsed() < Duration::from_millis(250))
-                                || (user.id == self.my_id && self_transmitting);
+                                || (user.id == self.srv.my_id && self_transmitting);
                             ui.allocate_ui(egui::vec2(84.0, 86.0), |ui| {
                                 ui.vertical_centered(|ui| {
                                     let r = theme::draw_avatar(ui, &user.name, 40.0, talking_now);
@@ -198,10 +198,13 @@ impl RustTalkApp {
     }
 
     /// Kamera-Button: live -> ausschalten, sonst Vorschau-Dialog oeffnen.
-    pub(super) fn toggle_cam(&mut self, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>) {
+    pub(super) fn toggle_cam(&mut self) {
         if self.cam.as_ref().is_some_and(|c| c.is_sending()) {
             self.cam = None;
-            self.after_source_stopped(VideoKind::Camera, cmd_tx);
+            self.after_source_stopped(VideoKind::Camera);
+            return;
+        }
+        if !self.in_voice() {
             return;
         }
         if self.cam_dialog.is_some() {
@@ -219,16 +222,12 @@ impl RustTalkApp {
             .map(|d| d.index);
         self.cam_dialog = Some(CamDialog { devices, selected, error });
         if let Some(index) = selected {
-            self.start_cam_preview(index, cmd_tx);
+            self.start_cam_preview(index);
         }
     }
 
     /// Kamera im Vorschau-Modus starten (sendet noch nichts).
-    pub(super) fn start_cam_preview(
-        &mut self,
-        index: u32,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
-    ) {
+    pub(super) fn start_cam_preview(&mut self, index: u32) {
         // Invalidate callbacks from the previous device before replacing its preview.
         self.video_epoch[epoch_slot(VideoKind::Camera)].fetch_add(1, Ordering::Relaxed);
         self.cam = None; // alten Thread stoppen
@@ -239,7 +238,7 @@ impl RustTalkApp {
         match video::start_camera(
             index,
             self.config.video_quality,
-            self.make_frame_sink(VideoKind::Camera, cmd_tx),
+            self.make_frame_sink(VideoKind::Camera),
             self.make_cam_error_sink(),
         ) {
             Ok(cap) => self.cam = Some(cap),
@@ -252,15 +251,15 @@ impl RustTalkApp {
     }
 
     /// Bildschirm-Button: teilt -> beenden, sonst Auswahl-Dialog oeffnen.
-    pub(super) fn toggle_screen(&mut self, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>) {
+    pub(super) fn toggle_screen(&mut self) {
         if self.screen.is_some() {
             self.screen = None;
-            self.after_source_stopped(VideoKind::Screen, cmd_tx);
+            self.after_source_stopped(VideoKind::Screen);
             return;
         }
         #[cfg(target_os = "linux")]
         {
-            self.start_screen_share(ShareSource::Monitor(0), cmd_tx);
+            self.start_screen_share(ShareSource::Monitor(0));
         }
         #[cfg(not(target_os = "linux"))]
         if self.screen_picker.is_none() {
@@ -269,11 +268,9 @@ impl RustTalkApp {
     }
 
     /// Ausgewaehlte Quelle teilen (eine laufende Kamera bleibt an).
-    pub(super) fn start_screen_share(
-        &mut self,
-        source: ShareSource,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
-    ) {
+    /// Shares on the voice server only (nothing without voice).
+    pub(super) fn start_screen_share(&mut self, source: ShareSource) {
+        let Some(cmd_tx) = self.voice_tx().filter(|_| self.in_voice()) else { return };
         self.screen = None;
         self.screen_audio_failed = false; // explicit capture request permits a retry
         // Erst Sharing melden, dann senden (Server relayed nur Sharer).
@@ -281,7 +278,7 @@ impl RustTalkApp {
         match video::start_screen(
             source,
             self.config.video_quality,
-            self.make_frame_sink(VideoKind::Screen, cmd_tx),
+            self.make_frame_sink(VideoKind::Screen),
             self.make_screen_error_sink(),
         ) {
             Ok(cap) => self.screen = Some(cap),
@@ -295,20 +292,18 @@ impl RustTalkApp {
 
     /// Nach dem Stoppen einer Quelle: Zuschauern den einzelnen Stream
     /// abmelden, eigene Kachel weg, Sharing-Status aktualisieren.
-    pub(super) fn after_source_stopped(
-        &mut self,
-        kind: VideoKind,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
-    ) {
+    pub(super) fn after_source_stopped(&mut self, kind: VideoKind) {
         // Reihenfolge wichtig: StopVideo vor SetSharing(false), sonst hat der
         // Server keine Relay-Ziele mehr.
         // New generation: frames the capture/encoder threads still deliver
         // after the stop are dropped by the old sink (no frozen last frame).
         self.video_epoch[epoch_slot(kind)].fetch_add(1, Ordering::Relaxed);
-        let _ = cmd_tx.send(Command::StopVideo(kind));
         let still = self.screen.is_some() || self.cam.as_ref().is_some_and(|c| c.is_sending());
-        let _ = cmd_tx.send(Command::SetSharing(still));
-        self.clear_video_of(self.my_id, Some(kind));
+        if let Some(cmd_tx) = self.voice_tx() {
+            let _ = cmd_tx.send(Command::StopVideo(kind));
+            let _ = cmd_tx.send(Command::SetSharing(still));
+        }
+        self.clear_video_of(self.voice_my_id(), Some(kind));
         if kind == VideoKind::Camera {
             *self.local_preview.lock().unwrap() = None;
             self.local_preview_tex = None;
@@ -317,8 +312,11 @@ impl RustTalkApp {
 
     /// Streams of a user that can be shown: our own (local preview) or what
     /// the server announced for others.
+    /// Only on the voice server: elsewhere the ids would name other people.
     pub(super) fn streams_of(&self, user: &UserInfo) -> Vec<VideoKind> {
-        if user.id == self.my_id {
+        if !self.viewing_voice() {
+            Vec::new()
+        } else if user.id == self.srv.my_id {
             [VideoKind::Screen, VideoKind::Camera].into_iter().filter(|k| self.video_frames.contains_key(&(user.id, *k))).collect()
         } else {
             let mut v = user.streams.clone();
@@ -329,12 +327,12 @@ impl RustTalkApp {
 
     /// Start receiving a stream (the server sends it only to watchers).
     pub(super) fn watch(&mut self, from_id: u64, kind: VideoKind) {
-        if from_id == self.my_id || !self.watching.insert((from_id, kind)) {
+        if !self.viewing_voice() || from_id == self.srv.my_id || !self.watching.insert((from_id, kind)) {
             return;
         }
         // A stream we stopped watching a moment ago: let its frames in again.
         self.video_stopped.remove(&(from_id, kind));
-        if let Some(tx) = &self.cmd_tx {
+        if let Some(tx) = &self.voice_tx() {
             let _ = tx.send(Command::Raw(rusttalk_shared::protocol::ClientMessage::Watch { from_id, kind, watching: true }));
         }
     }
@@ -345,7 +343,7 @@ impl RustTalkApp {
         if !self.watching.remove(&(from_id, kind)) {
             return;
         }
-        if let Some(tx) = &self.cmd_tx {
+        if let Some(tx) = &self.voice_tx() {
             let _ = tx.send(Command::Raw(rusttalk_shared::protocol::ClientMessage::Watch { from_id, kind, watching: false }));
         }
         self.clear_video_of(from_id, Some(kind));
@@ -370,17 +368,15 @@ impl RustTalkApp {
     /// Frame-Senke fuer Capture-Threads. Kamera-Frames landen zusaetzlich in
     /// der lokalen Vorschau (Kamera-Dialog); nur wenn `sending` -> an den
     /// Server + eigene Kachel. Stoesst sofort ein Neuzeichnen an.
-    pub(super) fn make_frame_sink(
-        &self,
-        kind: VideoKind,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
-    ) -> impl FnMut(video::VideoOut) + Send + 'static {
-        let tx = cmd_tx.clone();
-        let events = self.event_tx.clone();
+    /// Bound to the voice server's connection at start: frames never go elsewhere.
+    pub(super) fn make_frame_sink(&self, kind: VideoKind) -> impl FnMut(video::VideoOut) + Send + 'static {
+        let voice = self.voice_owner.and_then(|id| self.session(id));
+        let tx = voice.and_then(|s| s.cmd_tx.clone());
+        let events = voice.map(|s| s.event_tx.clone());
         let preview = self.local_preview.clone();
         let ctx = self.ctx.clone();
-        let backlog = self.upload_backlog.clone();
-        let my_id = self.my_id;
+        let backlog = voice.map(|s| s.upload_backlog.clone()).unwrap_or_default();
+        let my_id = voice.map_or(0, |s| s.my_id);
         let epochs = self.video_epoch.clone();
         let slot = epoch_slot(kind);
         let generation = epochs[slot].load(Ordering::Relaxed);
@@ -395,17 +391,20 @@ impl RustTalkApp {
                 // Upload staut (langsames WLAN o. ae.) -> Frame nicht senden,
                 // statt Latenz und Speicher endlos wachsen zu lassen.
                 let len = jpeg.len();
-                if backlog.load(Ordering::Relaxed) + len <= MAX_UPLOAD_BACKLOG {
+                if let Some(tx) = tx.as_ref().filter(|_| backlog.load(Ordering::Relaxed) + len <= MAX_UPLOAD_BACKLOG) {
                     backlog.fetch_add(len, Ordering::Relaxed);
                     if tx.send(Command::VideoFrame(kind, jpeg.clone())).is_err() {
                         backlog.fetch_sub(len, Ordering::Relaxed);
                     }
                 }
-                let _ = events.send(NetEvent::Message(ServerMessage::VideoFrame {
-                    from_id: my_id,
-                    kind,
-                    data: jpeg,
-                }));
+                if let Some(events) = &events {
+                    // Own tile; a full queue drops it rather than block the capture thread.
+                    let _ = events.try_send(NetEvent::Message(ServerMessage::VideoFrame {
+                        from_id: my_id,
+                        kind,
+                        data: jpeg,
+                    }));
+                }
             }
             ctx.request_repaint();
         }
@@ -414,17 +413,19 @@ impl RustTalkApp {
     /// Fehler des Bildschirm-Threads: Thread ist beendet -> in `update`
     /// wird das Teilen sauber abgemeldet.
     pub(super) fn make_screen_error_sink(&self) -> impl FnMut(String) + Send + 'static {
-        let events = self.event_tx.clone();
+        let events = self.voice_events();
         let failed = self.screen_failed.clone();
         move |msg: String| {
             failed.store(true, Ordering::Relaxed);
-            let _ = events.send(NetEvent::Status(msg));
+            if let Some(events) = &events {
+                let _ = events.try_send(NetEvent::Status(msg));
+            }
         }
     }
 
     /// Fehler des Kamera-Threads: Statuszeile + Anzeige im Kamera-Dialog.
     pub(super) fn make_cam_error_sink(&self) -> impl FnMut(String) + Send + 'static {
-        let events = self.event_tx.clone();
+        let events = self.voice_events();
         let errors = self.cam_error.clone();
         let epochs = self.video_epoch.clone();
         let slot = epoch_slot(VideoKind::Camera);
@@ -435,7 +436,9 @@ impl RustTalkApp {
                 return;
             }
             *pending = Some((generation, msg.clone()));
-            let _ = events.send(NetEvent::Status(msg));
+            if let Some(events) = &events {
+                let _ = events.try_send(NetEvent::Status(msg));
+            }
         }
     }
 
@@ -476,9 +479,7 @@ impl RustTalkApp {
             .filter(|(generation, _)| *generation == self.video_epoch[epoch_slot(VideoKind::Camera)].load(Ordering::Relaxed));
         if let Some((_, error)) = camera_error {
             self.cam = None;
-            if let Some(tx) = self.cmd_tx.clone() {
-                self.after_source_stopped(VideoKind::Camera, &tx);
-            }
+            self.after_source_stopped(VideoKind::Camera);
             if let Some(dialog) = &mut self.cam_dialog {
                 dialog.error = Some(error.clone());
             }
@@ -500,7 +501,7 @@ impl RustTalkApp {
                         continue;
                     }
                     v.last_request = Some(Instant::now());
-                    if key.0 == self.my_id {
+                    if key.0 == self.voice_my_id() {
                         // Own tile: ask our own encoder directly.
                         let src = match key.1 {
                             VideoKind::Camera => self.cam.as_ref(),
@@ -509,7 +510,7 @@ impl RustTalkApp {
                         if let Some(c) = src {
                             c.request_keyframe();
                         }
-                    } else if let Some(tx) = &self.cmd_tx {
+                    } else if let Some(tx) = &self.voice_tx() {
                         let _ = tx.send(Command::Raw(rusttalk_shared::protocol::ClientMessage::RequestKeyframe { from_id: key.0, kind: key.1 }));
                     }
                 }
@@ -522,7 +523,7 @@ impl RustTalkApp {
         if self.cam_dialog.is_none() {
             return;
         }
-        let Some(cmd_tx) = self.cmd_tx.clone() else {
+        let Some(cmd_tx) = self.voice_tx().filter(|_| self.in_voice()) else {
             self.cam_dialog = None;
             return;
         };
@@ -606,7 +607,7 @@ impl RustTalkApp {
                 });
             });
         if let Some(index) = switch_to {
-            self.start_cam_preview(index, &cmd_tx);
+            self.start_cam_preview(index);
         }
         match action {
             Some(true) => {
@@ -643,10 +644,10 @@ impl RustTalkApp {
 
     /// Bildschirm/Fenster-Auswahl mit Reitern "Anwendungen" / "Gesamter Bildschirm".
     pub(super) fn ui_screen_picker(&mut self, ctx: &egui::Context) {
-        let Some(cmd_tx) = self.cmd_tx.clone() else {
+        if !self.in_voice() {
             self.screen_picker = None;
             return;
-        };
+        }
         let Some(picker) = &mut self.screen_picker else { return };
         if let Ok(list) = picker.rx.try_recv() {
             picker.loading = false;
@@ -809,7 +810,7 @@ impl RustTalkApp {
         }
         if let Some(source) = share {
             self.screen_picker = None;
-            self.start_screen_share(source, &cmd_tx);
+            self.start_screen_share(source);
         } else if !open || cancel {
             self.screen_picker = None;
         }
@@ -833,10 +834,10 @@ impl RustTalkApp {
 
     /// Asks the server for a result page (`offset` 0 = new search).
     fn gif_request(&mut self, query: String, offset: u32) {
-        if !self.gif_available {
+        if !self.srv.gif_available {
             return;
         }
-        let Some(tx) = self.cmd_tx.clone() else { return };
+        let Some(tx) = self.srv.cmd_tx.clone() else { return };
         if offset == 0 {
             self.giphy.results.clear();
             self.giphy.end = false;
@@ -871,7 +872,7 @@ impl RustTalkApp {
                 }
                 GiphyMsg::Full(bytes) => {
                     self.giphy.sending = false;
-                    if let (Some((channel_id, reply_to)), Some(tx)) = (self.gif_target.take(), self.cmd_tx.clone()) {
+                    if let (Some((channel_id, reply_to)), Some(tx)) = (self.gif_target.take(), self.srv.cmd_tx.clone()) {
                         let _ = tx.send(Command::SendChat { channel_id, text: String::new(), image: Some(bytes), reply_to });
                     }
                     self.close_gif_picker();
@@ -928,7 +929,7 @@ impl RustTalkApp {
                     .show(ui, |ui| {
                         ui.set_width(W - 20.0);
                         ui.set_height(H - 20.0);
-                        if !self.gif_available {
+                        if !self.srv.gif_available {
                             ui.vertical_centered(|ui| {
                                 ui.add_space(110.0);
                                 ui.label(egui::RichText::new(icons::regular::GIF).size(46.0).color(theme::MUTED));
@@ -1040,7 +1041,7 @@ impl RustTalkApp {
             return;
         }
         if let Some(g) = choose {
-            let Some(ch) = self.selected_channel else { return };
+            let Some(ch) = self.srv.selected_channel else { return };
             self.gif_target = Some((ch, self.reply_to.take()));
             self.giphy.sending = true;
             self.giphy.error = None;

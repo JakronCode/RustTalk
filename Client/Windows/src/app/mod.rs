@@ -28,6 +28,8 @@ mod markdown;
 mod moderation_ui;
 mod poke;
 mod server_settings;
+mod servers;
+mod session;
 mod settings;
 mod sidebar;
 mod theme;
@@ -54,6 +56,10 @@ use crate::net::{self, Command, NetEvent};
 use crate::video::{self, CameraDevice, ShareEntry, ShareSource, VideoCapture};
 
 use channel_settings::ChannelSettings;
+use session::{
+    reconnect_delay, retry_stagger, Reconnect, ServerSession, SessionId, EVENTS_PER_FRAME, MAX_ACTIVE_SESSIONS,
+    MAX_AUTO_CONNECTING, MAX_RECONNECT_ATTEMPTS,
+};
 use settings::SettingsPage;
 
 // Phosphor icons (regular variant) as fallback font.
@@ -191,33 +197,6 @@ impl ScreenPicker {
     }
 }
 
-/// Automatic reconnect after an unexpected connection loss.
-struct Reconnect {
-    /// Number of the next attempt (1-based).
-    attempt: u32,
-    /// When the next attempt starts (`None` = attempt is running).
-    next_at: Option<Instant>,
-    /// Voice channel we were in (id, name as fallback), rejoined afterwards.
-    channel: Option<(u64, String)>,
-    muted: bool,
-    deafened: bool,
-}
-
-/// Give up after this many failed attempts (~10 minutes with backoff).
-const MAX_RECONNECT_ATTEMPTS: u32 = 25;
-
-/// Wait time before reconnect attempt `attempt` (1-based): 1, 2, 4, 8, 15, 30, 30, ... s.
-fn reconnect_delay(attempt: u32) -> Duration {
-    Duration::from_secs(match attempt {
-        0 | 1 => 1,
-        2 => 2,
-        3 => 4,
-        4 => 8,
-        5 => 15,
-        _ => 30,
-    })
-}
-
 /// Nachrichten aus Hintergrund-Threads (GIPHY-Suche/Downloads).
 enum GiphyMsg {
     Preview(String, Vec<u8>),
@@ -228,18 +207,21 @@ enum GiphyMsg {
 
 pub struct RustTalkApp {
     config: ClientConfig,
-    event_tx: std::sync::mpsc::Sender<NetEvent>,
-    event_rx: std::sync::mpsc::Receiver<NetEvent>,
-    cmd_tx: Option<tokio::sync::mpsc::UnboundedSender<Command>>,
-
-    // Gespiegelter Server-State
-    my_id: u64,
-    users: HashMap<u64, UserInfo>,
-    channels: HashMap<u64, ChannelInfo>,
-    chat: HashMap<u64, Vec<ChatLine>>,
-    unread: HashSet<u64>,
-    selected_channel: Option<u64>,
-    collapsed: HashMap<u64, bool>,
+    /// The viewed server (a placeholder before any was picked). UI code reads
+    /// the server it shows from here.
+    srv: ServerSession,
+    /// All other servers of this run (connected, connecting, retrying or failed).
+    others: Vec<ServerSession>,
+    next_session_id: SessionId,
+    /// The only server we may be in voice on. Camera, screen, audio sharing,
+    /// video tiles, talking and per-user mixer state belong to it.
+    voice_owner: Option<SessionId>,
+    /// Session whose UDP socket the running audio engine (`audio`) uses.
+    audio_owner: Option<SessionId>,
+    /// Connection (session, attempt) whose replay window is in `control.link`.
+    link_conn: Option<(SessionId, u64)>,
+    /// Reconnect enrolled servers on the first frame (never in tests).
+    startup_pending: bool,
 
     // UI-State
     chat_input: String,
@@ -276,13 +258,8 @@ pub struct RustTalkApp {
     channel_settings: Option<ChannelSettings>,
     /// Channel waiting for "really delete?" confirmation.
     confirm_delete: Option<u64>,
-    /// Set from a menu; executed at the start of the next frame.
+    /// Set from a menu; disconnects the viewed server at the start of the next frame.
     pending_disconnect: bool,
-    /// Pending automatic reconnect (connection was lost unexpectedly).
-    reconnect: Option<Reconnect>,
-    /// Login finished (Welcome received). `cmd_tx` alone = connecting.
-    connected: bool,
-    server_settings: ServerSettings,
     /// Open "Server Settings" dialog (edit copy).
     server_settings_dialog: Option<server_settings::ServerSettingsDialog>,
     /// "Poke ..." dialog (target + message being written).
@@ -302,7 +279,6 @@ pub struct RustTalkApp {
 
     // Audio
     audio: Option<AudioEngine>,
-    audio_session: Option<AudioSession>,
     control: Arc<AudioControl>,
     talking: TalkingMap,
     local_muted: LocalMuteSet,
@@ -338,8 +314,6 @@ pub struct RustTalkApp {
     /// Decoded pictures / keyframe needs from the decoder threads.
     video_tx: std::sync::mpsc::Sender<media_ui::DecodeMsg>,
     video_rx: std::sync::mpsc::Receiver<media_ui::DecodeMsg>,
-    /// Video-Bytes in der Sende-Queue (siehe `net::connect`).
-    upload_backlog: Arc<std::sync::atomic::AtomicUsize>,
     /// Vom Bildschirm-Thread gesetzt, wenn er wegen eines Fehlers endet.
     screen_failed: Arc<std::sync::atomic::AtomicBool>,
     /// Vollbild-Ansicht eines Streams (None = normale Ansicht).
@@ -370,22 +344,10 @@ pub struct RustTalkApp {
     /// Fehler aus dem Kamera-Thread fuer die Anzeige im Kamera-Dialog.
     cam_error: Arc<Mutex<Option<(u64, String)>>>,
     giphy: GifPicker,
-    /// No admin on the server yet: everyone may do everything.
-    open_permissions: bool,
-    /// Roles, bans, invites, audit log (Server Settings, admins).
-    admin: moderation_ui::AdminData,
     /// Kick / ban dialog.
     mod_dialog: Option<moderation_ui::ModDialog>,
-    /// We were kicked/banned: no automatic reconnect, show this reason.
-    removed: Option<String>,
     /// Started via an invite link: connect right away.
     connect_on_start: bool,
-    /// TLS fingerprint of the connected server.
-    server_fingerprint: String,
-    /// Certificate waiting for the user's trust decision (new or changed).
-    cert_check: Option<join_error::CertCheck>,
-    /// Last failed join, shown as a panel on the connect screen.
-    join_error: Option<join_error::JoinError>,
     /// Focus the password field on the next frame.
     focus_password: bool,
     /// Original address of the saved server being edited.
@@ -395,12 +357,10 @@ pub struct RustTalkApp {
     /// Not installed yet: the whole window is the install screen.
     install_screen: Option<lifecycle::InstallScreen>,
     update: lifecycle::UpdateState,
-    /// Clicked toasts report their channel here.
-    toast_tx: std::sync::mpsc::Sender<u64>,
-    toast_rx: std::sync::mpsc::Receiver<u64>,
+    /// Clicked toasts report their server and channel here.
+    toast_tx: std::sync::mpsc::Sender<(SessionId, u64)>,
+    toast_rx: std::sync::mpsc::Receiver<(SessionId, u64)>,
     last_toast: Option<Instant>,
-    /// The server offers GIF search (it has a GIPHY key).
-    gif_available: bool,
     /// Where the GIF that is downloading goes: (channel, reply_to).
     gif_target: Option<(u64, Option<u64>)>,
     /// Screen rect of the GIF button (the picker opens above it).
@@ -425,7 +385,9 @@ impl RustTalkApp {
             config.server_address = addr;
             config.invite = code;
         }
-        Self::with_config(cc.egui_ctx.clone(), config, connect_on_start)
+        let mut app = Self::with_config(cc.egui_ctx.clone(), config, connect_on_start);
+        app.startup_pending = true;
+        app
     }
 
     fn with_config(ctx: egui::Context, config: ClientConfig, connect_on_start: bool) -> Self {
@@ -437,9 +399,8 @@ impl RustTalkApp {
         } else {
             hotkey::spawn_global_ptt(control.clone())
         };
-        let (toast_tx, toast_rx) = std::sync::mpsc::channel::<u64>();
+        let (toast_tx, toast_rx) = std::sync::mpsc::channel::<(SessionId, u64)>();
         let (video_tx, video_rx) = std::sync::mpsc::channel::<media_ui::DecodeMsg>();
-        let (event_tx, event_rx) = std::sync::mpsc::channel();
         let (giphy_tx, giphy_rx) = std::sync::mpsc::channel::<GiphyMsg>();
         let server_nickname = config.bookmarks.iter()
             .find(|b| b.address == config.server_address)
@@ -448,16 +409,13 @@ impl RustTalkApp {
         Self {
             control,
             config,
-            event_tx,
-            event_rx,
-            cmd_tx: None,
-            my_id: 0,
-            users: HashMap::new(),
-            channels: HashMap::new(),
-            chat: HashMap::new(),
-            unread: HashSet::new(),
-            selected_channel: None,
-            collapsed: HashMap::new(),
+            srv: ServerSession::new(0, ""),
+            others: Vec::new(),
+            next_session_id: 1,
+            voice_owner: None,
+            audio_owner: None,
+            link_conn: None,
+            startup_pending: false,
             chat_input: String::new(),
             markdown: markdown::Cache::default(),
             reply_to: None,
@@ -482,9 +440,6 @@ impl RustTalkApp {
             channel_settings: None,
             confirm_delete: None,
             pending_disconnect: false,
-            reconnect: None,
-            connected: false,
-            server_settings: ServerSettings::default(),
             server_settings_dialog: None,
             poke_dialog: None,
             connection_panel: None,
@@ -497,7 +452,6 @@ impl RustTalkApp {
             output_devices: Vec::new(),
             mute_before_deafen: false,
             audio: None,
-            audio_session: None,
             talking: Arc::new(Mutex::new(HashMap::new())),
             local_muted: Arc::new(Mutex::new(HashSet::new())),
             global_ptt,
@@ -516,7 +470,6 @@ impl RustTalkApp {
             video_tx,
             video_rx,
             screen_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            upload_backlog: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             fullscreen: None,
             ctx,
             cam: None,
@@ -535,14 +488,8 @@ impl RustTalkApp {
             local_preview_tex: None,
             cam_error: Arc::new(Mutex::new(None)),
             giphy: GifPicker::default(),
-            open_permissions: true,
-            admin: Default::default(),
             mod_dialog: None,
-            removed: None,
             connect_on_start,
-            server_fingerprint: String::new(),
-            cert_check: None,
-            join_error: None,
             focus_password: false,
             editing_bookmark: None,
             server_nickname,
@@ -552,7 +499,6 @@ impl RustTalkApp {
             toast_tx,
             toast_rx,
             last_toast: None,
-            gif_available: false,
             gif_target: None,
             gif_button_rect: None,
             giphy_tx: giphy_tx.clone(),
@@ -560,13 +506,13 @@ impl RustTalkApp {
         }
     }
 
-    /// Logged in (Welcome received).
+    /// The viewed server is logged in (Welcome received).
     fn is_connected(&self) -> bool {
-        self.cmd_tx.is_some() && self.connected
+        self.srv.cmd_tx.is_some() && self.srv.connected
     }
 
     fn spawn_channel_id(&self) -> Option<u64> {
-        self.channels.values().find(|c| c.kind == ChannelKind::Spawn).map(|c| c.id)
+        self.srv.spawn_channel_id()
     }
 
     /// Info message (toast in the main view, line on the connect screen).
@@ -583,107 +529,6 @@ impl RustTalkApp {
         self.status_is_error = true;
     }
 
-    fn start_connect(&mut self) {
-        if let Some(tx) = self.cmd_tx.take() {
-            let _ = tx.send(Command::Disconnect);
-        }
-        reset_event_channel(&mut self.event_tx, &mut self.event_rx);
-        self.cert_check = None;
-        // An invite link in the address field: address + invite code.
-        if let Some((addr, code)) = moderation_ui::parse_invite_link(&self.config.server_address) {
-            self.config.server_address = addr;
-            self.config.invite = code;
-        }
-        self.join_error = None;
-        self.set_status(format!("Connecting to {}...", self.config.server_address));
-        self.control.set_vad_threshold(self.config.vad_threshold);
-        self.control
-            .voice_activation
-            .store(self.config.voice_activation, Ordering::Relaxed);
-        self.control.self_muted.store(false, Ordering::Relaxed);
-        self.control.self_deafened.store(false, Ordering::Relaxed);
-        self.control.noise_suppression.store(self.config.noise_suppression, Ordering::Relaxed);
-        self.control.auto_gain.store(self.config.auto_gain, Ordering::Relaxed);
-        self.control.echo_cancellation.store(self.config.echo_cancellation, Ordering::Relaxed);
-        // Neuer Zaehler pro Verbindung (alte Queue ist mit der Verbindung weg).
-        self.upload_backlog = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        self.cmd_tx = Some(net::connect(
-            self.config.clone(),
-            self.event_tx.clone(),
-            self.ctx.clone(),
-            self.upload_backlog.clone(),
-        ));
-        self.config.save();
-    }
-
-    fn disconnect(&mut self) {
-        reset_event_channel(&mut self.event_tx, &mut self.event_rx);
-        self.global_ptt.lock().unwrap().set([None; 3]);
-        self.control.ptt_pressed.store(false, Ordering::Relaxed);
-        if let Some(tx) = self.cmd_tx.take() {
-            let _ = tx.send(Command::Disconnect);
-        }
-        self.connected = false;
-        self.channel_settings = None;
-        self.server_settings_dialog = None;
-        self.poke_dialog = None;
-        self.confirm_delete = None;
-        self.show_new_channel = false;
-        self.mic_monitor = None;
-        self.stop_shared_audio();
-        self.audio = None; // releases capture and joins the audio threads
-        self.audio_session = None;
-        self.users.clear();
-        self.channels.clear();
-        self.chat.clear();
-        self.unread.clear();
-        self.selected_channel = None;
-        self.reply_to = None;
-        self.editing = None;
-        self.edit_text.clear();
-        self.confirm_delete_msg = None;
-        self.chat_search = None;
-        self.chat_action = None;
-        self.close_gif_picker();
-        self.gif_available = false;
-        self.admin = Default::default();
-        self.mod_dialog = None;
-        self.open_permissions = true;
-        self.gif_target = None;
-        self.talking.lock().unwrap().clear();
-        self.local_muted.lock().unwrap().clear();
-        self.user_volumes.lock().unwrap().clear();
-        self.sfx.lock().unwrap().clear();
-        self.control.transmitting.store(false, Ordering::Relaxed);
-        // Video stoppen + Frames rauswerfen.
-        self.cam = None;
-        self.screen = None;
-        self.stop_shared_audio();
-        self.cam_dialog = None;
-        self.screen_picker = None;
-        *self.local_preview.lock().unwrap() = None;
-        self.local_preview_tex = None;
-        self.video_frames.clear();
-        self.watching.clear();
-        self.video_stopped.clear();
-        for e in self.video_epoch.iter() {
-            e.fetch_add(1, Ordering::Relaxed);
-        }
-        self.leave_fullscreen();
-        self.pending_image = None;
-    }
-
-    /// System-Meldung in die Aktivitaetsliste eines Channels schreiben.
-    fn system_line(&mut self, channel_id: u64, text: String, timestamp: u64) {
-        self.chat
-            .entry(channel_id)
-            .or_default()
-            .push(ChatLine::system(text, timestamp));
-        if self.selected_channel != Some(channel_id) {
-            self.unread.insert(channel_id);
-        }
-    }
-
     fn now() -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -692,14 +537,15 @@ impl RustTalkApp {
     }
 
     fn channel_name(&self, id: u64) -> String {
-        self.channels.get(&id).map(|c| c.name.clone()).unwrap_or_else(|| "?".into())
+        self.srv.channel_name(id)
     }
 
     fn channel_kind(&self, id: u64) -> Option<ChannelKind> {
-        self.channels.get(&id).map(|c| c.kind)
+        self.srv.channel_kind(id)
     }
 
     /// Loads the saved volume for `name` (by username, local) into the mixer.
+    /// Only for users of the voice server: the mixer is keyed by its client ids.
     fn apply_user_volume(&self, id: u64, name: &str) {
         let mut map = self.user_volumes.lock().unwrap();
         match self.config.user_volumes.get(name) {
@@ -712,139 +558,17 @@ impl RustTalkApp {
         }
     }
 
-    /// Unknown or changed certificate: never go on by ourselves - the user decides.
-    fn on_cert_check(&mut self, check: join_error::CertCheck) {
-        if self.cmd_tx.is_none() {
-            return; // attempt was cancelled meanwhile
-        }
-        self.reconnect = None;
-        self.disconnect();
-        self.join_error = Some(join_error::JoinError::cert_check(&check.fingerprint, check.changed));
-        self.set_error(if check.changed { "The server's identity changed" } else { "New server - trust it to connect" });
-        self.cert_check = Some(check);
-    }
-
-    /// Network thread ended. After a successful login this starts the
-    /// automatic reconnect; a failed reconnect attempt schedules the next one.
-    fn on_connection_lost(&mut self, reason: String) {
-        // Kicked or banned: no automatic reconnect.
-        if let Some(why) = self.removed.take() {
-            self.reconnect = None;
-            self.disconnect();
-            self.join_error = Some(join_error::JoinError::classify(&why));
-            self.set_error(why);
-            return;
-        }
-        let was_connected = self.connected;
-        if was_connected && self.reconnect.is_none() {
-            let me = self.users.get(&self.my_id);
-            let channel = me
-                .and_then(|u| self.channels.get(&u.channel_id))
-                .filter(|c| c.kind == ChannelKind::Voice)
-                .map(|c| (c.id, c.name.clone()));
-            self.reconnect = Some(Reconnect {
-                attempt: 1,
-                next_at: None,
-                channel,
-                muted: self.control.self_muted.load(Ordering::Relaxed),
-                deafened: self.control.self_deafened.load(Ordering::Relaxed),
-            });
-        }
-        let failure = join_error::JoinError::classify(&reason);
-        // Wrong password, ban, version mismatch: retrying won't help.
-        if failure.is_fatal() {
-            self.reconnect = None;
-        }
-        self.disconnect();
-        let Some(rc) = self.reconnect.as_mut() else {
-            self.join_error = Some(failure);
-            self.set_error(format!("Disconnected: {reason}"));
-            return;
-        };
-        if !was_connected {
-            rc.attempt += 1; // the running attempt failed
-        }
-        if rc.attempt > MAX_RECONNECT_ATTEMPTS {
-            self.reconnect = None;
-            self.join_error = Some(join_error::JoinError::classify(&format!("{reason} (gave up reconnecting)")));
-            self.set_error(format!("Disconnected: {reason} (gave up reconnecting)"));
-            return;
-        }
-        let delay = reconnect_delay(rc.attempt);
-        rc.next_at = Some(Instant::now() + delay);
-        let attempt = rc.attempt;
-        self.set_error(format!(
-            "Connection lost ({reason}) - reconnecting in {} s (attempt {attempt}/{MAX_RECONNECT_ATTEMPTS})",
-            delay.as_secs()
-        ));
-    }
-
-    /// Starts the next reconnect attempt when its time has come.
-    fn poll_reconnect(&mut self) {
-        let due = self
-            .reconnect
-            .as_ref()
-            .and_then(|rc| rc.next_at)
-            .is_some_and(|t| Instant::now() >= t);
-        if due && self.cmd_tx.is_none() {
-            if let Some(rc) = self.reconnect.as_mut() {
-                rc.next_at = None;
-            }
-            self.start_connect();
-        }
-    }
-
-    /// Cancels a pending automatic reconnect (button on the connect screen).
-    fn cancel_reconnect(&mut self) {
-        if self.reconnect.take().is_some() {
-            if self.cmd_tx.is_some() && !self.connected {
-                self.disconnect(); // stop the running attempt
-            }
-            self.set_status("Reconnect cancelled");
-        }
-    }
-
-    /// After a successful reconnect: back into the old voice channel, same mute state.
-    fn restore_after_reconnect(&mut self, rc: Reconnect) {
-        let Some(tx) = self.cmd_tx.clone() else { return };
-        if rc.muted || rc.deafened {
-            self.control.self_muted.store(rc.muted, Ordering::Relaxed);
-            self.control.self_deafened.store(rc.deafened, Ordering::Relaxed);
-            let _ = tx.send(Command::SetMute { muted: rc.muted, deafened: rc.deafened });
-        }
-        if let Some((id, name)) = rc.channel {
-            let target = self
-                .channels
-                .get(&id)
-                .filter(|c| c.kind == ChannelKind::Voice && c.name == name)
-                .or_else(|| self.channels.values().find(|c| c.kind == ChannelKind::Voice && c.name == name))
-                .map(|c| c.id);
-            if let Some(id) = target {
-                let _ = tx.send(Command::JoinChannel(id));
-                self.select_channel(id);
-            }
-        }
-        self.set_status(format!("Reconnected to {}", self.server_settings.name));
-    }
-
-    /// Ends our camera (when it is live) and screen share.
+    /// Ends our camera (when it is live) and screen share; they belong to the voice server.
     fn stop_own_sources(&mut self) {
         self.stop_shared_audio();
-        let Some(cmd_tx) = self.cmd_tx.clone() else { return };
         if self.cam.as_ref().is_some_and(|c| c.is_sending()) {
             self.cam = None;
-            self.after_source_stopped(VideoKind::Camera, &cmd_tx);
+            self.after_source_stopped(VideoKind::Camera);
         }
         if self.screen.is_some() {
             self.screen = None;
-            self.after_source_stopped(VideoKind::Screen, &cmd_tx);
+            self.after_source_stopped(VideoKind::Screen);
         }
-    }
-
-    /// Our voice channel (None in the lobby or when not in a voice channel).
-    fn my_voice_channel(&self) -> Option<u64> {
-        let ch = self.users.get(&self.my_id)?.channel_id;
-        (self.channel_kind(ch) == Some(ChannelKind::Voice)).then_some(ch)
     }
 
     fn window_focused(&self) -> bool {
@@ -887,7 +611,7 @@ impl RustTalkApp {
     /// The same for everyone on the server (after connecting or when the
     /// voice was changed).
     pub(super) fn prepare_all_names(&self) {
-        for u in self.users.values() {
+        for u in self.srv.users.values() {
             self.prepare_name(&u.name);
         }
     }
@@ -916,20 +640,23 @@ impl RustTalkApp {
         }
     }
 
-    /// Current playback volume of one user (1.0 = 100 %).
-    fn user_volume(&self, id: u64) -> f32 {
-        self.user_volumes.lock().unwrap().get(&id).copied().unwrap_or(1.0)
+    /// Playback volume of one user (1.0 = 100 %), saved by username.
+    fn user_volume(&self, name: &str) -> f32 {
+        self.config.user_volumes.get(name).copied().unwrap_or(1.0)
     }
 
-    /// Sets the playback volume of one user and remembers it by username.
+    /// Sets the playback volume of one user of the viewed server and remembers
+    /// it by username. The mixer only changes while this server has voice
+    /// (its client ids would name other people elsewhere).
     fn set_user_volume(&mut self, id: u64, name: &str, volume: f32) {
         let v = volume.clamp(0.0, crate::audio::MAX_VOLUME);
         if (v - 1.0).abs() < 0.005 {
             self.config.user_volumes.remove(name);
-            self.user_volumes.lock().unwrap().remove(&id);
         } else {
             self.config.user_volumes.insert(name.to_string(), v);
-            self.user_volumes.lock().unwrap().insert(id, v);
+        }
+        if self.viewing_voice() {
+            self.apply_user_volume(id, name);
         }
     }
 
@@ -943,7 +670,7 @@ impl RustTalkApp {
                 self.focus_composer = true;
             }
             ChatAction::Edit(id) => {
-                let text = self.chat.values().flatten().find(|l| l.id == id).map(|l| l.text.clone());
+                let text = self.srv.chat.values().flatten().find(|l| l.id == id).map(|l| l.text.clone());
                 if let Some(text) = text {
                     self.editing = Some(id);
                     self.edit_text = text;
@@ -957,7 +684,7 @@ impl RustTalkApp {
             ChatAction::SaveEdit => {
                 let Some(id) = self.editing.take() else { return };
                 let text = std::mem::take(&mut self.edit_text).trim().to_string();
-                let original = self.chat.values().flatten().find(|l| l.id == id).map(|l| l.text.clone());
+                let original = self.srv.chat.values().flatten().find(|l| l.id == id).map(|l| l.text.clone());
                 if text.is_empty() {
                     // Like Discord: saving an empty message asks to delete it.
                     self.confirm_delete_msg = Some(id);
@@ -973,16 +700,18 @@ impl RustTalkApp {
     }
 
     fn select_channel(&mut self, id: u64) {
-        if self.selected_channel != Some(id) {
+        if self.srv.selected_channel != Some(id) {
             self.reply_to = None;
             self.editing = None;
             self.chat_search = None;
         }
-        self.selected_channel = Some(id);
-        self.unread.remove(&id);
+        self.srv.selected_channel = Some(id);
+        self.srv.unread.remove(&id);
     }
 
-    fn handle_event(&mut self, ev: NetEvent) {
+    /// One network event of server `id`. Only that session changes; voice and
+    /// media react only to the voice server, dialogs only to the viewed one.
+    fn handle_event(&mut self, id: SessionId, ev: NetEvent) {
         match ev {
             NetEvent::Connected {
                 my_id,
@@ -998,40 +727,41 @@ impl RustTalkApp {
                 gif_search,
                 open_permissions,
             } => {
-                if self.cmd_tx.is_none() {
+                let viewed = self.srv.id == id;
+                let username = self.config.username.clone();
+                let Some(s) = self.session_mut(id) else { return };
+                if s.cmd_tx.is_none() {
                     return; // attempt was cancelled meanwhile; the net thread ends on its own
                 }
-                self.connected = true;
-                self.gif_available = gif_search;
+                s.connected = true;
+                s.gif_available = gif_search;
                 // Pinned before Hello (the user trusted it), nothing to learn here.
-                self.server_fingerprint = fingerprint;
-                self.cert_check = None;
-                self.join_error = None;
-                self.open_permissions = open_permissions;
-                self.config.invite = None; // used
-                self.server_settings = settings;
-                self.my_id = my_id;
-                self.channels = channels.into_iter().map(|c| (c.id, c)).collect();
-                self.users = users.into_iter().map(|u| (u.id, u)).collect();
-                self.prepare_all_names();
-                let known: Vec<(u64, String)> = self.users.values().map(|u| (u.id, u.name.clone())).collect();
-                for (id, name) in known {
-                    self.apply_user_volume(id, &name);
-                }
+                s.server_fingerprint = fingerprint;
+                s.cert_check = None;
+                s.join_error = None;
+                s.last_error = None;
+                s.overflow = false;
+                s.open_permissions = open_permissions;
+                s.invite = None; // used
+                s.server_settings = settings;
+                s.my_id = my_id;
+                s.channels = channels.into_iter().map(|c| (c.id, c)).collect();
+                s.users = users.into_iter().map(|u| (u.id, u)).collect();
+                s.chat.clear();
+                s.image_bytes = 0;
+                s.unread.clear();
                 // Spawn-Log in die Spawn-Ansicht laden.
-                if let Some(spawn_id) = self.spawn_channel_id() {
-                    let lines = spawn_log
-                        .into_iter()
-                        .map(|e| ChatLine::system(e.text, e.timestamp))
-                        .collect();
-                    self.chat.insert(spawn_id, lines);
-                    self.selected_channel = Some(spawn_id);
+                if let Some(spawn_id) = s.spawn_channel_id() {
+                    for e in spawn_log {
+                        s.push_line(spawn_id, ChatLine::system(e.text, e.timestamp));
+                    }
+                    s.selected_channel = Some(spawn_id);
                 }
                 // Persistierten Chat-Verlauf in die Channels laden
                 // ("eigene" Nachrichten per Name erkannt – kein Account-System).
                 for rec in chat_history {
-                    let own = rec.from_name == self.config.username;
-                    self.chat.entry(rec.channel_id).or_default().push(ChatLine {
+                    let own = rec.from_name == username;
+                    s.push_line(rec.channel_id, ChatLine {
                         id: rec.id,
                         kind: ChatKind::Message { from: rec.from_name, own },
                         text: rec.text,
@@ -1041,171 +771,157 @@ impl RustTalkApp {
                         edited: rec.edited,
                     });
                 }
-                self.set_status(format!("Connected to {}", self.server_settings.name));
-                if let Some(rc) = self.reconnect.take() {
-                    self.restore_after_reconnect(rc);
-                }
-                self.stop_shared_audio();
-                self.audio = None;
-                self.audio_session = match (udp_socket, udp_cipher) {
+                s.audio_session = match (udp_socket, udp_cipher) {
                     (Some(udp), Some(cipher)) => Some(AudioSession { udp, token: udp_token, cipher }),
                     _ => None,
                 };
-                self.control.link.reset(); // only a new connection resets the replay window
+                s.replay = None; // new key: its receive counters start fresh
+                let rc = s.reconnect.take();
+                let explicit = std::mem::take(&mut s.explicit);
+                let (key, name) = (s.key.clone(), s.server_settings.name.clone());
+                let tx = s.cmd_tx.clone();
+                if viewed {
+                    self.config.invite = None;
+                    self.prepare_all_names();
+                    self.set_status(format!("Connected to {name}"));
+                }
+                // Mute and deafen are global (one microphone): this server learns them too.
+                let muted = self.control.self_muted.load(Ordering::Relaxed);
+                let deafened = self.control.self_deafened.load(Ordering::Relaxed);
+                if let (true, Some(tx)) = (muted || deafened, tx) {
+                    let _ = tx.send(Command::SetMute { muted, deafened });
+                }
+                if explicit {
+                    self.enroll(&key, &name);
+                }
+                if let Some(rc) = rc {
+                    self.restore_after_reconnect(id, rc);
+                }
                 self.sync_voice_audio();
             }
-            NetEvent::Message(msg) => self.handle_server_message(msg),
+            NetEvent::Message(msg) => self.handle_server_message(id, msg),
+            // Errors of local media threads (camera, screen) of the voice server.
             NetEvent::Status(text) => self.set_error(text),
-            NetEvent::Disconnected { reason } => self.on_connection_lost(reason),
+            NetEvent::Disconnected { reason } => self.on_connection_lost(id, reason),
             NetEvent::CertCheck { addr, fingerprint, changed } => {
-                self.on_cert_check(join_error::CertCheck { addr, fingerprint, changed })
+                self.on_cert_check(id, join_error::CertCheck { addr, fingerprint, changed })
             }
         }
     }
 
-    fn handle_server_message(&mut self, msg: ServerMessage) {
+    fn handle_server_message(&mut self, id: SessionId, msg: ServerMessage) {
+        let viewed = self.srv.id == id;
+        let voice = self.voice_owner == Some(id);
+        let Some(s) = self.session_mut(id) else { return };
         match msg {
             ServerMessage::Welcome { .. } => {} // kommt nur via NetEvent::Connected
             ServerMessage::UserJoined { user } => {
-                if let Some(ch) = self.channels.get_mut(&user.channel_id) {
+                if let Some(ch) = s.channels.get_mut(&user.channel_id) {
                     if !ch.user_ids.contains(&user.id) {
                         ch.user_ids.push(user.id);
                     }
                 }
-                self.apply_user_volume(user.id, &user.name);
-                self.prepare_name(&user.name);
-                self.users.insert(user.id, user);
+                let (uid, name) = (user.id, user.name.clone());
+                s.users.insert(user.id, user);
                 // Join-Zeile kommt serverseitig via SpawnLogEntry.
+                if voice {
+                    self.apply_user_volume(uid, &name);
+                }
+                if voice || viewed {
+                    self.prepare_name(&name);
+                }
             }
             ServerMessage::UserLeft { client_id } => {
-                if let Some(u) = self.users.get(&client_id).filter(|u| Some(u.channel_id) == self.my_voice_channel()) {
-                    self.notify_presence(Some(&u.name), false);
+                let mine = s.my_voice_channel();
+                let leaving = s.users.get(&client_id).filter(|u| mine.is_some() && Some(u.channel_id) == mine).map(|u| u.name.clone());
+                let me = client_id == s.my_id;
+                s.users.remove(&client_id);
+                for ch in s.channels.values_mut() {
+                    ch.user_ids.retain(|&uid| uid != client_id);
                 }
-                self.users.remove(&client_id);
-                if client_id == self.my_id { self.sync_voice_audio(); }
-                self.user_volumes.lock().unwrap().remove(&client_id);
-                for ch in self.channels.values_mut() {
-                    ch.user_ids.retain(|&id| id != client_id);
-                }
-                self.clear_video_of(client_id, None);
-            }
-            ServerMessage::UserMoved { client_id, channel_id } => {
-                // Wer den Channel wechselt, schickt uns keine Frames mehr (bzw.
-                // wir bekommen keine mehr, wenn wir selbst wechseln).
-                if client_id == self.my_id {
-                    let others: Vec<u64> = self
-                        .video_frames
-                        .keys()
-                        .map(|(id, _)| *id)
-                        .filter(|id| *id != self.my_id)
-                        .collect();
-                    for id in others {
-                        self.clear_video_of(id, None);
+                if voice {
+                    if let Some(name) = leaving {
+                        self.notify_presence(Some(&name), false);
                     }
-                } else {
+                    self.user_volumes.lock().unwrap().remove(&client_id);
                     self.clear_video_of(client_id, None);
                 }
-                let name = self.users.get(&client_id).map(|u| u.name.clone());
-                if client_id == self.my_id {
-                    // Leaving a channel ends our camera and screen share: they
-                    // don't follow us into the next channel (start them again there).
-                    // What we watched there ends too (the server forgets it as well).
-                    let old_channel = self.users.get(&self.my_id).map(|u| u.channel_id);
-                    if old_channel.is_some_and(|old| old != channel_id) {
-                        self.stop_own_sources();
-                        self.watching.clear();
-                    }
-                } else {
-                    let mine = self.my_voice_channel();
-                    let old = self.users.get(&client_id).map(|u| u.channel_id);
-                    if mine.is_some() && Some(channel_id) == mine {
-                        self.notify_presence(name.as_deref(), true);
-                    } else if mine.is_some() && old == mine {
-                        self.notify_presence(name.as_deref(), false);
-                    }
-                }
-                let previous_voice = self.my_voice_channel();
-                if let Some(u) = self.users.get_mut(&client_id) {
-                    u.channel_id = channel_id;
-                }
-                if client_id == self.my_id {
+                if me {
                     self.sync_voice_audio();
-                    if self.my_voice_channel().is_some() && previous_voice != self.my_voice_channel() {
-                        self.notify(Sound::Join);
-                    } else if previous_voice.is_some() && self.my_voice_channel().is_none() {
-                        self.notify(Sound::Leave);
-                    }
-                }
-                for ch in self.channels.values_mut() {
-                    if ch.id == channel_id {
-                        if !ch.user_ids.contains(&client_id) {
-                            ch.user_ids.push(client_id);
-                        }
-                    } else {
-                        ch.user_ids.retain(|&id| id != client_id);
-                    }
-                }
-                if let Some(name) = name {
-                    let line = if client_id == self.my_id {
-                        format!("You joined {}", self.channel_name(channel_id))
-                    } else {
-                        format!("{name} joined {}", self.channel_name(channel_id))
-                    };
-                    self.system_line(channel_id, line, Self::now());
                 }
             }
+            ServerMessage::UserMoved { client_id, channel_id } => self.on_user_moved(id, client_id, channel_id),
             ServerMessage::ChannelCreated { channel } => {
-                self.channels.insert(channel.id, channel);
+                s.channels.insert(channel.id, channel);
             }
             ServerMessage::ChannelDeleted { channel_id } => {
-                let was_category =
-                    self.channels.get(&channel_id).is_some_and(|c| c.kind.is_group());
-                self.channels.remove(&channel_id);
-                self.sync_voice_audio();
+                let was_category = s.channels.get(&channel_id).is_some_and(|c| c.kind.is_group());
+                s.channels.remove(&channel_id);
                 if was_category {
                     // Kinder der geloeschten Kategorie werden Top-Level.
-                    for ch in self.channels.values_mut() {
+                    for ch in s.channels.values_mut() {
                         if ch.parent == Some(channel_id) {
                             ch.parent = None;
                         }
                     }
                 }
-                self.chat.remove(&channel_id);
-                self.unread.remove(&channel_id);
-                self.collapsed.remove(&channel_id);
-                if self.selected_channel == Some(channel_id) {
-                    self.selected_channel = self.spawn_channel_id();
+                s.remove_channel_chat(channel_id);
+                s.unread.remove(&channel_id);
+                s.collapsed.remove(&channel_id);
+                if s.selected_channel == Some(channel_id) {
+                    s.selected_channel = s.spawn_channel_id();
+                }
+                if voice {
+                    self.sync_voice_audio();
                 }
             }
             ServerMessage::ChannelRenamed { channel_id, name } => {
-                if let Some(ch) = self.channels.get_mut(&channel_id) {
+                if let Some(ch) = s.channels.get_mut(&channel_id) {
                     ch.name = name;
                 }
             }
             ServerMessage::ChannelsReordered { placements } => {
                 for p in placements {
-                    if let Some(ch) = self.channels.get_mut(&p.id) {
+                    if let Some(ch) = s.channels.get_mut(&p.id) {
                         ch.parent = p.parent;
                         ch.position = p.position;
                     }
                 }
             }
             ServerMessage::SpawnLogEntry { entry } => {
-                if let Some(spawn_id) = self.spawn_channel_id() {
-                    self.system_line(spawn_id, entry.text, entry.timestamp);
+                if let Some(spawn_id) = s.spawn_channel_id() {
+                    let open = viewed && s.selected_channel == Some(spawn_id);
+                    s.system_line(spawn_id, entry.text, entry.timestamp, open);
                 }
             }
-            ServerMessage::Chat { id, channel_id, from_id, from_name, text, timestamp, image, reply_to } => {
-                let own = from_id == self.my_id;
+            ServerMessage::Chat { id: message_id, channel_id, from_id, from_name, text, timestamp, image, reply_to } => {
+                let own = from_id == s.my_id;
+                let open = viewed && s.selected_channel == Some(channel_id);
+                let has_image = image.is_some();
+                let line = ChatLine {
+                    id: message_id,
+                    kind: ChatKind::Message { from: from_name.clone(), own },
+                    text: text.clone(),
+                    timestamp,
+                    image,
+                    reply_to,
+                    edited: false,
+                };
+                if !s.push_line(channel_id, line) {
+                    return; // unknown channel
+                }
+                if !open {
+                    s.unread.insert(channel_id);
+                }
                 // from_id 0 = server announcement (no sound).
                 if !own && from_id != 0 {
                     let focused = self.window_focused();
                     let mentioned = mentions(&text, &self.config.username);
-                    if mentioned || !focused || self.selected_channel != Some(channel_id) {
+                    if mentioned || !focused || !open {
                         self.notify(if mentioned { Sound::Mention } else { Sound::Message });
                     }
                     if !focused {
-                        self.message_toast(channel_id, &from_name, &text, image.is_some(), mentioned);
+                        self.message_toast(id, channel_id, &from_name, &text, has_image, mentioned);
                     }
                     if !focused && self.config.flash_taskbar {
                         self.ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
@@ -1213,103 +929,105 @@ impl RustTalkApp {
                         ));
                     }
                 }
-                self.chat
-                    .entry(channel_id)
-                    .or_default()
-                    .push(ChatLine {
-                        id,
-                        kind: ChatKind::Message { from: from_name, own },
-                        text,
-                        timestamp,
-                        image,
-                        reply_to,
-                        edited: false,
-                    });
-                if self.selected_channel != Some(channel_id) {
-                    self.unread.insert(channel_id);
+            }
+            ServerMessage::GifResults { query, offset, results, error } => {
+                if viewed {
+                    self.on_gif_results(query, offset, results, error);
                 }
             }
-            ServerMessage::GifResults { query, offset, results, error } => self.on_gif_results(query, offset, results, error),
             ServerMessage::UserRoleChanged { client_id, role } => {
-                if let Some(u) = self.users.get_mut(&client_id) {
+                if let Some(u) = s.users.get_mut(&client_id) {
                     u.role = role;
                 }
-                if client_id == self.my_id {
-                    self.set_status(format!("You are now {}", role.label()));
-                    self.request_admin_data();
+                if client_id == s.my_id {
+                    if viewed {
+                        self.set_status(format!("You are now {}", role.label()));
+                    }
+                    self.request_admin_data_for(id);
                 }
             }
             ServerMessage::PermissionsChanged { open } => {
-                self.open_permissions = open;
-                self.request_admin_data();
+                s.open_permissions = open;
+                self.request_admin_data_for(id);
             }
             ServerMessage::Removed { reason, banned: _ } => {
-                self.removed = Some(reason);
+                s.removed = Some(reason);
             }
             ServerMessage::AdminData { roles, bans, invites, audit } => {
-                self.admin = moderation_ui::AdminData { roles, bans, invites, audit, loaded: true };
+                s.admin = moderation_ui::AdminData { roles, bans, invites, audit, loaded: true };
             }
             ServerMessage::InviteCreated { invite } => {
-                self.set_status(format!("Invite {} created - copy it under Server Settings > Invites", invite.code));
-                self.request_admin_data();
+                if viewed {
+                    self.set_status(format!("Invite {} created - copy it under Server Settings > Invites", invite.code));
+                }
+                self.request_admin_data_for(id);
             }
             ServerMessage::GifSearchChanged { available } => {
-                self.gif_available = available;
-                self.giphy.shown_query = None; // reload the picker
-                self.giphy.results.clear();
+                s.gif_available = available;
+                if viewed {
+                    self.giphy.shown_query = None; // reload the picker
+                    self.giphy.results.clear();
+                }
             }
             ServerMessage::ChatEdited { channel_id, message_id, text } => {
-                if let Some(line) = self.chat.get_mut(&channel_id).and_then(|v| v.iter_mut().find(|l| l.id == message_id)) {
+                if let Some(line) = s.chat.get_mut(&channel_id).and_then(|v| v.iter_mut().find(|l| l.id == message_id)) {
                     line.text = text;
                     line.edited = true;
                 }
             }
             ServerMessage::ChatDeleted { channel_id, message_id } => {
-                if let Some(lines) = self.chat.get_mut(&channel_id) {
-                    lines.retain(|l| l.id != message_id);
-                }
-                if self.editing == Some(message_id) {
-                    self.editing = None;
-                }
-                if self.confirm_delete_msg == Some(message_id) {
-                    self.confirm_delete_msg = None;
-                }
-                if self.reply_to == Some(message_id) {
-                    self.reply_to = None;
+                s.remove_line(channel_id, message_id);
+                if viewed {
+                    if self.editing == Some(message_id) {
+                        self.editing = None;
+                    }
+                    if self.confirm_delete_msg == Some(message_id) {
+                        self.confirm_delete_msg = None;
+                    }
+                    if self.reply_to == Some(message_id) {
+                        self.reply_to = None;
+                    }
                 }
             }
             ServerMessage::MuteStateChanged { client_id, muted, deafened } => {
-                if let Some(u) = self.users.get_mut(&client_id) {
+                if let Some(u) = s.users.get_mut(&client_id) {
                     u.muted = muted;
                     u.deafened = deafened;
                 }
             }
             ServerMessage::StreamsChanged { client_id, streams } => {
+                let mine = client_id == s.my_id;
+                if let Some(u) = s.users.get_mut(&client_id) {
+                    u.streams = streams.clone();
+                }
                 // Ended streams: their tile and our watching go away.
-                for kind in [VideoKind::Camera, VideoKind::Screen] {
-                    if client_id != self.my_id && !streams.contains(&kind) {
-                        self.watching.remove(&(client_id, kind));
-                        if self.video_frames.contains_key(&(client_id, kind)) {
-                            self.clear_video_of(client_id, Some(kind));
+                if voice && !mine {
+                    for kind in [VideoKind::Camera, VideoKind::Screen] {
+                        if !streams.contains(&kind) {
+                            self.watching.remove(&(client_id, kind));
+                            if self.video_frames.contains_key(&(client_id, kind)) {
+                                self.clear_video_of(client_id, Some(kind));
+                            }
                         }
                     }
                 }
-                if let Some(u) = self.users.get_mut(&client_id) {
-                    u.streams = streams;
-                }
             }
             ServerMessage::SharingChanged { client_id, sharing } => {
-                if let Some(u) = self.users.get_mut(&client_id) {
+                if let Some(u) = s.users.get_mut(&client_id) {
                     u.sharing = sharing;
                 }
-                if !sharing {
+                if voice && !sharing {
                     self.clear_video_of(client_id, None);
                 }
             }
             ServerMessage::VideoFrame { from_id, kind, data } => {
+                // Video tiles belong to the voice server only.
+                if !voice {
+                    return;
+                }
                 // Frames still queued after a stream ended must not bring its
                 // tile back ("Connecting..." forever).
-                let live = if from_id == self.my_id {
+                let live = if from_id == s.my_id {
                     match kind {
                         VideoKind::Camera => self.cam.as_ref().is_some_and(|c| c.is_sending()),
                         VideoKind::Screen => self.screen.is_some(),
@@ -1327,22 +1045,111 @@ impl RustTalkApp {
                     VideoKind::Camera => self.cam.as_ref(),
                     VideoKind::Screen => self.screen.as_ref(),
                 };
-                if let Some(c) = src {
+                if let (true, Some(c)) = (voice, src) {
                     c.request_keyframe();
                 }
             }
             ServerMessage::VideoStopped { from_id, kind } => {
-                self.clear_video_of(from_id, Some(kind));
+                if voice {
+                    self.clear_video_of(from_id, Some(kind));
+                }
             }
             ServerMessage::ServerSettingsChanged { settings } => {
-                self.server_settings = settings;
+                s.server_settings = settings;
             }
-            ServerMessage::Poked { from_id, from_name, message } => self.receive_poke(from_id, from_name, message),
+            ServerMessage::Poked { from_id, from_name, message } => self.receive_poke(id, from_id, from_name, message),
             ServerMessage::Notice { message } => {
+                let message = self.server_text(id, message);
                 self.set_status(message);
             }
             ServerMessage::Error { message } => {
+                let message = self.server_text(id, message);
                 self.set_error(message);
+            }
+        }
+    }
+
+    /// `client_id` moved to `channel_id` on server `id`.
+    fn on_user_moved(&mut self, id: SessionId, client_id: u64, channel_id: u64) {
+        let viewed = self.srv.id == id;
+        let mut voice = self.voice_owner == Some(id);
+        let busy_elsewhere = self.voice_busy_elsewhere(id);
+        let label = self.server_label(id);
+        let Some(s) = self.session(id) else { return };
+        let me = client_id == s.my_id;
+        let name = s.users.get(&client_id).map(|u| u.name.clone());
+        let old_channel = s.users.get(&client_id).map(|u| u.channel_id);
+        let previous_voice = s.my_voice_channel();
+        let into_voice = s.channel_kind(channel_id) == Some(ChannelKind::Voice);
+        let (tx, spawn) = (s.cmd_tx.clone(), s.spawn_channel_id());
+        if me && into_voice && !voice {
+            if viewed && !busy_elsewhere {
+                // Moved into voice on the server we look at (as with one server).
+                self.set_voice_owner(Some(id));
+                voice = true;
+            } else if let (Some(tx), Some(spawn)) = (tx, spawn) {
+                // One voice session only, and a server in the background never
+                // opens the microphone: back to its lobby.
+                let _ = tx.send(Command::JoinChannel(spawn));
+                self.set_error(format!("{label} moved you into voice - you were sent back to its lobby"));
+            }
+        }
+        if voice {
+            // Wer den Channel wechselt, schickt uns keine Frames mehr (bzw.
+            // wir bekommen keine mehr, wenn wir selbst wechseln).
+            if me {
+                let others: Vec<u64> = self.video_frames.keys().map(|(uid, _)| *uid).filter(|uid| *uid != client_id).collect();
+                for uid in others {
+                    self.clear_video_of(uid, None);
+                }
+                // Leaving a channel ends our camera and screen share: they
+                // don't follow us into the next channel (start them again there).
+                // What we watched there ends too (the server forgets it as well).
+                if old_channel.is_some_and(|old| old != channel_id) {
+                    self.stop_own_sources();
+                    self.watching.clear();
+                }
+            } else {
+                self.clear_video_of(client_id, None);
+                if previous_voice.is_some() && Some(channel_id) == previous_voice {
+                    self.notify_presence(name.as_deref(), true);
+                } else if previous_voice.is_some() && old_channel == previous_voice {
+                    self.notify_presence(name.as_deref(), false);
+                }
+            }
+        }
+        let Some(s) = self.session_mut(id) else { return };
+        if let Some(u) = s.users.get_mut(&client_id) {
+            u.channel_id = channel_id;
+        }
+        for ch in s.channels.values_mut() {
+            if ch.id == channel_id {
+                if !ch.user_ids.contains(&client_id) {
+                    ch.user_ids.push(client_id);
+                }
+            } else {
+                ch.user_ids.retain(|&uid| uid != client_id);
+            }
+        }
+        let now_voice = s.my_voice_channel();
+        if let Some(name) = name {
+            let line = if me {
+                format!("You joined {}", s.channel_name(channel_id))
+            } else {
+                format!("{name} joined {}", s.channel_name(channel_id))
+            };
+            let open = viewed && s.selected_channel == Some(channel_id);
+            s.system_line(channel_id, line, Self::now(), open);
+        }
+        if me && voice {
+            if now_voice.is_none() {
+                self.set_voice_owner(None); // left voice: the next voice join decides again
+            }
+            self.sync_voice_audio();
+            if now_voice.is_some() && previous_voice != now_voice {
+                self.notify(Sound::Join);
+            } else if previous_voice.is_some() && now_voice.is_none() {
+                self.notify(Sound::Leave);
             }
         }
     }
@@ -1361,8 +1168,11 @@ impl eframe::App for RustTalkApp {
         }
         self.poll_background(ctx);
         self.poll_video(ctx);
-        if std::mem::take(&mut self.connect_on_start) && self.cmd_tx.is_none() {
+        if std::mem::take(&mut self.connect_on_start) && self.srv.cmd_tx.is_none() {
             self.start_connect();
+        }
+        if std::mem::take(&mut self.startup_pending) {
+            self.connect_enrolled_servers();
         }
         // Installed app: look for an update once per start.
         static CHECKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -1373,17 +1183,16 @@ impl eframe::App for RustTalkApp {
             self.check_for_updates();
         }
         self.auto_voices();
-        while let Ok(ev) = self.event_rx.try_recv() {
-            self.handle_event(ev);
-        }
+        self.poll_sessions();
         #[cfg(debug_assertions)]
         self.dev_hooks(ctx);
         if std::mem::take(&mut self.pending_disconnect) {
-            self.reconnect = None;
-            self.disconnect();
-            self.set_status("Disconnected");
+            let key = self.srv.key.clone();
+            self.disconnect_server(&key);
         }
         self.poll_reconnect();
+        self.prune_sessions();
+        self.media_upkeep();
         // Status changed somewhere without set_status -> restart the toast.
         if self.status != self.status_seen {
             self.status_seen = self.status.clone();
@@ -1395,7 +1204,7 @@ impl eframe::App for RustTalkApp {
             self.config.ui_scale = zoom;
         }
 
-        if self.is_connected() {
+        if self.any_connected() {
             // Push-to-talk: either the global poller (also in the background)
             // or the focused window. Never while a new key is being recorded.
             let binding = if self.recording_key.is_some() { None } else { hotkey::parse_binding(&self.config.ptt_key) };
@@ -1412,23 +1221,24 @@ impl eframe::App for RustTalkApp {
             };
             while let Ok(event) = self.hotkey_events.try_recv() {
                 if event.generation != generation || self.recording_key.is_some() { continue; }
-                if let Some(tx) = self.cmd_tx.clone() {
-                    match event.action {
-                        hotkey::Action::Mute => self.toggle_mute(&tx),
-                        hotkey::Action::Deafen => self.toggle_deafen(&tx),
-                        hotkey::Action::PushToTalk => {},
-                    }
+                match event.action {
+                    hotkey::Action::Mute => self.toggle_mute(),
+                    hotkey::Action::Deafen => self.toggle_deafen(),
+                    hotkey::Action::PushToTalk => {},
                 }
             }
             if !global {
                 let pressed = binding.is_some_and(|b| ctx.input(|i| b.is_down_in(i)));
                 self.control.ptt_pressed.store(pressed, Ordering::Relaxed);
             }
-            self.ui_connected(ctx);
         } else {
             self.global_ptt.lock().unwrap().set([None; 3]);
             self.control.ptt_pressed.store(false, Ordering::Relaxed);
             while self.hotkey_events.try_recv().is_ok() {}
+        }
+        if self.is_connected() {
+            self.ui_connected(ctx);
+        } else {
             self.ui_connect(ctx);
         }
         if self.show_settings {
@@ -1465,33 +1275,33 @@ impl eframe::App for RustTalkApp {
 
 impl RustTalkApp {
     /// Main view while connected: sidebar + content (or fullscreen stream).
-    fn ui_connected(&mut self, ctx: &egui::Context) {
-        let cmd_tx = self.cmd_tx.clone().expect("connected");
-        self.apply_chat_action(&cmd_tx);
-
+    /// Every frame, whichever server is viewed: media follows the voice server.
+    fn media_upkeep(&mut self) {
         // Screen thread ended with an error (e.g. window closed).
         if self.screen_failed.swap(false, Ordering::Relaxed) && self.screen.is_some() {
             self.screen = None;
-            self.after_source_stopped(VideoKind::Screen, &cmd_tx);
+            self.after_source_stopped(VideoKind::Screen);
         }
-        // No talking/sharing in the lobby (e.g. after a reconnect landed us there).
-        if self.in_lobby() {
+        // No talking/sharing outside voice (e.g. after a reconnect landed us in the lobby).
+        if !self.in_voice() {
             self.stop_own_sources();
+        } else if let Some(src) = self.dev_pending_share.take() {
+            self.start_screen_share(src);
         }
-
-        if !self.in_lobby() {
-            if let Some(src) = self.dev_pending_share.take() {
-                self.start_screen_share(src, &cmd_tx);
-            }
-        }
-
         self.sync_shared_audio();
+    }
+
+    fn ui_connected(&mut self, ctx: &egui::Context) {
+        let cmd_tx = self.srv.cmd_tx.clone().expect("connected");
+        self.apply_chat_action(&cmd_tx);
 
         // Fullscreen: only the stream + member bar. Ends when the stream is gone
         // (a stream just picked to watch counts while its first frame is on the way).
+        // Streams belong to the voice server, so only while it is viewed.
         if let Some(key) = self.fullscreen {
-            let live = self.video_frames.contains_key(&key)
-                || (self.watching.contains(&key) && self.users.get(&key.0).is_some_and(|u| u.streams.contains(&key.1)));
+            let live = self.viewing_voice()
+                && (self.video_frames.contains_key(&key)
+                    || (self.watching.contains(&key) && self.srv.users.get(&key.0).is_some_and(|u| u.streams.contains(&key.1))));
             if live {
                 self.ui_fullscreen(ctx, key);
                 return;
@@ -1530,21 +1340,15 @@ impl RustTalkApp {
         static SHARE: Mutex<(u8, Option<Instant>)> = Mutex::new((0, None));
         if let Ok(secs) = std::env::var("RUSTTALK_DEV_SHARE") {
             let mut share = SHARE.lock().unwrap();
-            let in_voice = self.connected && self.my_channel().is_some() && !self.in_lobby();
-            if share.0 == 0 && in_voice {
-                if let (Some(src), Some(tx)) = (
-                    video::list_share_sources().into_iter().find(|e| matches!(e.source, ShareSource::Monitor(_))),
-                    self.cmd_tx.clone(),
-                ) {
-                    self.start_screen_share(src.source, &tx);
+            if share.0 == 0 && self.in_voice() {
+                if let Some(src) = video::list_share_sources().into_iter().find(|e| matches!(e.source, ShareSource::Monitor(_))) {
+                    self.start_screen_share(src.source);
                     *share = (1, Some(Instant::now()));
                 }
             } else if share.0 == 1 {
                 let secs: u64 = secs.parse().unwrap_or(0);
                 if secs > 0 && share.1.is_some_and(|t| t.elapsed() >= Duration::from_secs(secs)) {
-                    if let Some(tx) = self.cmd_tx.clone() {
-                        self.toggle_screen(&tx);
-                    }
+                    self.toggle_screen();
                     share.0 = 2;
                 }
             }
@@ -1556,12 +1360,12 @@ impl RustTalkApp {
                     self.start_connect();
                 }
             }
-            1 if self.connected || std::env::var("RUSTTALK_DEV_AUTOCONNECT").is_err() => {
+            1 if self.srv.connected || std::env::var("RUSTTALK_DEV_AUTOCONNECT").is_err() => {
                 STAGE.store(2, Ordering::Relaxed);
                 let Ok(open) = std::env::var("RUSTTALK_DEV_OPEN") else { return };
                 for part in open.split(',') {
                     let (what, arg) = part.split_once(':').unwrap_or((part, ""));
-                    let by_name = |s: &Self| s.channels.values().find(|c| c.name == arg).map(|c| c.id);
+                    let by_name = |s: &Self| s.srv.channels.values().find(|c| c.name == arg).map(|c| c.id);
                     match what {
                         "settings" => {
                             let page = match arg {
@@ -1587,13 +1391,13 @@ impl RustTalkApp {
                             }
                         }
                         "join" => {
-                            if let (Some(id), Some(tx)) = (by_name(self), self.cmd_tx.clone()) {
-                                let _ = tx.send(Command::JoinChannel(id));
+                            if let Some(id) = by_name(self) {
+                                self.join_channel(id);
                                 self.select_channel(id);
                             }
                         }
                         "poke" => {
-                            if let Some(user) = self.users.values().find(|u| u.name == arg).cloned() {
+                            if let Some(user) = self.srv.users.values().find(|u| u.name == arg).cloned() {
                                 self.open_poke(&user);
                             }
                         }
@@ -1622,19 +1426,19 @@ impl RustTalkApp {
                             }
                         }
                         "claim_admin" => {
-                            if let Some(tx) = &self.cmd_tx {
+                            if let Some(tx) = &self.srv.cmd_tx {
                                 let _ = tx.send(Command::Raw(rusttalk_shared::protocol::ClientMessage::ClaimAdmin { password: None }));
                             }
                         }
                         "invite" => {
-                            if let Some(tx) = &self.cmd_tx {
+                            if let Some(tx) = &self.srv.cmd_tx {
                                 let _ = tx.send(Command::Raw(rusttalk_shared::protocol::ClientMessage::CreateInvite { max_uses: Some(5), hours: Some(24 * 7) }));
                             }
                         }
                         // Message actions on the last own / last other message of the selected channel.
                         "edit" | "delete" | "reply" => {
                             let want_own = what != "reply";
-                            let id = self.selected_channel.and_then(|ch| self.chat.get(&ch)).and_then(|v| {
+                            let id = self.srv.selected_channel.and_then(|ch| self.srv.chat.get(&ch)).and_then(|v| {
                                 v.iter()
                                     .rev()
                                     .find(|l| l.id != 0 && matches!(l.kind, ChatKind::Message { own, .. } if own == want_own))
@@ -1706,43 +1510,4 @@ mod tests {
         assert_eq!(format_time(90_061), "01:01"); // next day (UTC)
     }
 
-}
-
-// Dropping the old receiver also discards late network and media worker results.
-fn reset_event_channel(
-    tx: &mut std::sync::mpsc::Sender<NetEvent>,
-    rx: &mut std::sync::mpsc::Receiver<NetEvent>,
-) {
-    (*tx, *rx) = std::sync::mpsc::channel();
-}
-
-#[cfg(test)]
-mod connection_event_tests {
-    use super::*;
-
-    #[test]
-    fn replaced_attempt_cannot_deliver_late_or_queued_events() {
-        let (mut tx, mut rx) = std::sync::mpsc::channel();
-        let old = tx.clone();
-        old.send(NetEvent::Disconnected {
-            reason: "old failure".into(),
-        })
-        .unwrap();
-        reset_event_channel(&mut tx, &mut rx);
-        assert!(old
-            .send(NetEvent::CertCheck {
-                addr: "old:7331".into(),
-                fingerprint: "old".into(),
-                changed: false,
-            })
-            .is_err());
-        assert!(rx.try_recv().is_err());
-        tx.send(NetEvent::Disconnected {
-            reason: "current".into(),
-        })
-        .unwrap();
-        assert!(
-            matches!(rx.try_recv(), Ok(NetEvent::Disconnected { reason }) if reason == "current")
-        );
-    }
 }

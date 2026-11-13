@@ -90,16 +90,16 @@ pub(super) fn role_color(role: Role) -> egui::Color32 {
 
 impl RustTalkApp {
     pub(super) fn my_role(&self) -> Role {
-        self.users.get(&self.my_id).map(|u| u.role).unwrap_or_default()
+        self.srv.users.get(&self.srv.my_id).map(|u| u.role).unwrap_or_default()
     }
 
     /// May I do something that needs `need`? (Open server: yes.)
     pub(super) fn can(&self, need: Role) -> bool {
-        self.open_permissions || self.my_role() >= need
+        self.srv.open_permissions || self.my_role() >= need
     }
 
     fn send_raw(&self, msg: ClientMessage) {
-        if let Some(tx) = &self.cmd_tx {
+        if let Some(tx) = &self.srv.cmd_tx {
             let _ = tx.send(Command::Raw(msg));
         }
     }
@@ -115,7 +115,7 @@ impl RustTalkApp {
     pub(super) fn moderation_menu(&mut self, ui: &mut egui::Ui, user: &UserInfo) {
         let mine = self.my_role();
         // Same or higher role is off limits (unless the server is open).
-        let above = self.open_permissions || mine > user.role;
+        let above = self.srv.open_permissions || mine > user.role;
         if !self.can(Role::Moderator) || !above {
             return;
         }
@@ -220,7 +220,7 @@ impl RustTalkApp {
     // ----- Server Settings tabs ------------------------------------------
 
     pub(super) fn server_roles(&mut self, ui: &mut egui::Ui, admin_pw: &mut String) {
-        if self.open_permissions {
+        if self.srv.open_permissions {
             card(ui, |ui| {
                 caption(ui, "Open server");
                 ui.label(
@@ -243,7 +243,7 @@ impl RustTalkApp {
                 ui.label(egui::RichText::new(icons::regular::SHIELD_CHECK).size(18.0).color(role_color(mine)));
                 ui.label(egui::RichText::new(mine.label()).strong().color(theme::HEADER));
             });
-            if !self.open_permissions && mine != Role::Admin {
+            if !self.srv.open_permissions && mine != Role::Admin {
                 ui.separator();
                 setting_row(ui, "Admin password", Some("Set by the server owner in server.toml (admin_password)"), false, |ui| {
                     ui.add(egui::TextEdit::singleline(admin_pw).password(true).desired_width(160.0));
@@ -253,7 +253,7 @@ impl RustTalkApp {
                 });
             }
         });
-        if !self.can(Role::Admin) || self.open_permissions {
+        if !self.can(Role::Admin) || self.srv.open_permissions {
             return;
         }
         card(ui, |ui| {
@@ -264,10 +264,10 @@ impl RustTalkApp {
                     .color(theme::MUTED),
             );
             ui.separator();
-            if self.admin.roles.is_empty() {
+            if self.srv.admin.roles.is_empty() {
                 ui.label(egui::RichText::new("No moderators or admins yet.").color(theme::MUTED));
             }
-            let roles = self.admin.roles.clone();
+            let roles = self.srv.admin.roles.clone();
             for r in roles {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(icons::regular::SHIELD_CHECK).color(role_color(r.role)));
@@ -295,11 +295,11 @@ impl RustTalkApp {
         }
         card(ui, |ui| {
             caption(ui, "Banned");
-            if self.admin.bans.is_empty() {
+            if self.srv.admin.bans.is_empty() {
                 ui.label(egui::RichText::new("Nobody is banned. Ban someone via right-click on their name.").color(theme::MUTED));
             }
             let now = Self::now();
-            let bans = self.admin.bans.clone();
+            let bans = self.srv.admin.bans.clone();
             for (i, b) in bans.iter().enumerate() {
                 if i > 0 {
                     ui.separator();
@@ -366,11 +366,11 @@ impl RustTalkApp {
         let address = self.config.server_address.clone();
         card(ui, |ui| {
             caption(ui, "Active invites");
-            if self.admin.invites.is_empty() {
+            if self.srv.admin.invites.is_empty() {
                 ui.label(egui::RichText::new("No active invites.").color(theme::MUTED));
             }
             let now = Self::now();
-            let invites = self.admin.invites.clone();
+            let invites = self.srv.admin.invites.clone();
             for (i, inv) in invites.iter().enumerate() {
                 if i > 0 {
                     ui.separator();
@@ -410,10 +410,10 @@ impl RustTalkApp {
         }
         card(ui, |ui| {
             caption(ui, "Audit log (newest first)");
-            if self.admin.audit.is_empty() {
+            if self.srv.admin.audit.is_empty() {
                 ui.label(egui::RichText::new("Nothing logged yet.").color(theme::MUTED));
             }
-            for e in &self.admin.audit {
+            for e in &self.srv.admin.audit {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(short_date(e.timestamp)).monospace().size(11.5).color(theme::MUTED));
                     ui.label(egui::RichText::new(&e.actor).strong().color(theme::HEADER));
@@ -425,7 +425,7 @@ impl RustTalkApp {
 
     /// Admin tabs: explain instead of showing nothing.
     fn admin_tab_allowed(&mut self, ui: &mut egui::Ui) -> bool {
-        if self.open_permissions {
+        if self.srv.open_permissions {
             theme::wip_banner(ui, "Open server: become admin first (tab \"Roles\").");
             return false;
         }
@@ -433,7 +433,7 @@ impl RustTalkApp {
             theme::wip_banner(ui, "Only admins can see this.");
             return false;
         }
-        if !self.admin.loaded {
+        if !self.srv.admin.loaded {
             ui.spinner();
         }
         true

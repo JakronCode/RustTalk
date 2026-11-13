@@ -114,7 +114,7 @@ impl AudioPicker {
 
 impl RustTalkApp {
     pub(super) fn open_audio_picker(&mut self) {
-        if self.connected && self.my_voice_channel().is_some() {
+        if self.in_voice() {
             self.audio_picker = Some(AudioPicker::new(self.shared_audio_source.clone()));
         }
     }
@@ -133,7 +133,7 @@ impl RustTalkApp {
     }
 
     pub(super) fn start_audio_selection(&mut self, source: AudioShareSource) {
-        if !self.connected || self.my_voice_channel().is_none() {
+        if !self.in_voice() {
             return;
         }
         self.stop_shared_audio();

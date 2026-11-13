@@ -139,7 +139,9 @@ impl RustTalkApp {
             });
         }
         if let Some(i) = remove {
-            self.config.bookmarks.remove(i);
+            // A removed server is no longer reconnected at startup.
+            let removed = self.config.bookmarks.remove(i);
+            self.config.auto_connect.remove(&crate::net::normalize_addr(removed.address.trim()));
             self.config.save();
         }
     }
@@ -255,7 +257,7 @@ impl RustTalkApp {
     pub(in crate::app) fn apply_devices(&mut self, previous: (Option<String>, Option<String>)) {
         self.stop_shared_audio();
         self.mic_monitor = None; // restarts with the new input next frame
-        let voice_channel = self.my_voice_channel().filter(|_| self.connected);
+        let voice_channel = self.voice_channel();
         if let Some(engine) = self.audio.as_mut() {
             let (input, output) = (
                 self.config.input_device.clone(),
@@ -615,7 +617,7 @@ impl RustTalkApp {
         if !self.config.global_ptt
             && (self.config.mute_key.is_some() || self.config.deafen_key.is_some())
         {
-            let status = if self.is_connected() {
+            let status = if self.any_connected() {
                 hotkey::status()
             } else {
                 "Connect to a server to activate global shortcuts.".to_string()
@@ -655,7 +657,7 @@ impl RustTalkApp {
         });
         #[cfg(target_os = "linux")]
         if self.config.global_ptt {
-            if self.is_connected() {
+            if self.any_connected() {
                 let status = hotkey::status();
                 if !status.is_empty() {
                     hint(ui, &status);
@@ -886,7 +888,7 @@ impl RustTalkApp {
     // ----- Advanced --------------------------------------------------------
 
     fn section_encryption(&mut self, ui: &mut egui::Ui) {
-        if self.is_connected() && !self.server_fingerprint.is_empty() {
+        if self.is_connected() && !self.srv.server_fingerprint.is_empty() {
             ui.label(
                 egui::RichText::new(format!(
                     "{}  Connected encrypted (TLS + encrypted voice)",
@@ -895,7 +897,7 @@ impl RustTalkApp {
                 .color(theme::GREEN),
             );
             ui.label(
-                egui::RichText::new(format!("Server fingerprint: {}", self.server_fingerprint))
+                egui::RichText::new(format!("Server fingerprint: {}", self.srv.server_fingerprint))
                     .monospace()
                     .size(11.0)
                     .color(theme::MUTED),

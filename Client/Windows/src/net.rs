@@ -4,7 +4,7 @@
 //! Der UDP-Socket wird nach dem Login an die Audio-Engine uebergeben.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::Sender as StdSender;
+use std::sync::mpsc::{SyncSender as StdSender, TrySendError};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -231,7 +231,16 @@ async fn run(
             loop {
                 match read_frame::<_, ServerMessage>(&mut reader).await {
                     Ok(Some(m)) => {
-                        if event_tx.send(NetEvent::Message(m)).is_err() {
+                        // The queue is bounded: a full one drops video frames (the
+                        // decoder asks for a keyframe) and makes the rest wait.
+                        let sent = match m {
+                            ServerMessage::VideoFrame { .. } => match event_tx.try_send(NetEvent::Message(m)) {
+                                Ok(()) | Err(TrySendError::Full(_)) => true,
+                                Err(TrySendError::Disconnected(_)) => false,
+                            },
+                            m => event_tx.send(NetEvent::Message(m)).is_ok(),
+                        };
+                        if !sent {
                             return Ok(()); // UI ist weg
                         }
                         ctx.request_repaint();
@@ -377,7 +386,7 @@ mod tests {
 
         let mut cfg = ClientConfig { server_address: addr.to_string(), ..ClientConfig::default() };
         cfg.known_servers.insert(addr.to_string(), secure::fingerprint(&rcgen_free_cert().0));
-        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let (event_tx, event_rx) = std::sync::mpsc::sync_channel(1024);
         let backlog = Arc::new(AtomicUsize::new(0));
         let cmd_tx = connect(cfg, event_tx, eframe::egui::Context::default(), backlog.clone());
 
@@ -432,7 +441,7 @@ mod tests {
         });
         let mut cfg = ClientConfig { server_address: addr.to_string(), ..ClientConfig::default() };
         cfg.known_servers.insert(addr.to_string(), "00:11:22".into());
-        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let (event_tx, event_rx) = std::sync::mpsc::sync_channel(1024);
         let _tx = connect(cfg, event_tx, eframe::egui::Context::default(), Arc::new(AtomicUsize::new(0)));
         match event_rx.recv_timeout(Duration::from_secs(10)) {
             Ok(NetEvent::CertCheck { addr: reported, fingerprint, changed }) => {
@@ -486,7 +495,7 @@ mod tests {
 
         let mut cfg = ClientConfig { server_address: addr.to_string(), server_password: Some("pw".into()), ..ClientConfig::default() };
         cfg.identity = "ab".repeat(32);
-        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let (event_tx, event_rx) = std::sync::mpsc::sync_channel(1024);
         let _tx = connect(cfg.clone(), event_tx.clone(), eframe::egui::Context::default(), Arc::new(AtomicUsize::new(0)));
         let (pinned_addr, fp) = match event_rx.recv_timeout(Duration::from_secs(10)) {
             Ok(NetEvent::CertCheck { addr: a, fingerprint, changed: false }) => (a, fingerprint),

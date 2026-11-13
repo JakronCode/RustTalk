@@ -277,7 +277,7 @@ impl RustTalkApp {
                 UpdateMsg::Installed(Ok(exe)) => {
                     // Restart into the new version.
                     self.config.save();
-                    self.disconnect();
+                    self.disconnect_all();
                     match update::restart(&exe) {
                         Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                         Err(e) => {
@@ -300,18 +300,19 @@ impl RustTalkApp {
         if self.update.installing {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
-        // Toast clicked: bring the window to the front, open the channel.
-        while let Ok(channel_id) = self.toast_rx.try_recv() {
+        // Toast clicked: bring the window to the front, show that server and channel.
+        while let Ok((server, channel_id)) = self.toast_rx.try_recv() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            if self.channels.contains_key(&channel_id) {
+            self.view_session(server);
+            if self.srv.id == server && self.srv.channels.contains_key(&channel_id) {
                 self.select_channel(channel_id);
             }
         }
     }
 
     /// Windows pop-up for a new message (while RustTalk is in the background).
-    pub(super) fn message_toast(&mut self, channel_id: u64, from: &str, text: &str, has_image: bool, mentioned: bool) {
+    pub(super) fn message_toast(&mut self, server: SessionId, channel_id: u64, from: &str, text: &str, has_image: bool, mentioned: bool) {
         if !self.config.desktop_notifications {
             return;
         }
@@ -320,7 +321,10 @@ impl RustTalkApp {
             return;
         }
         self.last_toast = Some(Instant::now());
-        let channel = self.channel_name(channel_id);
+        let mut channel = self.session(server).map(|s| s.channel_name(channel_id)).unwrap_or_default();
+        if self.all_sessions().filter(|s| s.connected).count() > 1 {
+            channel = format!("{channel} ({})", self.server_label(server));
+        }
         let (mut title, body) = crate::notify::message_text(from, &channel, &super::markdown::plain(text), has_image, self.config.notification_preview);
         if mentioned {
             title = format!("@ {title}");
@@ -328,7 +332,7 @@ impl RustTalkApp {
         let tx = self.toast_tx.clone();
         let ctx = self.ctx.clone();
         crate::notify::show(title, body, move || {
-            let _ = tx.send(channel_id);
+            let _ = tx.send((server, channel_id));
             ctx.request_repaint();
         });
     }

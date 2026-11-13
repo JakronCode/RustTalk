@@ -33,7 +33,7 @@ impl RustTalkApp {
     /// Children of `parent` (without the lobby), in display order.
     pub(super) fn sorted_children(&self, parent: Option<u64>) -> Vec<ChannelInfo> {
         let mut v: Vec<ChannelInfo> = self
-            .channels
+            .srv.channels
             .values()
             .filter(|c| c.parent == parent && c.kind != ChannelKind::Spawn)
             .cloned()
@@ -43,11 +43,7 @@ impl RustTalkApp {
     }
 
     pub(super) fn my_channel(&self) -> Option<u64> {
-        self.users.get(&self.my_id).map(|u| u.channel_id)
-    }
-
-    pub(super) fn in_lobby(&self) -> bool {
-        self.my_channel().is_some_and(|c| Some(c) == self.spawn_channel_id())
+        self.srv.users.get(&self.srv.my_id).map(|u| u.channel_id)
     }
 
     pub(super) fn ui_sidebar(
@@ -84,8 +80,8 @@ impl RustTalkApp {
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
                                 ui.spacing_mut().item_spacing.y = 4.0;
-                                self.ui_voice_panel(ui, cmd_tx);
-                                self.ui_user_panel(ui, cmd_tx);
+                                self.ui_voice_panel(ui);
+                                self.ui_user_panel(ui);
                             });
                     });
 
@@ -120,7 +116,7 @@ impl RustTalkApp {
         let popup_id = ui.make_persistent_id("server_menu");
         let open = ui.memory(|m| m.is_popup_open(popup_id));
         let icon_rect = egui::Rect::from_center_size(rect.left_center() + egui::vec2(14.0, 0.0), egui::vec2(28.0, 28.0));
-        let settings = self.server_settings.clone();
+        let settings = self.srv.server_settings.clone();
         server_settings::paint_server_icon(ui, icon_rect, &settings, &mut self.textures);
         let font = egui::FontId::proportional(15.5);
         let name = elide(ui, &settings.name, &font, rect.width() - 64.0);
@@ -173,7 +169,7 @@ impl RustTalkApp {
                 }
             },
         );
-        resp.on_hover_text(format!("{}  -  {}", settings.name, self.config.server_address));
+        resp.on_hover_text(format!("{}  -  {}", settings.name, self.srv.address));
     }
 
     /// Channel tree: lobby pinned on top, then top-level channels and
@@ -187,13 +183,12 @@ impl RustTalkApp {
         let ctx = ui.ctx().clone();
         let drag = egui::DragAndDrop::payload::<ChannelDrag>(&ctx).map(|d| *d);
         let dragged = drag.map(|d| d.id);
-        let users = self.users.clone();
-        let talking: HashMap<u64, Instant> = self.talking.lock().unwrap().clone();
-        let local_muted: HashSet<u64> = self.local_muted.lock().unwrap().clone();
+        let users = self.srv.users.clone();
+        let (talking, local_muted) = self.voice_maps();
 
         // Lobby (pinned, not draggable).
-        if let Some(spawn) = self.spawn_channel_id().and_then(|id| self.channels.get(&id).cloned()) {
-            self.channel_row(ui, &spawn, &users, &talking, &local_muted, cmd_tx, 0.0, false);
+        if let Some(spawn) = self.spawn_channel_id().and_then(|id| self.srv.channels.get(&id).cloned()) {
+            self.channel_row(ui, &spawn, &users, &talking, &local_muted, 0.0, false);
             ui.add_space(6.0);
         }
 
@@ -205,7 +200,7 @@ impl RustTalkApp {
         for item in self.sorted_children(None) {
             let top = ui.cursor().top();
             if item.kind == ChannelKind::Category {
-                let collapsed = self.collapsed.get(&item.id).copied().unwrap_or(false);
+                let collapsed = self.srv.collapsed.get(&item.id).copied().unwrap_or(false);
                 let header = self.category_header(ui, &item, collapsed, dragged == Some(item.id));
                 let children: Vec<ChannelInfo> = self.sorted_children(Some(item.id));
                 let mut child_rects: Vec<(u64, egui::Rect)> = Vec::new();
@@ -217,7 +212,6 @@ impl RustTalkApp {
                             &users,
                             &talking,
                             &local_muted,
-                            cmd_tx,
                             0.0,
                             dragged == Some(ch.id),
                         );
@@ -256,7 +250,7 @@ impl RustTalkApp {
                 }
                 ui.add_space(8.0);
             } else {
-                self.channel_row(ui, &item, &users, &talking, &local_muted, cmd_tx, 0.0, dragged == Some(item.id));
+                self.channel_row(ui, &item, &users, &talking, &local_muted, 0.0, dragged == Some(item.id));
             }
             top_blocks.push((item.id, top, ui.cursor().top()));
         }
@@ -298,7 +292,7 @@ impl RustTalkApp {
     ) {
         ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
         let name = self.channel_name(drag.id);
-        let icon = self.channels.get(&drag.id).map(|c| channel_icon(c.kind)).unwrap_or("");
+        let icon = self.srv.channels.get(&drag.id).map(|c| channel_icon(c.kind)).unwrap_or("");
         egui::Area::new(egui::Id::new("drag_ghost"))
             .fixed_pos(pointer + egui::vec2(14.0, 6.0))
             .order(egui::Order::Tooltip)
@@ -369,9 +363,9 @@ impl RustTalkApp {
         // click itself, when egui no longer counts the (draggable) row as hovered.
         let show_actions = !is_dragged && pointer_on(ui, rect);
         let has_unread = self
-            .channels
+            .srv.channels
             .values()
-            .any(|c| c.parent == Some(cat.id) && self.unread.contains(&c.id));
+            .any(|c| c.parent == Some(cat.id) && self.srv.unread.contains(&c.id));
         let color = if is_dragged {
             theme::DISABLED
         } else if hovered || has_unread {
@@ -411,7 +405,7 @@ impl RustTalkApp {
             }
         }
         if resp.clicked() && !action_hit {
-            self.collapsed.insert(cat.id, !collapsed);
+            self.srv.collapsed.insert(cat.id, !collapsed);
         }
         if resp.drag_started() {
             egui::DragAndDrop::set_payload(ui.ctx(), ChannelDrag { id: cat.id, is_category: true });
@@ -447,13 +441,12 @@ impl RustTalkApp {
         users: &HashMap<u64, UserInfo>,
         talking: &HashMap<u64, Instant>,
         local_muted: &HashSet<u64>,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
         indent: f32,
         is_dragged: bool,
     ) -> egui::Rect {
-        let selected = self.selected_channel == Some(ch.id);
+        let selected = self.srv.selected_channel == Some(ch.id);
         let i_am_here = self.my_channel() == Some(ch.id);
-        let has_unread = self.unread.contains(&ch.id) && !selected;
+        let has_unread = self.srv.unread.contains(&ch.id) && !selected;
         let draggable = ch.kind != ChannelKind::Spawn;
 
         let (rect, resp) = ui.allocate_exact_size(
@@ -510,7 +503,7 @@ impl RustTalkApp {
         // Lobby row: always-visible server disconnect on the right.
         let lobby_shift = if is_lobby {
             let btn = egui::Rect::from_center_size(rect.right_center() - egui::vec2(14.0, 0.0), egui::vec2(22.0, 22.0));
-            let tip = format!("Disconnect from {}", self.server_settings.name);
+            let tip = format!("Disconnect from {}", self.srv.server_settings.name);
             if disconnect_icon(ui, btn, &tip).clicked() {
                 self.pending_disconnect = true;
                 action_hit = true;
@@ -533,7 +526,7 @@ impl RustTalkApp {
             self.select_channel(ch.id);
         }
         if resp.double_clicked() && !action_hit && ch.kind.can_join() && !i_am_here {
-            let _ = cmd_tx.send(Command::JoinChannel(ch.id));
+            self.join_channel(ch.id);
         }
         if draggable && resp.drag_started() {
             egui::DragAndDrop::set_payload(ui.ctx(), ChannelDrag { id: ch.id, is_category: false });
@@ -546,7 +539,7 @@ impl RustTalkApp {
             _ => "Click to open  -  drag to move",
         };
         let resp = resp.on_hover_text_at_pointer(hover_text);
-        resp.context_menu(|ui| self.channel_context_menu(ui, ch, cmd_tx));
+        resp.context_menu(|ui| self.channel_context_menu(ui, ch));
 
         // Members (voice channels and lobby).
         if ch.kind.can_join() {
@@ -560,18 +553,13 @@ impl RustTalkApp {
     }
 
     /// Right-click menu of a channel.
-    fn channel_context_menu(
-        &mut self,
-        ui: &mut egui::Ui,
-        ch: &ChannelInfo,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
-    ) {
+    fn channel_context_menu(&mut self, ui: &mut egui::Ui, ch: &ChannelInfo) {
         ui.set_width(MENU_W);
         ui.spacing_mut().item_spacing.y = 2.0;
         if ch.kind.can_join() && self.my_channel() != Some(ch.id) {
             let label = if ch.kind == ChannelKind::Spawn { "Back to Lobby" } else { "Join" };
             if theme::menu_item(ui, icons::regular::SIGN_IN, label, false).clicked() {
-                let _ = cmd_tx.send(Command::JoinChannel(ch.id));
+                self.join_channel(ch.id);
                 self.select_channel(ch.id);
                 ui.close_menu();
             }
@@ -581,7 +569,7 @@ impl RustTalkApp {
             ui.close_menu();
         }
         if theme::menu_item(ui, icons::regular::CHECKS, "Mark as Read", false).clicked() {
-            self.unread.remove(&ch.id);
+            self.srv.unread.remove(&ch.id);
             ui.close_menu();
         }
         theme::menu_separator(ui);
@@ -609,10 +597,10 @@ impl RustTalkApp {
         local_muted: &HashSet<u64>,
         in_lobby: bool,
     ) {
-        let me = user.id == self.my_id;
+        let me = user.id == self.srv.my_id;
         let talking_now = !in_lobby
             && (talking.get(&user.id).is_some_and(|t| t.elapsed() < Duration::from_millis(250))
-                || (me && self.control.transmitting.load(Ordering::Relaxed)));
+                || (me && self.viewing_voice() && self.control.transmitting.load(Ordering::Relaxed)));
         let locally_muted = local_muted.contains(&user.id);
 
         let (rect, resp) =
@@ -645,7 +633,7 @@ impl RustTalkApp {
             ui.interact(r, ui.id().with(("ustat", user.id, tip)), egui::Sense::hover()).on_hover_text(tip);
             x -= 20.0;
         };
-        if me && self.screen_audio.is_some() {
+        if me && self.viewing_voice() && self.screen_audio.is_some() {
             icon_at(icons::regular::SPEAKER_HIGH, theme::GREEN, "Sharing audio");
         }
         if user.deafened {
@@ -683,13 +671,14 @@ impl RustTalkApp {
             self.open_poke(user);
             ui.close_menu();
         }
+        // The mixer knows only the voice server's users.
         let locally_muted = self.local_muted.lock().unwrap().contains(&user.id);
         let (icon, label) = if locally_muted {
             (icons::regular::SPEAKER_HIGH, "Unmute for Me")
         } else {
             (icons::regular::SPEAKER_SLASH, "Mute for Me")
         };
-        if theme::menu_item(ui, icon, label, false).clicked() {
+        if self.viewing_voice() && theme::menu_item(ui, icon, label, false).clicked() {
             let mut set = self.local_muted.lock().unwrap();
             if locally_muted {
                 set.remove(&user.id);
@@ -700,7 +689,7 @@ impl RustTalkApp {
         }
         theme::menu_separator(ui);
         ui.label(format!("{}  User Volume", icons::regular::SPEAKER_HIGH));
-        let mut pct = (self.user_volume(user.id) * 100.0).round();
+        let mut pct = (self.user_volume(&user.name) * 100.0).round();
         let slider = egui::Slider::new(&mut pct, 0.0..=crate::audio::MAX_VOLUME * 100.0)
             .suffix(" %")
             .step_by(5.0);
@@ -715,16 +704,9 @@ impl RustTalkApp {
 
     /// "Voice Connected" panel above the user panel; in the lobby it explains
     /// that talking and sharing are disabled there.
-    fn ui_voice_panel(
-        &mut self,
-        ui: &mut egui::Ui,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
-    ) {
-        // Lobby: no voice, so no voice panel (server disconnect sits on the Lobby row).
-        let Some(my_ch) = self.my_channel() else { return };
-        if self.in_lobby() {
-            return;
-        }
+    fn ui_voice_panel(&mut self, ui: &mut egui::Ui) {
+        // Only for voice on this server (server disconnect sits on the Lobby row).
+        let Some(my_ch) = self.voice_channel().filter(|_| self.viewing_voice()) else { return };
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
@@ -747,7 +729,7 @@ impl RustTalkApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::icon_button(ui, icons::regular::PHONE_DISCONNECT, IconState::Danger, "Leave voice (back to the lobby)").clicked() {
                     if let Some(spawn) = self.spawn_channel_id() {
-                        let _ = cmd_tx.send(Command::JoinChannel(spawn));
+                        self.join_channel(spawn);
                     }
                 }
             });
@@ -772,8 +754,8 @@ impl RustTalkApp {
                 if wide_toggle(&mut cols[index], icon, label,
                     if live { IconState::Active } else { IconState::Normal }, tip).clicked() {
                     match index {
-                        0 => self.toggle_cam(cmd_tx),
-                        1 => self.toggle_screen(cmd_tx),
+                        0 => self.toggle_cam(),
+                        1 => self.toggle_screen(),
                         _ => self.toggle_audio_sharing(),
                     }
                 }
@@ -785,12 +767,9 @@ impl RustTalkApp {
 
     /// Bottom user panel: avatar with status dot, name, status; mic and
     /// headphones (each with a device/volume dropdown), settings.
-    fn ui_user_panel(
-        &mut self,
-        ui: &mut egui::Ui,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
-    ) {
-        let in_lobby = self.in_lobby();
+    fn ui_user_panel(&mut self, ui: &mut egui::Ui) {
+        // Talking happens on the voice server, whichever server is viewed.
+        let in_lobby = !self.in_voice();
         let transmitting = self.control.transmitting.load(Ordering::Relaxed) && !in_lobby;
         ui.horizontal(|ui| {
             let av = theme::draw_avatar(ui, &self.config.username, 32.0, transmitting);
@@ -825,7 +804,7 @@ impl RustTalkApp {
                 let (main, caret) =
                     split_button(ui, deaf_icon, deaf_state, if deafened { "Undeafen" } else { "Deafen" }, "Output options");
                 if main.clicked() {
-                    self.toggle_deafen(cmd_tx);
+                    self.toggle_deafen();
                 }
                 self.output_popup(ui, &caret);
                 let (mic_icon, mic_state, mic_tip) = if in_lobby {
@@ -837,7 +816,7 @@ impl RustTalkApp {
                 };
                 let (main, caret) = split_button(ui, mic_icon, mic_state, mic_tip, "Input options");
                 if main.clicked() {
-                    self.toggle_mute(cmd_tx);
+                    self.toggle_mute();
                 }
                 self.input_popup(ui, &caret);
             });
@@ -930,19 +909,18 @@ impl RustTalkApp {
         }
     }
 
-    pub(super) fn toggle_mute(&mut self, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>) {
+    pub(super) fn toggle_mute(&mut self) {
         if self.control.self_deafened.load(Ordering::Relaxed) {
             self.set_status("Undeafen before unmuting");
             return;
         }
         let muted = !self.control.self_muted.load(Ordering::Relaxed);
-        let deafened = self.control.self_deafened.load(Ordering::Relaxed);
         self.control.self_muted.store(muted, Ordering::Relaxed);
-        let _ = cmd_tx.send(Command::SetMute { muted, deafened });
+        self.broadcast_mute();
         self.notify(if muted { crate::audio::sfx::Sound::Mute } else { crate::audio::sfx::Sound::Unmute });
     }
 
-    pub(super) fn toggle_deafen(&mut self, cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>) {
+    pub(super) fn toggle_deafen(&mut self) {
         let new = !self.control.self_deafened.load(Ordering::Relaxed);
         if new {
             self.mute_before_deafen = self.control.self_muted.load(Ordering::Relaxed);
@@ -951,8 +929,7 @@ impl RustTalkApp {
             self.control.self_muted.store(self.mute_before_deafen, Ordering::Relaxed);
         }
         self.control.self_deafened.store(new, Ordering::Relaxed);
-        let muted = self.control.self_muted.load(Ordering::Relaxed);
-        let _ = cmd_tx.send(Command::SetMute { muted, deafened: new });
+        self.broadcast_mute();
         self.notify(if new { crate::audio::sfx::Sound::Mute } else { crate::audio::sfx::Sound::Unmute });
     }
 }

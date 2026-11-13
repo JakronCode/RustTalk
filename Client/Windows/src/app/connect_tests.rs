@@ -73,7 +73,7 @@ fn single_click_selects_and_double_click_requests_connection_without_opening_edi
     );
     assert!(app.config.invite.is_none());
     assert!(!app.show_connect_form);
-    assert!(app.cmd_tx.is_none());
+    assert!(app.srv.cmd_tx.is_none());
     assert!(click(&mut app, pos, 0.2, egui::PointerButton::Primary));
     assert!(!app.show_connect_form);
 }
@@ -119,7 +119,7 @@ fn right_click_edit_opens_details_without_connecting() {
         Some("example.invalid:7331")
     );
     assert_eq!(app.config.server_address, "example.invalid:7331");
-    assert!(app.cmd_tx.is_none());
+    assert!(app.srv.cmd_tx.is_none());
 }
 
 #[test]

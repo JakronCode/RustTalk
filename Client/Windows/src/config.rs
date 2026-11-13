@@ -89,6 +89,11 @@ pub struct ClientConfig {
     /// TLS certificate fingerprints of servers we connected to ("host:port" -> SHA-256).
     #[serde(default)]
     pub known_servers: std::collections::BTreeMap<String, String>,
+    /// Saved servers ("host:port") reconnected when RustTalk starts: the user
+    /// connected to them and did not disconnect. A saved address alone is not
+    /// consent, so older configs start with none.
+    #[serde(default)]
+    pub auto_connect: std::collections::BTreeSet<String>,
     /// Invite code for the next connect (from an invite link; not saved).
     #[serde(skip)]
     pub invite: Option<String>,
@@ -217,6 +222,7 @@ impl Default for ClientConfig {
             output_volume: 1.0,
             identity: String::new(),
             known_servers: Default::default(),
+            auto_connect: Default::default(),
             invite: None,
             desktop_notifications: true,
             notification_preview: true,
@@ -283,6 +289,9 @@ impl ClientConfig {
 
     /// Speichert die Config (Fehler werden nur geloggt).
     pub fn save(&self) {
+        if cfg!(test) {
+            return; // tests never touch the real settings file
+        }
         match toml::to_string_pretty(self) {
             Ok(text) => {
                 let path = Self::path();
@@ -355,6 +364,7 @@ mod tests {
             output_volume: 1.0,
             identity: "ab".repeat(32),
             known_servers: [("10.0.0.5:7331".to_string(), "AB:CD".to_string())].into_iter().collect(),
+            auto_connect: ["10.69.40.101:7331".to_string()].into_iter().collect(),
             invite: Some("NOT-SAVED".into()),
             desktop_notifications: false,
             notification_preview: false,
@@ -402,6 +412,7 @@ mod tests {
         assert_eq!(back.identity, "ab".repeat(32));
         assert_eq!(back.invite, None, "invite codes are not saved");
         assert_eq!(back.known_servers.get("10.0.0.5:7331").map(String::as_str), Some("AB:CD"));
+        assert!(back.auto_connect.contains("10.69.40.101:7331"));
         assert_eq!(back.user_volumes.get("anna"), Some(&1.5));
     }
 
@@ -471,5 +482,6 @@ mod tests {
         assert_eq!(cfg.accent_color, DEFAULT_ACCENT);
         assert_eq!(cfg.sidebar_width, 260.0);
         assert!(cfg.server_address.ends_with(":7331"));
+        assert!(cfg.auto_connect.is_empty(), "existing installs are not enrolled");
     }
 }

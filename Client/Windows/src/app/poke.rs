@@ -16,6 +16,8 @@ pub(super) struct PokeDialog {
 
 /// A received poke shown as a popup until dismissed.
 pub(super) struct PokeNote {
+    /// Server it came from: "Poke Back" only works while that one is viewed.
+    session: SessionId,
     from_id: u64,
     from: String,
     message: String,
@@ -29,20 +31,21 @@ const MAX_INBOX: usize = 5;
 impl RustTalkApp {
     /// Opens the dialog to poke `user`.
     pub(super) fn open_poke(&mut self, user: &UserInfo) {
-        if user.id != self.my_id {
+        if user.id != self.srv.my_id {
             self.poke_dialog = Some(PokeDialog { target: user.id, name: user.name.clone(), message: String::new(), focus: true });
         }
     }
 
     fn send_poke(&mut self, target: u64, name: &str, message: &str) {
-        if let Some(tx) = &self.cmd_tx {
+        if let Some(tx) = &self.srv.cmd_tx {
             let _ = tx.send(Command::Raw(ClientMessage::Poke { target, message: message.trim().to_string() }));
             self.set_status(format!("You poked {name}"));
         }
     }
 
     /// Incoming poke: wake-up ring, popup, toast + taskbar flash if in the background.
-    pub(super) fn receive_poke(&mut self, from_id: u64, from: String, message: String) {
+    pub(super) fn receive_poke(&mut self, session: SessionId, from_id: u64, from: String, message: String) {
+        let from = self.server_text(session, from);
         self.notify(Sound::Poke);
         if !self.window_focused() {
             self.ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
@@ -55,7 +58,7 @@ impl RustTalkApp {
                 });
             }
         }
-        self.poke_inbox.push(PokeNote { from_id, from, message, at: Self::now() });
+        self.poke_inbox.push(PokeNote { session, from_id, from, message, at: Self::now() });
         if self.poke_inbox.len() > MAX_INBOX {
             self.poke_inbox.remove(0);
         }
@@ -112,7 +115,7 @@ impl RustTalkApp {
     /// Popup for the newest received poke (others wait behind it).
     pub(super) fn ui_poke_popup(&mut self, ctx: &egui::Context) {
         let Some(note) = self.poke_inbox.last() else { return };
-        let (from_id, from, message, at) = (note.from_id, note.from.clone(), note.message.clone(), note.at);
+        let (session, from_id, from, message, at) = (note.session, note.from_id, note.from.clone(), note.message.clone(), note.at);
         let waiting = self.poke_inbox.len() - 1;
         let mut close = false;
         let mut reply = false;
@@ -148,7 +151,7 @@ impl RustTalkApp {
                     if theme::primary_button(ui, "OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         close = true;
                     }
-                    let online = self.users.contains_key(&from_id);
+                    let online = session == self.srv.id && self.srv.users.contains_key(&from_id);
                     if ui
                         .add_enabled_ui(online, |ui| theme::ghost_button(ui, format!("{}  Poke Back", icons::regular::HAND_WAVING)))
                         .inner
@@ -162,8 +165,8 @@ impl RustTalkApp {
         if close {
             self.poke_inbox.pop();
         }
-        if reply {
-            if let Some(user) = self.users.get(&from_id).cloned() {
+        if reply && session == self.srv.id {
+            if let Some(user) = self.srv.users.get(&from_id).cloned() {
                 self.open_poke(&user);
             }
         }

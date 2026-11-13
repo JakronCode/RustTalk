@@ -112,7 +112,7 @@ impl RustTalkApp {
                         egui::RichText::new("RustTalk downloads the update from GitHub, checks its SHA-256 checksum, installs it and restarts.")
                             .color(theme::MUTED),
                     );
-                    let restart = if self.is_connected() {
+                    let restart = if self.any_connected() {
                         "Restarting disconnects you from the server, including any voice call or screen share."
                     } else {
                         "RustTalk closes and starts again."

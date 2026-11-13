@@ -25,7 +25,7 @@ pub(super) struct ChannelSettings {
 
 impl RustTalkApp {
     pub(super) fn open_channel_settings(&mut self, id: u64) {
-        if let Some(ch) = self.channels.get(&id) {
+        if let Some(ch) = self.srv.channels.get(&id) {
             self.channel_settings = Some(ChannelSettings {
                 id,
                 tab: ChannelTab::Overview,
@@ -49,7 +49,7 @@ impl RustTalkApp {
 
     pub(super) fn ui_channel_settings(&mut self, ctx: &egui::Context) {
         let Some(mut st) = self.channel_settings.take() else { return };
-        let Some(ch) = self.channels.get(&st.id).cloned() else { return };
+        let Some(ch) = self.srv.channels.get(&st.id).cloned() else { return };
         let mut open = true;
         let mut close = false;
         let is_category = ch.kind == ChannelKind::Category;
@@ -231,7 +231,7 @@ impl RustTalkApp {
     }
 
     fn save_channel_settings(&mut self, ch: &ChannelInfo, st: &ChannelSettings) {
-        let Some(tx) = self.cmd_tx.clone() else { return };
+        let Some(tx) = self.srv.cmd_tx.clone() else { return };
         let name = st.name.trim();
         if !name.is_empty() && name != ch.name {
             let _ = tx.send(Command::RenameChannel(ch.id, name.to_string()));
@@ -298,7 +298,7 @@ impl RustTalkApp {
                         let create = theme::primary_button(ui, if is_cat { "Create Category" } else { "Create Channel" }).clicked()
                             || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
                         if create && !self.new_channel_name.trim().is_empty() {
-                            if let Some(tx) = &self.cmd_tx {
+                            if let Some(tx) = &self.srv.cmd_tx {
                                 let parent = if is_cat { None } else { self.new_channel_parent };
                                 let _ = tx.send(Command::CreateChannel {
                                     name: self.new_channel_name.trim().to_string(),
@@ -321,7 +321,7 @@ impl RustTalkApp {
     /// "Really delete?" confirmation.
     pub(super) fn ui_confirm_delete(&mut self, ctx: &egui::Context) {
         let Some(id) = self.confirm_delete else { return };
-        let Some(ch) = self.channels.get(&id).cloned() else {
+        let Some(ch) = self.srv.channels.get(&id).cloned() else {
             self.confirm_delete = None;
             return;
         };
@@ -355,7 +355,7 @@ impl RustTalkApp {
                 ui.add_space(8.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if theme::danger_button(ui, &format!("Delete {what}")).clicked() {
-                        if let Some(tx) = &self.cmd_tx {
+                        if let Some(tx) = &self.srv.cmd_tx {
                             let _ = tx.send(Command::DeleteChannel(id));
                         }
                         done = true;

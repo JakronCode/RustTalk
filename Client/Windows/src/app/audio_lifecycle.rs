@@ -25,23 +25,32 @@ fn wants_preview(show_settings: bool, page: SettingsPage, in_voice: bool) -> boo
 
 impl RustTalkApp {
     /// Called only after server state changes (and explicit device changes), never every frame.
+    /// Capture exists only for the voice server's confirmed voice channel.
     pub(super) fn sync_voice_audio(&mut self) {
-        let in_voice = self.connected && self.my_voice_channel().is_some();
-        if in_voice {
+        let voice = self.voice().map(|s| (s.id, s.my_voice_channel()));
+        let voice_channel = voice.and_then(|(_, ch)| ch);
+        // Without voice the engine only plays notification sounds: keep it on a connected server.
+        let usable = |s: &ServerSession| s.connected && s.audio_session.is_some();
+        let owner = match voice {
+            Some((id, _)) => Some(id),
+            None => self
+                .audio_owner
+                .filter(|id| self.session(*id).is_some_and(usable))
+                .or_else(|| self.all_sessions().find(|s| usable(s)).map(|s| s.id)),
+        };
+        if voice_channel.is_some() {
             self.mic_monitor = None; // release local preview before opening live capture
         } else {
             self.stop_shared_audio();
         }
-        let voice_channel = self.my_voice_channel().filter(|_| self.connected);
-        if self
-            .audio
-            .as_ref()
-            .is_some_and(|audio| audio.voice_channel != voice_channel)
+        if self.audio_owner != owner
+            || self.audio.as_ref().is_some_and(|audio| audio.voice_channel != voice_channel)
         {
             self.stop_shared_audio();
             self.audio = None;
             self.talking.lock().unwrap().clear();
         }
+        self.audio_owner = owner;
         let result = self.start_audio(voice_channel);
         if result.is_err() && voice_channel.is_some() {
             // A broken microphone must not silence lobby/chat notifications.
@@ -59,24 +68,34 @@ impl RustTalkApp {
         }
     }
 
+    /// Starts the engine on `audio_owner`'s UDP session (if none is running).
     pub(super) fn start_audio(&mut self, voice_channel: Option<u64>) -> anyhow::Result<()> {
-        let session = self.audio_session.as_ref();
-        set_active(&mut self.audio, self.connected && session.is_some(), || {
-            let session = session.expect("checked above");
-            AudioEngine::start(
-                session.udp.try_clone()?,
-                session.token,
-                session.cipher.clone(),
-                self.control.clone(),
-                self.talking.clone(),
-                self.local_muted.clone(),
-                self.user_volumes.clone(),
-                self.sfx.clone(),
-                self.config.input_device.as_deref(),
-                self.config.output_device.as_deref(),
-                voice_channel,
-            )
-        })
+        if self.audio.is_some() {
+            return Ok(());
+        }
+        let Some(id) = self.audio_owner else { return Ok(()) };
+        let Some((udp, token, cipher, generation)) = self.session(id).filter(|s| s.connected).and_then(|s| {
+            let a = s.audio_session.as_ref()?;
+            Some((a.udp.try_clone(), a.token, a.cipher.clone(), s.generation))
+        }) else {
+            return Ok(());
+        };
+        let udp = udp?;
+        self.adopt_link(id, generation);
+        self.audio = Some(AudioEngine::start(
+            udp,
+            token,
+            cipher,
+            self.control.clone(),
+            self.talking.clone(),
+            self.local_muted.clone(),
+            self.user_volumes.clone(),
+            self.sfx.clone(),
+            self.config.input_device.as_deref(),
+            self.config.output_device.as_deref(),
+            voice_channel,
+        )?);
+        Ok(())
     }
 
     pub(super) fn stop_shared_audio(&mut self) {
@@ -91,7 +110,7 @@ impl RustTalkApp {
     pub(super) fn toggle_audio_only(&mut self) {
         if self.audio_only {
             self.stop_shared_audio();
-        } else if self.connected && self.my_voice_channel().is_some() {
+        } else if self.in_voice() {
             self.audio_only = true;
             self.screen_audio_failed = false;
             self.sync_shared_audio();
@@ -99,8 +118,7 @@ impl RustTalkApp {
     }
 
     pub(super) fn sync_shared_audio(&mut self) {
-        let in_voice = self.connected && self.my_voice_channel().is_some();
-        if !in_voice {
+        if !self.in_voice() {
             self.stop_shared_audio();
             return;
         }
@@ -147,7 +165,7 @@ impl RustTalkApp {
         let preview = wants_preview(
             self.show_settings,
             self.settings_page,
-            self.my_voice_channel().is_some(),
+            self.in_voice(),
         );
         let _ = set_active(&mut self.mic_monitor, preview, || {
             capture::MicMonitor::start(
@@ -223,14 +241,22 @@ mod tests {
     }
 
     fn connect(app: &mut RustTalkApp) -> tokio::sync::mpsc::UnboundedReceiver<Command> {
+        if app.srv.is_placeholder() {
+            let id = app.ensure_session("voice.invalid:7331").unwrap();
+            app.view_session(id);
+        }
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        app.cmd_tx = Some(tx);
-        app.handle_event(connected());
+        app.srv.cmd_tx = Some(tx);
+        app.handle_event(app.srv.id, connected());
         rx
     }
 
+    fn event(app: &mut RustTalkApp, ev: NetEvent) {
+        app.handle_event(app.srv.id, ev);
+    }
+
     fn move_to(app: &mut RustTalkApp, channel_id: u64) {
-        app.handle_event(NetEvent::Message(ServerMessage::UserMoved {
+        event(app, NetEvent::Message(ServerMessage::UserMoved {
             client_id: 1,
             channel_id,
         }));
@@ -336,7 +362,7 @@ mod tests {
         assert_eq!(devices.0.borrow().systems, 0);
         move_to(&mut app, 2);
         app.toggle_audio_only();
-        app.handle_event(NetEvent::Disconnected {
+        event(&mut app, NetEvent::Disconnected {
             reason: "lost".into(),
         });
         assert_eq!(devices.0.borrow().systems, 0);
@@ -371,13 +397,13 @@ mod tests {
             app.notify(sound);
             assert_sound(&app, sound);
         }
-        app.handle_event(NetEvent::Message(ServerMessage::Poked {
+        event(&mut app, NetEvent::Message(ServerMessage::Poked {
             from_id: 2,
             from_name: "peer".into(),
             message: String::new(),
         }));
         assert_sound(&app, Sound::Poke);
-        let cipher = app.audio_session.as_ref().unwrap().cipher.clone();
+        let cipher = app.srv.audio_session.as_ref().unwrap().cipher.clone();
         let session = app.control.link.session();
         app.select_channel(2); // UI selection/request is not server confirmation.
         assert_eq!(devices.0.borrow().input_starts, 0);
@@ -395,7 +421,7 @@ mod tests {
         move_to(&mut app, 3); // text channels cannot retain capture
         assert_eq!(devices.0.borrow().inputs, 0);
         move_to(&mut app, 2);
-        app.handle_event(NetEvent::Message(ServerMessage::ChannelDeleted {
+        event(&mut app, NetEvent::Message(ServerMessage::ChannelDeleted {
             channel_id: 2,
         }));
         assert_eq!(devices.0.borrow().inputs, 0);
@@ -403,13 +429,13 @@ mod tests {
         assert_eq!(devices.0.borrow().inputs, 0);
         assert!(Arc::ptr_eq(
             &cipher,
-            &app.audio_session.as_ref().unwrap().cipher
+            &app.srv.audio_session.as_ref().unwrap().cipher
         ));
         assert_eq!(app.control.link.session(), session);
         move_to(&mut app, 4);
-        app.handle_event(NetEvent::Message(ServerMessage::UserLeft { client_id: 1 }));
+        event(&mut app, NetEvent::Message(ServerMessage::UserLeft { client_id: 1 }));
         assert_eq!(devices.0.borrow().inputs, 0);
-        app.disconnect();
+        app.disconnect_all();
         assert_eq!(devices.0.borrow().outputs, 0);
     }
 
@@ -419,18 +445,18 @@ mod tests {
         let mut app = app();
         let _commands = connect(&mut app);
         move_to(&mut app, 2);
-        let old_tx = app.event_tx.clone();
+        let old_tx = app.srv.event_tx.clone();
         let session = app.control.link.session();
-        let cipher = app.audio_session.as_ref().unwrap().cipher.clone();
-        app.handle_event(NetEvent::Disconnected {
+        let cipher = app.srv.audio_session.as_ref().unwrap().cipher.clone();
+        event(&mut app, NetEvent::Disconnected {
             reason: "connection lost".into(),
         });
         assert_eq!(devices.0.borrow().inputs, 0);
         assert_eq!(devices.0.borrow().outputs, 0);
         assert!(old_tx.send(connected()).is_err());
-        app.handle_event(connected()); // cancelled attempt, no command channel
+        event(&mut app, connected()); // cancelled attempt, no command channel
         move_to(&mut app, 2);
-        assert!(!app.connected);
+        assert!(!app.srv.connected);
         assert_eq!(devices.0.borrow().inputs, 0);
         let mut commands = connect(&mut app);
         assert!(matches!(commands.try_recv(), Ok(Command::JoinChannel(2))));
@@ -438,19 +464,19 @@ mod tests {
         assert_ne!(app.control.link.session(), session);
         assert!(!Arc::ptr_eq(
             &cipher,
-            &app.audio_session.as_ref().unwrap().cipher
+            &app.srv.audio_session.as_ref().unwrap().cipher
         ));
         move_to(&mut app, 2);
         assert_eq!(devices.0.borrow().inputs, 1);
-        app.handle_event(NetEvent::Message(ServerMessage::Removed {
+        event(&mut app, NetEvent::Message(ServerMessage::Removed {
             reason: "kicked".into(),
             banned: false,
         }));
-        app.handle_event(NetEvent::Disconnected {
+        event(&mut app, NetEvent::Disconnected {
             reason: "removed".into(),
         });
         assert_eq!(devices.0.borrow().inputs, 0);
-        assert!(app.reconnect.is_none());
+        assert!(app.srv.reconnect.is_none());
     }
 
     #[test]
