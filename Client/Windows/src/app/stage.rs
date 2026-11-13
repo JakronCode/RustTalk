@@ -632,6 +632,21 @@ impl RustTalkApp {
             }
             None => member_card(ui, rect, user, speaking, me),
         };
+        if user.audio_sharing && kind != Some(VideoKind::Screen) {
+            let lit = self.shared_audio_lit(user);
+            let badge = egui::Rect::from_center_size(rect.left_top() + egui::vec2(24.0, 24.0), egui::vec2(28.0, 28.0));
+            let p = ui.painter();
+            p.circle_filled(badge.center(), 14.0, if lit { theme::GREEN } else { egui::Color32::from_black_alpha(160) });
+            p.text(
+                badge.center(),
+                egui::Align2::CENTER_CENTER,
+                icons::regular::MUSIC_NOTES,
+                egui::FontId::proportional(16.0),
+                if lit { egui::Color32::WHITE } else { theme::MUTED },
+            );
+            ui.interact(badge, ui.id().with(("audio_badge", user.id, kind)), egui::Sense::hover())
+                .on_hover_text(if lit { "Sharing audio (sound playing)" } else { "Sharing audio" });
+        }
         // Right click / "..." button: same menu as in the sidebar.
         if !me {
             resp.context_menu(|ui| self.user_menu(ui, user));

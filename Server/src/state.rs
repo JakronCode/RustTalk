@@ -41,6 +41,8 @@ pub struct Client {
     pub deafened: bool,
     /// Teilt gerade Kamera/Bildschirm.
     pub sharing: bool,
+    /// Shares computer audio (voice channels only).
+    pub audio_sharing: bool,
     /// Streams this client is sending (known from its first frame of each kind).
     pub streams: BTreeSet<VideoKind>,
     /// Streams this client watches: (sender, kind). Only these frames reach it.
@@ -74,6 +76,7 @@ impl Client {
             muted: self.muted,
             deafened: self.deafened,
             sharing: self.sharing,
+            audio_sharing: self.audio_sharing,
             role: self.role,
             streams: self.streams.iter().copied().collect(),
         }
@@ -521,6 +524,10 @@ impl State {
                 c.sharing = false;
                 self.broadcast(&ServerMessage::SharingChanged { client_id: *id, sharing: false });
             }
+            if let Some(c) = self.clients.get_mut(id).filter(|c| c.audio_sharing) {
+                c.audio_sharing = false;
+                self.broadcast(&ServerMessage::AudioSharingChanged { client_id: *id, sharing: false });
+            }
         }
     }
 
@@ -830,6 +837,7 @@ impl State {
                 muted: false,
                 deafened: false,
                 sharing: false,
+                audio_sharing: false,
                 streams: BTreeSet::new(),
                 watching: HashSet::new(),
                 udp_token: token,
@@ -1253,6 +1261,20 @@ impl State {
             self.clear_streams(client_id);
         }
         true
+    }
+
+    /// Computer audio sharing status. Err when sharing outside a voice channel.
+    /// Ok(true) = the status changed (tell everyone).
+    pub fn set_audio_sharing(&mut self, client_id: u64, sharing: bool) -> Result<bool, String> {
+        let client = self.clients.get_mut(&client_id).ok_or("Client does not exist")?;
+        let in_voice = self
+            .channels
+            .get(&client.channel_id)
+            .is_some_and(|ch| ch.kind == ChannelKind::Voice);
+        if sharing && !in_voice {
+            return Err("Audio sharing is only possible in voice channels".to_string());
+        }
+        Ok(std::mem::replace(&mut client.audio_sharing, sharing) != sharing)
     }
 
     /// Who gets a stream: members of the sender's channel who watch it.

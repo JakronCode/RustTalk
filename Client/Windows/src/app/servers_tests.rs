@@ -43,6 +43,7 @@ pub(in crate::app) fn welcome(my_id: u64) -> NetEvent {
             muted: false,
             deafened: false,
             sharing: false,
+            audio_sharing: false,
             role: Default::default(),
             streams: vec![],
         }],
@@ -1486,6 +1487,7 @@ fn mixer_volumes_are_per_stream_saved_by_name_and_follow_the_voice_server() {
         muted: false,
         deafened: false,
         sharing: false,
+        audio_sharing: false,
         role: Default::default(),
         streams: vec![],
     };

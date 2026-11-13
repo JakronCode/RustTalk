@@ -14,8 +14,12 @@ pub struct ApplicationSource;
 pub enum AudioShareSource {
     #[default]
     System,
-    Application(ApplicationSource),
+    /// One app, or several mixed into one stream (at most `MAX_MIX`).
+    Applications(Vec<ApplicationSource>),
 }
+
+/// Most applications that can be mixed into one shared stream.
+pub const MAX_MIX: usize = 8;
 
 /// Square RGBA picture, always `ICON_PX` wide.
 #[derive(Clone, Debug)]

@@ -161,6 +161,40 @@ impl RustTalkApp {
         }
     }
 
+    /// Tells the voice server whether we share computer audio; sent once per change.
+    pub(super) fn sync_audio_flag(&mut self) {
+        let Some(session) = self.voice() else {
+            self.audio_flag_sent = false;
+            return;
+        };
+        let known = session.users.get(&session.my_id).is_some_and(|u| u.audio_sharing);
+        let wanted = self.screen_audio.is_some();
+        if known == wanted {
+            self.audio_flag_sent = wanted;
+        } else if self.audio_flag_sent != wanted {
+            if let Some(tx) = self.voice_tx() {
+                let _ = tx.send(Command::SetAudioSharing(wanted));
+                self.audio_flag_sent = wanted;
+            }
+        }
+    }
+
+    /// Shared audio of `user` is audible right now (lights up the music note).
+    pub(super) fn shared_audio_lit(&self, user: &UserInfo) -> bool {
+        if !user.audio_sharing || !self.viewing_voice() {
+            return false;
+        }
+        if user.id == self.srv.my_id {
+            return self.screen_audio.as_ref().is_some_and(|a| a.sending());
+        }
+        self.control
+            .stream_meters
+            .lock()
+            .unwrap()
+            .get(&StreamKind::Shared.key(user.id))
+            .is_some_and(|m| m.heard.elapsed() < Duration::from_millis(crate::audio::screen_audio::SOUND_LIT_MS))
+    }
+
     pub(super) fn sync_mic_preview(&mut self) {
         let preview = wants_preview(
             self.show_settings,
@@ -208,6 +242,7 @@ mod tests {
                 muted: false,
                 deafened: false,
                 sharing: false,
+                audio_sharing: false,
                 role: Default::default(),
                 streams: vec![],
             }],
@@ -312,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn audio_button_stops_active_sharing_without_reopening_picker() {
+    fn audio_button_opens_the_dialog_while_sharing_and_stop_lives_there() {
         use crate::audio::share_source::AudioShareSource;
         let devices = Devices::new();
         let mut app = app();
@@ -324,11 +359,43 @@ mod tests {
         assert!(app.audio_sharing_active());
         assert_eq!(devices.0.borrow().systems, 1);
         app.toggle_audio_sharing();
+        assert!(app.audio_picker.is_some(), "button opens the dialog instead of stopping");
+        assert!(app.audio_sharing_active());
+        assert_eq!(devices.0.borrow().systems, 1);
+        app.toggle_audio_sharing();
+        assert!(app.audio_picker.is_none() && app.audio_sharing_active());
+        app.stop_shared_audio();
         assert!(app.audio_picker.is_none());
         assert!(!app.audio_sharing_active());
         assert_eq!(devices.0.borrow().systems, 0);
         app.sync_shared_audio();
         assert_eq!(devices.0.borrow().systems, 0, "no automatic resume after stop");
+    }
+
+    #[test]
+    fn audio_sharing_status_is_sent_once_per_change_and_lights_up_on_sound() {
+        use crate::audio::share_source::AudioShareSource;
+        let _devices = Devices::new();
+        let mut app = app();
+        let mut commands = connect(&mut app);
+        join(&mut app, 2);
+        while commands.try_recv().is_some() {}
+        app.sync_audio_flag();
+        assert!(commands.try_recv().is_none(), "nothing shared, nothing sent");
+        app.start_audio_selection(AudioShareSource::System);
+        for _ in 0..3 {
+            app.sync_audio_flag();
+        }
+        assert!(matches!(commands.try_recv(), Some(Command::SetAudioSharing(true))));
+        assert!(commands.try_recv().is_none(), "sent once, not every frame");
+        event(&mut app, NetEvent::Message(ServerMessage::AudioSharingChanged { client_id: 1, sharing: true }));
+        app.sync_audio_flag();
+        assert!(commands.try_recv().is_none(), "server already agrees");
+        let me = app.srv.users[&1].clone();
+        assert!(me.audio_sharing && !app.shared_audio_lit(&me), "sharing but silent");
+        app.stop_shared_audio();
+        app.sync_audio_flag();
+        assert!(matches!(commands.try_recv(), Some(Command::SetAudioSharing(false))));
     }
 
     #[test]

@@ -314,6 +314,7 @@ mod tests {
             muted: false,
             deafened: false,
             sharing: false,
+            audio_sharing: false,
             role: Default::default(),
             streams: Vec::new(),
         }

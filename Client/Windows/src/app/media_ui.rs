@@ -805,7 +805,7 @@ impl RustTalkApp {
                     {
                         refresh = true;
                     }
-                    ui.checkbox(&mut self.config.share_screen_audio, format!("{}  Share audio", icons::regular::SPEAKER_HIGH))
+                    ui.checkbox(&mut self.config.share_screen_audio, format!("{}  Share audio", icons::regular::MUSIC_NOTES))
                         .on_hover_text("Also send what your computer plays (RustTalk voices are filtered out)");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui

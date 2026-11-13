@@ -37,11 +37,13 @@
 //! v15: Encrypted UDP ping/pong (`audio_packet::FLAG_CONTROL`, UDP header
 //!     version 3) with server-side packet counters for the connection stats;
 //!     replayed UDP packets are dropped.
+//! v16: Audio sharing status (`UserInfo.audio_sharing`, `SetAudioSharing`,
+//!     `AudioSharingChanged`): who shares computer audio in a voice channel.
 
 use serde::{Deserialize, Serialize};
 
 /// Aktuelle Protokollversion. Client und Server müssen übereinstimmen.
-pub const PROTOCOL_VERSION: u16 = 15;
+pub const PROTOCOL_VERSION: u16 = 16;
 
 /// Max. length of a poke message.
 pub const MAX_POKE_LEN: usize = 100;
@@ -240,6 +242,8 @@ pub struct UserInfo {
     pub deafened: bool,
     /// Teilt gerade Kamera/Bildschirm.
     pub sharing: bool,
+    /// Shares computer audio (alone or with a screen).
+    pub audio_sharing: bool,
     pub role: Role,
     /// Streams this user is sending right now (watch them with `Watch`).
     pub streams: Vec<VideoKind>,
@@ -434,6 +438,10 @@ pub enum ClientMessage {
     SetSharing {
         sharing: bool,
     },
+    /// Computer audio sharing on/off (voice channels only; the audio itself goes over UDP).
+    SetAudioSharing {
+        sharing: bool,
+    },
     /// Ein Video-Frame (JPEG) fuer die Mitglieder des eigenen Voice-Channels.
     VideoFrame {
         kind: VideoKind,
@@ -580,6 +588,10 @@ pub enum ServerMessage {
         client_id: u64,
         sharing: bool,
     },
+    AudioSharingChanged {
+        client_id: u64,
+        sharing: bool,
+    },
     /// The running streams of a user changed (to everyone; frames only to watchers).
     StreamsChanged {
         client_id: u64,
@@ -690,6 +702,7 @@ mod tests {
             ClientMessage::Watch { from_id: 3, kind: VideoKind::Camera, watching: true },
             ClientMessage::SetMuteState { muted: true, deafened: false },
             ClientMessage::SetSharing { sharing: true },
+            ClientMessage::SetAudioSharing { sharing: true },
             ClientMessage::VideoFrame { kind: VideoKind::Camera, data: vec![1, 2, 3] },
             ClientMessage::StopVideo { kind: VideoKind::Screen },
             ClientMessage::UpdateServerSettings { settings: ServerSettings { icon: Some(vec![1, 2]), ..Default::default() } },
@@ -713,6 +726,7 @@ mod tests {
             muted: false,
             deafened: false,
             sharing: true,
+            audio_sharing: true,
             streams: vec![VideoKind::Screen],
         };
         let channel = ChannelInfo {
@@ -807,6 +821,7 @@ mod tests {
             },
             ServerMessage::MuteStateChanged { client_id: 1, muted: true, deafened: true },
             ServerMessage::SharingChanged { client_id: 1, sharing: true },
+            ServerMessage::AudioSharingChanged { client_id: 1, sharing: true },
             ServerMessage::StreamsChanged { client_id: 1, streams: vec![VideoKind::Camera, VideoKind::Screen] },
             ServerMessage::VideoFrame { from_id: 1, kind: VideoKind::Screen, data: vec![9, 8, 7] },
             ServerMessage::VideoStopped { from_id: 1, kind: VideoKind::Camera },

@@ -1139,7 +1139,7 @@ mod tests {
             for (id, name) in [(2, "Anna"), (3, "Anton")] {
                 app.srv.users.insert(id, UserInfo {
                     id, name: name.into(), channel_id: 1, muted: false,
-                    deafened: false, sharing: false, role: Default::default(), streams: vec![],
+                    deafened: false, sharing: false, audio_sharing: false, role: Default::default(), streams: vec![],
                 });
             }
             app.chat_input = "@an".into();
