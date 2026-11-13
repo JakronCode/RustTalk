@@ -674,15 +674,17 @@ impl RustTalkApp {
     // ----- Notifications ---------------------------------------------------
 
     fn section_desktop(&mut self, ui: &mut egui::Ui) {
-        setting_row(
-            ui,
-            "Flash taskbar",
-            Some("Highlight the taskbar icon on new messages while RustTalk is in the background"),
-            false,
-            |ui| {
-                toggle(ui, &mut self.config.flash_taskbar);
-            },
-        );
+        if crate::notify::TASKBAR_ATTENTION {
+            setting_row(
+                ui,
+                "Flash taskbar",
+                Some("Highlight the taskbar icon on new messages while RustTalk is in the background"),
+                false,
+                |ui| {
+                    toggle(ui, &mut self.config.flash_taskbar);
+                },
+            );
+        }
         setting_row(ui, "Desktop notifications", Some("Desktop pop-up for new messages while RustTalk is in the background (click opens the channel)"), false, |ui| {
             toggle(ui, &mut self.config.desktop_notifications);
         });

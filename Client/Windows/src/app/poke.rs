@@ -48,7 +48,7 @@ impl RustTalkApp {
         let from = self.server_text(session, from);
         self.notify(Sound::Poke);
         if !self.window_focused() {
-            self.ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
+            crate::notify::request_attention(&self.ctx, egui::UserAttentionType::Critical);
             if self.config.desktop_notifications {
                 let body = if message.is_empty() { "wants your attention".to_string() } else { message.clone() };
                 let ctx = self.ctx.clone();
