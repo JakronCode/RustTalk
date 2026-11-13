@@ -177,6 +177,20 @@ pub struct ClientConfig {
     /// Stage: show only people with a camera or screen share (locally).
     #[serde(default)]
     pub stage_hide_idle: bool,
+    /// Presenter layout: corner of the camera over the screen (dragged, locally).
+    #[serde(default)]
+    pub presenter_cam_corner: CamCorner,
+}
+
+/// Corner of the presented screen where the presenter's camera sits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CamCorner {
+    #[default]
+    BottomLeft,
+    BottomRight,
+    TopLeft,
+    TopRight,
 }
 
 /// Local layout of the voice stage. Only the mode is saved: who is focused
@@ -287,6 +301,7 @@ impl Default for ClientConfig {
             stage_mode: StageMode::Grid,
             remove_background: false,
             stage_hide_idle: false,
+            presenter_cam_corner: CamCorner::BottomLeft,
         }
     }
 }
@@ -436,6 +451,7 @@ mod tests {
             stage_mode: StageMode::Presenter,
             remove_background: true,
             stage_hide_idle: true,
+            presenter_cam_corner: CamCorner::TopRight,
         };
         let text = toml::to_string_pretty(&cfg).unwrap();
         let back: ClientConfig = toml::from_str(&text).unwrap();
@@ -456,6 +472,7 @@ mod tests {
         assert_eq!(back.stage_mode, StageMode::Presenter);
         assert!(back.remove_background);
         assert!(back.stage_hide_idle);
+        assert_eq!(back.presenter_cam_corner, CamCorner::TopRight);
         assert!(!back.animate_gifs);
         assert!(!back.flash_taskbar && !back.sound_leave && back.sound_join);
         assert!(!back.announce_names);

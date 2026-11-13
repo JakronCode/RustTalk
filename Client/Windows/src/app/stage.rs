@@ -6,7 +6,7 @@ use super::media_ui::kind_icon;
 use super::theme;
 use super::views::{grid_rects, member_card, name_pill, stage_grid, video_tile, watch_tile};
 use super::*;
-use crate::config::StageMode;
+use crate::config::{CamCorner, StageMode};
 
 /// One stage tile: a user's screen, camera, or (`None`) their avatar card.
 pub(super) type TileKey = (u64, Option<VideoKind>);
@@ -161,8 +161,8 @@ pub(super) fn focus_rects(
     (main, grid_rects(n_others, cols, tile, gap, strip))
 }
 
-/// Camera overlay in the bottom left of the presented picture.
-pub(super) fn overlay_rect(content: egui::Rect, cam_aspect: f32) -> egui::Rect {
+/// Camera overlay in a corner of the presented picture.
+pub(super) fn overlay_rect(content: egui::Rect, cam_aspect: f32, corner: CamCorner) -> egui::Rect {
     let aspect = if cam_aspect.is_finite() && cam_aspect > 0.2 {
         cam_aspect
     } else {
@@ -174,8 +174,26 @@ pub(super) fn overlay_rect(content: egui::Rect, cam_aspect: f32) -> egui::Rect {
     }
     let margin = (content.width() * 0.02).clamp(6.0, 16.0);
     let size = egui::vec2(w, w / aspect);
-    let top = (content.bottom() - margin - size.y).max(content.top());
-    egui::Rect::from_min_size(egui::pos2(content.left() + margin, top), size)
+    let left = match corner {
+        CamCorner::BottomLeft | CamCorner::TopLeft => content.left() + margin,
+        CamCorner::BottomRight | CamCorner::TopRight => (content.right() - margin - size.x).max(content.left()),
+    };
+    let top = match corner {
+        CamCorner::TopLeft | CamCorner::TopRight => content.top() + margin,
+        CamCorner::BottomLeft | CamCorner::BottomRight => (content.bottom() - margin - size.y).max(content.top()),
+    };
+    egui::Rect::from_min_size(egui::pos2(left, top), size)
+}
+
+/// The corner of `content` closest to the middle of a dragged camera.
+pub(super) fn nearest_corner(content: egui::Rect, cam: egui::Rect) -> CamCorner {
+    let c = cam.center();
+    match (c.x < content.center().x, c.y < content.center().y) {
+        (true, true) => CamCorner::TopLeft,
+        (false, true) => CamCorner::TopRight,
+        (true, false) => CamCorner::BottomLeft,
+        (false, false) => CamCorner::BottomRight,
+    }
 }
 
 fn tile_label(user: &UserInfo, kind: Option<VideoKind>) -> String {
@@ -624,11 +642,7 @@ impl RustTalkApp {
             Some(kind) if !me && !self.watching.contains(&(user.id, kind)) => {
                 let resp = watch_tile(ui, rect, user, kind, cam_speaking);
                 if resp.clicked() {
-                    if main {
-                        self.watch(user.id, kind);
-                    } else {
-                        *focus_click = Some((user.id, Some(kind)));
-                    }
+                    self.watch(user.id, kind);
                 }
                 resp
             }
@@ -648,16 +662,12 @@ impl RustTalkApp {
                     show_name,
                 );
                 if resp.clicked() {
-                    if main {
-                        *open_fs = Some((user.id, kind));
-                    } else {
-                        *focus_click = Some((user.id, Some(kind)));
-                    }
+                    *open_fs = Some((user.id, kind));
                 }
                 // Watching someone else: "stop watching" in the top right corner.
                 if !me && (resp.hovered() || ui.rect_contains_pointer(rect)) {
                     let b = egui::Rect::from_center_size(
-                        rect.right_top() + egui::vec2(-22.0, 22.0),
+                        rect.right_top() + egui::vec2(-58.0, 22.0),
                         egui::vec2(30.0, 30.0),
                     );
                     let stop = ui
@@ -678,16 +688,29 @@ impl RustTalkApp {
                 }
                 resp
             }
-            None => {
-                let resp = member_card(ui, rect, user, speaking, me);
-                if resp.clicked() && !main {
-                    *focus_click = Some((user.id, None));
-                }
-                resp
-            }
+            None => member_card(ui, rect, user, speaking, me),
         };
+        // Hovering a small tile: a button to focus it (the tile itself keeps its own click).
         if !main && ui.rect_contains_pointer(rect) {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            let b = egui::Rect::from_center_size(
+                rect.right_top() + egui::vec2(-22.0, 22.0),
+                egui::vec2(30.0, 30.0),
+            );
+            let focus = ui
+                .put(
+                    b,
+                    egui::Button::new(
+                        egui::RichText::new(StageMode::Focus.icon())
+                            .size(16.0)
+                            .color(egui::Color32::WHITE),
+                    )
+                    .fill(egui::Color32::from_black_alpha(160))
+                    .corner_radius(15.0),
+                )
+                .on_hover_text("Focus on this");
+            if focus.clicked() {
+                *focus_click = Some((user.id, kind));
+            }
         }
         if user.audio_sharing && kind != Some(VideoKind::Screen) {
             let lit = self.shared_audio_lit(user);
@@ -731,12 +754,30 @@ impl RustTalkApp {
             .as_ref()
             .map(|t| t.size_vec2())
             .map_or(ASPECT, |s| s.x / s.y);
-        let rect = overlay_rect(content, aspect);
+        let base = overlay_rect(content, aspect, self.config.presenter_cam_corner);
+        let moved = |offset: egui::Vec2| {
+            let r = base.translate(offset);
+            let dx = (content.left() - r.left()).max(0.0) - (r.right() - content.right()).max(0.0);
+            let dy = (content.top() - r.top()).max(0.0) - (r.bottom() - content.bottom()).max(0.0);
+            r.translate(egui::vec2(dx, dy))
+        };
         let resp = ui.interact(
-            rect,
+            moved(self.cam_drag),
             ui.id().with(("presenter_cam", user.id)),
-            egui::Sense::click(),
+            egui::Sense::click_and_drag(),
         );
+        if resp.dragged() {
+            self.cam_drag += resp.drag_delta();
+        }
+        let rect = moved(self.cam_drag);
+        if resp.drag_stopped() {
+            // Snap to the closest corner.
+            self.config.presenter_cam_corner = nearest_corner(content, rect);
+            self.config.save();
+            self.cam_drag = egui::Vec2::ZERO;
+        } else if !resp.dragged() {
+            self.cam_drag = egui::Vec2::ZERO;
+        }
         // Cut out: only the person on top of the screen, no frame around them.
         let cut = watched && self.config.remove_background;
         if cut {
@@ -789,9 +830,10 @@ impl RustTalkApp {
                 egui::StrokeKind::Inside,
             );
         }
-        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        let cursor = if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab };
+        let resp = resp.on_hover_cursor(cursor);
         if watched {
-            if resp.on_hover_text("Click for fullscreen").clicked() {
+            if resp.on_hover_text("Click for fullscreen, drag to move").clicked() {
                 *open_fs = Some(key);
             }
         } else if resp.on_hover_text("Click to watch the camera").clicked() {
@@ -981,8 +1023,63 @@ mod tests {
             area.right_bottom() - egui::vec2(160.0, 50.0),
             egui::vec2(160.0, 50.0)
         )), "tiles stay clear of the buttons");
+        // The tile itself does not focus ...
         click_at(&ctx, &mut app, &tiles, first.center(), &mut t);
+        assert_eq!(app.config.stage_mode, StageMode::Grid);
+        // ... the button that appears on hover does.
+        click_at(&ctx, &mut app, &tiles, first.right_top() + egui::vec2(-22.0, 22.0), &mut t);
         assert_eq!(app.config.stage_mode, StageMode::Focus);
+    }
+
+    #[test]
+    fn dragging_the_presenter_camera_snaps_it_to_the_closest_corner() {
+        let ctx = egui::Context::default();
+        let mut app = RustTalkApp::with_config(ctx.clone(), ClientConfig::default(), false);
+        let me = user(app.srv.my_id, "me");
+        let content = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(1000.0, 562.0));
+        let mut t = 0.0;
+        let mut frame = |app: &mut RustTalkApp, events: Vec<egui::Event>| {
+            t += 0.1;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 700.0))),
+                    time: Some(t),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        app.presenter_overlay(ui, content, &me, false, &mut None);
+                    });
+                },
+            );
+        };
+        assert_eq!(app.config.presenter_cam_corner, CamCorner::BottomLeft);
+        frame(&mut app, vec![]);
+        let start = overlay_rect(content, ASPECT, CamCorner::BottomLeft).center();
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(&mut app, vec![egui::Event::PointerMoved(start)]);
+        frame(&mut app, vec![button(start, true)]);
+        let target = egui::pos2(content.right() - 150.0, content.top() + 120.0);
+        for step in 1..=5 {
+            let pos = start + (target - start) * (step as f32 / 5.0);
+            frame(&mut app, vec![egui::Event::PointerMoved(pos)]);
+        }
+        assert_eq!(app.config.presenter_cam_corner, CamCorner::BottomLeft, "only snaps on release");
+        frame(&mut app, vec![button(target, false)]);
+        assert_eq!(app.config.presenter_cam_corner, CamCorner::TopRight);
+        assert_eq!(app.cam_drag, egui::Vec2::ZERO);
+        // A plain click (no movement) leaves the corner alone.
+        let now = overlay_rect(content, ASPECT, CamCorner::TopRight).center();
+        frame(&mut app, vec![egui::Event::PointerMoved(now)]);
+        frame(&mut app, vec![button(now, true)]);
+        frame(&mut app, vec![button(now, false)]);
+        assert_eq!(app.config.presenter_cam_corner, CamCorner::TopRight);
     }
 
     #[test]
@@ -1066,16 +1163,26 @@ mod tests {
     #[test]
     fn overlay_is_a_quarter_in_the_bottom_left() {
         let content = area(1600.0, 900.0);
-        let r = overlay_rect(content, ASPECT);
+        let r = overlay_rect(content, ASPECT, CamCorner::BottomLeft);
         assert!(inside(content, r));
         assert!((r.width() - 400.0).abs() < 0.5);
         assert!(r.left() - content.left() < 20.0 && content.bottom() - r.bottom() < 20.0);
         // Portrait camera on a flat strip: limited by height, still inside.
         let flat = area(1600.0, 300.0);
-        let r = overlay_rect(flat, 9.0 / 16.0);
+        let r = overlay_rect(flat, 9.0 / 16.0, CamCorner::BottomLeft);
         assert!(inside(flat, r) && r.height() <= 300.0 * 0.45 + 0.5);
         // Broken sizes fall back to 16:9.
-        assert!(overlay_rect(content, f32::NAN).width() > 0.0);
+        assert!(overlay_rect(content, f32::NAN, CamCorner::BottomLeft).width() > 0.0);
+        for corner in [CamCorner::BottomLeft, CamCorner::BottomRight, CamCorner::TopLeft, CamCorner::TopRight] {
+            let r = overlay_rect(content, ASPECT, corner);
+            assert!(inside(content, r), "{corner:?}");
+            assert_eq!(nearest_corner(content, r), corner, "a camera in a corner snaps to that corner");
+        }
+        let near_top_right = egui::Rect::from_center_size(
+            egui::pos2(content.right() - 100.0, content.top() + 100.0),
+            egui::vec2(400.0, 225.0),
+        );
+        assert_eq!(nearest_corner(content, near_top_right), CamCorner::TopRight);
     }
 
     #[test]
