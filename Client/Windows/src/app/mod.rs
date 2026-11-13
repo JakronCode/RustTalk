@@ -237,6 +237,8 @@ pub struct RustTalkApp {
     voice_generation: u64,
     /// Voice channel we asked for and the server has not confirmed yet.
     voice_pending: Option<u64>,
+    /// A matching explicit join was acknowledged on this connection.
+    voice_confirmed: bool,
     /// Session whose UDP socket the running audio engine (`audio`) uses.
     audio_owner: Option<SessionId>,
     /// Connection (session, attempt) whose replay window is in `control.link`.
@@ -442,6 +444,7 @@ impl RustTalkApp {
             voice_owner: None,
             voice_generation: 0,
             voice_pending: None,
+            voice_confirmed: false,
             audio_owner: None,
             link_conn: None,
             startup_pending: false,
@@ -849,6 +852,7 @@ impl RustTalkApp {
     fn handle_server_message(&mut self, id: SessionId, msg: ServerMessage) {
         let viewed = self.srv.id == id;
         let voice = self.voice_authorized(id);
+        let voice_requested = self.voice_connection_matches(id);
         let pending = self.voice_pending;
         let Some(s) = self.session(id) else { return };
         if let Err(e) = limits::message(s, &msg) {
@@ -902,7 +906,7 @@ impl RustTalkApp {
             ServerMessage::ChannelDeleted { channel_id } => {
                 // Our voice channel (or the one we asked for) is gone: so is the
                 // voice join. A later move into another channel needs a new one.
-                let ends_voice = voice && (s.my_channel() == Some(channel_id) || pending == Some(channel_id));
+                let ends_voice = voice_requested && (s.my_channel() == Some(channel_id) || pending == Some(channel_id));
                 let was_category = s.channels.get(&channel_id).is_some_and(|c| c.kind.is_group());
                 s.channels.remove(&channel_id);
                 if was_category {
@@ -1130,9 +1134,12 @@ impl RustTalkApp {
         if me && into_voice {
             // Only our own voice join lets a server put us into voice; once
             // there, its moves between voice channels keep it (moderators, AFK).
-            let requested = self.voice_pending == Some(channel_id) || previous_voice.is_some();
-            if voice && requested {
+            let requested = self.voice_pending == Some(channel_id)
+                || (voice && previous_voice.is_some());
+            if self.voice_connection_matches(id) && requested {
                 self.voice_pending = None;
+                self.voice_confirmed = true;
+                voice = true;
             } else {
                 // Never opens the microphone, also not on the viewed server.
                 self.revoke_voice(id);

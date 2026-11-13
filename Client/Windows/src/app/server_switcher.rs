@@ -93,6 +93,11 @@ impl RustTalkApp {
         let Some(prompt) = self.remember_prompt.clone() else {
             return;
         };
+        if prompt.from_form && net::normalize_addr(self.config.server_address.trim()) != prompt.key
+        {
+            self.remember_prompt = None;
+            return;
+        }
         let Some(bm) = self.bookmark_for(&prompt.key).cloned() else {
             self.remember_prompt = None; // removed meanwhile
             return;
@@ -131,6 +136,9 @@ impl RustTalkApp {
         let Some(remember) = answer else { return };
         self.remember_prompt = None;
         if prompt.from_form {
+            if net::normalize_addr(self.config.server_address.trim()) != prompt.key {
+                return;
+            }
             self.start_connect(remember);
         } else {
             self.connect_server(&prompt.key, remember);

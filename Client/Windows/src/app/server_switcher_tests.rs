@@ -1,5 +1,5 @@
 use super::super::servers::tests::{
-    app, bookmark, chat, closed_port, drain, login, moved, welcome,
+    app, bookmark, chat, closed_port, closed_ports, drain, login, moved, welcome,
 };
 use super::*;
 use crate::audio::test_devices::Devices;
@@ -248,12 +248,43 @@ fn affirmative_answer_enrolls_after_login_and_cancel_does_nothing() {
 }
 
 #[test]
+fn remember_consent_is_invalidated_by_notification_navigation_or_form_changes() {
+    let _devices = Devices::new();
+    let mut app = app();
+    let (addresses, _held) = closed_ports(2);
+    app.config.bookmarks = addresses.iter().map(|a| bookmark(a)).collect();
+    let a = app.ensure_session(&addresses[0]).unwrap();
+    let b = app.ensure_session(&addresses[1]).unwrap();
+    app.view_session(a);
+    app.request_connect();
+    let stale = app.remember_prompt.clone().unwrap();
+    let mut t = 0.0;
+    let out = settle(&mut app, &mut t);
+    let confirm = pos_of(&out, "Reconnect on start");
+    app.toast_tx.send((b, 1)).unwrap();
+    let ctx = app.ctx.clone();
+    app.poll_background(&ctx);
+    assert_eq!(app.srv.id, b);
+    assert!(
+        app.remember_prompt.is_none(),
+        "notification changed the server"
+    );
+    // Even a stale form prompt must revalidate the address before using its answer.
+    app.remember_prompt = Some(stale);
+    click(&mut app, confirm, &mut t);
+    assert!(app.remember_prompt.is_none());
+    assert!(app.session(b).unwrap().cmd_tx.is_none());
+    assert!(app.config.auto_connect.is_empty());
+}
+
+#[test]
 fn form_route_asks_for_saved_servers_only() {
     let _devices = Devices::new();
     let mut app = app();
-    let saved = closed_port();
+    let (addresses, _held) = closed_ports(2);
+    let saved = addresses[0].clone();
     app.config.bookmarks = vec![bookmark(&saved)];
-    app.config.server_address = closed_port();
+    app.config.server_address = addresses[1].clone();
     app.request_connect();
     assert!(
         app.remember_prompt.is_none() && app.srv.cmd_tx.is_some(),

@@ -243,6 +243,7 @@ impl RustTalkApp {
     /// messages or users: closed when the view or the connection changes, so
     /// they can never act on another server.
     pub(super) fn reset_view_ui(&mut self) {
+        self.remember_prompt = None;
         self.channel_settings = None;
         self.server_settings_dialog = None;
         self.poke_dialog = None;
@@ -685,8 +686,13 @@ impl RustTalkApp {
             .filter(|s| s.my_voice_channel().is_some())
     }
 
-    /// We joined voice on this connection of `id` ourselves (maybe not confirmed yet).
+    /// An explicit join was confirmed on this connection.
     pub(super) fn voice_authorized(&self, id: SessionId) -> bool {
+        self.voice_confirmed && self.voice_connection_matches(id)
+    }
+
+    /// The explicit voice request belongs to this connection (possibly pending).
+    pub(super) fn voice_connection_matches(&self, id: SessionId) -> bool {
         self.voice_owner == Some(id)
             && self
                 .session(id)
@@ -760,6 +766,7 @@ impl RustTalkApp {
         }
         self.voice_owner = id;
         self.voice_pending = None;
+        self.voice_confirmed = false;
         self.voice_generation = generation;
         self.talking.lock().unwrap().clear();
         self.local_muted.lock().unwrap().clear();

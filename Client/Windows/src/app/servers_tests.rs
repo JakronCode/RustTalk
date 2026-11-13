@@ -157,7 +157,7 @@ pub(in crate::app) fn closed_port() -> String {
 /// Distinct local addresses nothing listens on: connection attempts are
 /// refused at once. The ports stay bound (not listening) while the
 /// returned sockets live, so no other test can open a server on one.
-fn closed_ports(n: usize) -> (Vec<String>, Vec<tokio::net::TcpSocket>) {
+pub(in crate::app) fn closed_ports(n: usize) -> (Vec<String>, Vec<tokio::net::TcpSocket>) {
     let held: Vec<tokio::net::TcpSocket> = (0..n)
         .map(|_| {
             let s = tokio::net::TcpSocket::new_v4().unwrap();
@@ -700,6 +700,60 @@ fn unsolicited_moves_never_open_the_microphone_and_cannot_make_us_flood() {
     join_voice(&mut app, VOICE);
     assert_eq!(app.voice_owner, Some(a));
     assert_eq!(devices.0.borrow().inputs, 1);
+}
+
+#[test]
+fn mirrored_voice_membership_cannot_confirm_a_pending_join() {
+    for in_welcome in [false, true] {
+        let devices = Devices::new();
+        let mut app = app();
+        let (a, _ra) = login(&mut app, "a.invalid:7331", 1);
+        app.view_session(a);
+        if in_welcome {
+            let mut ev = welcome(1);
+            if let NetEvent::Connected { users, .. } = &mut ev {
+                users.iter_mut().find(|u| u.id == 1).unwrap().channel_id = VOICE;
+            }
+            app.handle_event(a, ev);
+        } else {
+            moved(&mut app, a, 1, VOICE);
+        }
+        message(
+            &mut app,
+            a,
+            ServerMessage::ChannelCreated {
+                channel: channel(4, ChannelKind::Voice, "requested".into()),
+            },
+        );
+        app.join_channel(4);
+        assert!(app.voice().is_none());
+        message(
+            &mut app,
+            a,
+            ServerMessage::ChannelDeleted { channel_id: TEXT },
+        );
+        let (_b, _rb) = login(&mut app, "b.invalid:7331", 5);
+        app.sync_voice_audio();
+        assert_eq!(
+            devices.0.borrow().input_starts,
+            0,
+            "no capture before matching acknowledgement"
+        );
+        moved(&mut app, a, 1, VOICE);
+        assert_eq!(
+            app.voice_owner, None,
+            "old mirrored membership cannot confirm a different join"
+        );
+        assert_eq!(devices.0.borrow().input_starts, 0);
+        app.view_session(a);
+        app.join_channel(4);
+        moved(&mut app, a, 1, 4);
+        assert_eq!(
+            devices.0.borrow().input_starts,
+            1,
+            "matching explicit acknowledgement permits capture"
+        );
+    }
 }
 
 #[test]
