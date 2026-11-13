@@ -93,6 +93,7 @@ fn shortcode_len(rest: &str) -> Option<usize> {
 pub(super) fn replace_shortcodes(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut fenced = false;
+    let mut budget = 16 * 1024 * 8;
     for line in text.split_inclusive('\n') {
         if fenced {
             fenced = line.trim_end() != "```";
@@ -104,41 +105,81 @@ pub(super) fn replace_shortcodes(text: &str) -> String {
             out.push_str(line);
             continue;
         }
-        let mut pos = 0;
-        while let Some(c) = line[pos..].chars().next() {
-            let rest = &line[pos..];
-            let mut take = c.len_utf8();
-            match c {
-                '\\' => {
-                    if let Some(next) = rest[1..].chars().next().filter(|n| "*_~`\\".contains(*n)) {
-                        take += next.len_utf8();
-                    }
-                }
-                '`' => {
-                    if let Some(end) = rest[1..]
-                        .match_indices('`')
-                        .map(|(i, _)| i)
-                        .find(|&i| i > 0)
-                    {
-                        take = end + 2;
-                    }
-                }
-                ':' => {
-                    if let Some((len, e)) = shortcode_len(&rest[1..])
-                        .and_then(|len| Some((len, lookup(&rest[1..=len])?)))
-                    {
-                        out.push_str(e.as_str());
-                        pos += len + 2;
-                        continue;
-                    }
-                }
-                _ => {}
-            }
-            out.push_str(&rest[..take]);
-            pos += take;
-        }
+        let body = line.trim_end_matches(['\r', '\n']);
+        let body = ["### ", "## ", "# "]
+            .iter()
+            .find_map(|m| body.strip_prefix(m))
+            .unwrap_or(body);
+        let body = ["> ", "- ", "* ", "+ "]
+            .iter()
+            .find_map(|m| body.strip_prefix(m))
+            .unwrap_or(body);
+        let start = body.as_ptr() as usize - line.as_ptr() as usize;
+        out.push_str(&line[..start]);
+        replace_inline(body, 0, &mut budget, &mut out);
+        out.push_str(&line[start + body.len()..]);
     }
     out
+}
+
+// Match markdown::inline's delimiter precedence, recursion and work budget.
+fn replace_inline(text: &str, depth: usize, budget: &mut usize, out: &mut String) {
+    if depth == 8 || *budget < text.len() {
+        out.push_str(text);
+        return;
+    }
+    *budget -= text.len();
+    let mut pos = 0;
+    while pos < text.len() {
+        let rest = &text[pos..];
+        if let Some(escaped) = rest.strip_prefix('\\').and_then(|s| s.chars().next()) {
+            if "*_~`\\".contains(escaped) {
+                let take = 1 + escaped.len_utf8();
+                out.push_str(&rest[..take]);
+                pos += take;
+                continue;
+            }
+        }
+        if let Some(m) = ["`", "**", "__", "~~", "*", "_"]
+            .into_iter()
+            .find(|m| rest.starts_with(m))
+        {
+            let tail = &rest[m.len()..];
+            if *budget >= tail.len() {
+                *budget -= tail.len();
+                if let Some(end) = tail.match_indices(m).find_map(|(end, _)| {
+                    let slashes = tail[..end]
+                        .bytes()
+                        .rev()
+                        .take_while(|&b| b == b'\\')
+                        .count();
+                    (end > 0 && (m == "`" || slashes % 2 == 0)).then_some(end)
+                }) {
+                    out.push_str(m);
+                    if m == "`" {
+                        out.push_str(&tail[..end]);
+                    } else {
+                        replace_inline(&tail[..end], depth + 1, budget, out);
+                    }
+                    out.push_str(m);
+                    pos += m.len() * 2 + end;
+                    continue;
+                }
+            }
+        }
+        if let Some(candidate) = rest.strip_prefix(':') {
+            if let Some((len, e)) =
+                shortcode_len(candidate).and_then(|len| Some((len, lookup(&candidate[..len])?)))
+            {
+                out.push_str(e.as_str());
+                pos += len + 2;
+                continue;
+            }
+        }
+        let take = rest.chars().next().map_or(1, char::len_utf8);
+        out.push_str(&rest[..take]);
+        pos += take;
+    }
 }
 
 /// Inserts `emoji` over the selection (or at the end); returns the new cursor
@@ -290,7 +331,6 @@ impl RustTalkApp {
                         if std::mem::take(&mut self.emoji.focus) {
                             resp.request_focus();
                         }
-                        let query = self.emoji.query.trim().trim_matches(':').to_lowercase();
                         ui.horizontal(|ui| {
                             for (g, _) in catalog() {
                                 let (icon, label) = group_label(*g);
@@ -306,6 +346,7 @@ impl RustTalkApp {
                                 }
                             }
                         });
+                        let query = self.emoji.query.trim().trim_matches(':').to_lowercase();
                         let jump = self.emoji.jump.take();
                         let results: Vec<(&str, Vec<&'static Emoji>)> = if query.is_empty() {
                             catalog()
@@ -475,6 +516,21 @@ mod tests {
             replace_shortcodes(" ```\n:rofl:"),
             " ```\n🤣",
             "fences start at column zero"
+        );
+    }
+
+    #[test]
+    fn emphasis_boundaries_preserve_rendered_code() {
+        for input in [
+            "** `x ** `:rofl:`",
+            "text * `x * `:rofl:`",
+            "* ** `x ** `:rofl:`",
+        ] {
+            assert_eq!(replace_shortcodes(input), input);
+        }
+        assert_eq!(
+            replace_shortcodes("**:rofl:** `:clown:`"),
+            "**🤣** `:clown:`"
         );
     }
 
