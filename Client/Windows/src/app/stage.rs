@@ -256,7 +256,7 @@ impl RustTalkApp {
     /// for Focus / Presenter, a menu with who is shown.
     pub(super) fn stage_controls(&mut self, ui: &mut egui::Ui, area: egui::Rect, ch_id: u64) {
         let mode = self.config.stage_mode;
-        let count = if mode == StageMode::Grid { 3.0 } else { 4.0 };
+        let count = if mode == StageMode::Grid { 4.0 } else { 5.0 };
         let size = egui::vec2(count * 34.0 + 8.0, 40.0);
         let pill = egui::Rect::from_min_size(
             area.right_bottom() - size - egui::vec2(10.0, 10.0),
@@ -266,6 +266,7 @@ impl RustTalkApp {
             .rect_filled(pill, 10.0, egui::Color32::from_black_alpha(170));
         let mut picked = None;
         let mut target = None;
+        let mut toggle_idle = false;
         ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(pill.shrink(4.0))
@@ -291,8 +292,22 @@ impl RustTalkApp {
                         &format!("Who {} shows (only on your screen)", mode.label()),
                     ));
                 }
+                let hiding = self.config.stage_hide_idle;
+                let state = if hiding { theme::IconState::Active } else { theme::IconState::Normal };
+                let tip = if hiding {
+                    "Showing only camera and screen shares: click to show everyone (only on your screen)"
+                } else {
+                    "Show only camera and screen shares, hide people without video (only on your screen)"
+                };
+                if theme::icon_button(ui, icons::regular::VIDEO_CAMERA, state, tip).clicked() {
+                    toggle_idle = true;
+                }
             },
         );
+        if toggle_idle {
+            self.config.stage_hide_idle = !self.config.stage_hide_idle;
+            self.config.save();
+        }
         if let Some(m) = picked {
             if m != mode {
                 self.config.stage_mode = m;
@@ -440,11 +455,32 @@ impl RustTalkApp {
     ) {
         // The layout buttons get their own band under the tiles.
         let full = area;
-        let area = if tiles.len() > 1 {
+        let all = tiles;
+        let visible: Vec<(UserInfo, Option<VideoKind>)> = if self.config.stage_hide_idle {
+            all.iter().filter(|(_, kind)| kind.is_some()).cloned().collect()
+        } else {
+            all.to_vec()
+        };
+        let tiles = &visible[..];
+        let controls = all.len() > 1;
+        let area = if controls {
             egui::Rect::from_min_max(area.min, egui::pos2(area.max.x, (area.max.y - CONTROLS_BAND).max(area.min.y)))
         } else {
             area
         };
+        if tiles.is_empty() {
+            let p = ui.painter();
+            let galley = p.layout_no_wrap(
+                "Nobody has a camera or screen share on".into(),
+                egui::FontId::proportional(14.0),
+                theme::MUTED,
+            );
+            p.galley(area.center() - galley.size() / 2.0, galley, theme::MUTED);
+            if controls {
+                self.stage_controls(ui, full, all.first().map_or(0, |(u, _)| u.channel_id));
+            }
+            return;
+        }
         let keys: Vec<TileKey> = tiles.iter().map(|(u, k)| (u.id, *k)).collect();
         let mut placed: Vec<(usize, egui::Rect)> = Vec::new();
         let mut overlay: Option<(egui::Rect, usize)> = None;
@@ -547,8 +583,8 @@ impl RustTalkApp {
         if let Some(key) = open_fs {
             self.enter_fullscreen(key);
         }
-        if tiles.len() > 1 {
-            self.stage_controls(ui, full, tiles.first().map_or(0, |(u, _)| u.channel_id));
+        if controls {
+            self.stage_controls(ui, full, all.first().map_or(0, |(u, _)| u.channel_id));
         }
     }
 
@@ -887,14 +923,14 @@ mod tests {
             let pill = egui::Rect::from_min_size(area.right_bottom() - size - egui::vec2(10.0, 10.0), size);
             egui::pos2(pill.left() + 4.0 + 16.0 + 34.0 * n, pill.center().y)
         };
-        click_at(&ctx, &mut app, &tiles, button(2.0, 3.0), &mut t);
+        click_at(&ctx, &mut app, &tiles, button(2.0, 4.0), &mut t);
         assert_eq!(app.config.stage_mode, StageMode::Presenter);
-        click_at(&ctx, &mut app, &tiles, button(0.0, 4.0), &mut t);
+        click_at(&ctx, &mut app, &tiles, button(0.0, 5.0), &mut t);
         assert_eq!(app.config.stage_mode, StageMode::Grid);
-        click_at(&ctx, &mut app, &tiles, button(1.0, 3.0), &mut t);
+        click_at(&ctx, &mut app, &tiles, button(1.0, 4.0), &mut t);
         assert_eq!(app.config.stage_mode, StageMode::Focus);
         // Back in Grid, clicking a person tile focuses it.
-        click_at(&ctx, &mut app, &tiles, button(0.0, 4.0), &mut t);
+        click_at(&ctx, &mut app, &tiles, button(0.0, 5.0), &mut t);
         assert_eq!(app.config.stage_mode, StageMode::Grid);
         let tile_area = egui::Rect::from_min_max(area.min, egui::pos2(area.max.x, area.max.y - CONTROLS_BAND));
         let (cols, tile) = stage_grid(3, tile_area.size(), GAP);
@@ -905,6 +941,30 @@ mod tests {
         )), "tiles stay clear of the buttons");
         click_at(&ctx, &mut app, &tiles, first.center(), &mut t);
         assert_eq!(app.config.stage_mode, StageMode::Focus);
+    }
+
+    #[test]
+    fn hiding_people_without_video_keeps_the_button_to_bring_them_back() {
+        let ctx = egui::Context::default();
+        let mut app = RustTalkApp::with_config(ctx.clone(), ClientConfig::default(), false);
+        let tiles: Vec<_> = (1..=3).map(|i| (user(i, &format!("user{i}")), None)).collect();
+        app.config.stage_mode = StageMode::Grid;
+        let mut t = 0.0;
+        let area = run_stage(&ctx, &mut app, &tiles, t, vec![]);
+        let toggle = {
+            let size = egui::vec2(4.0 * 34.0 + 8.0, 40.0);
+            let pill = egui::Rect::from_min_size(area.right_bottom() - size - egui::vec2(10.0, 10.0), size);
+            egui::pos2(pill.left() + 4.0 + 16.0 + 34.0 * 3.0, pill.center().y)
+        };
+        assert!(!app.config.stage_hide_idle);
+        click_at(&ctx, &mut app, &tiles, toggle, &mut t);
+        assert!(app.config.stage_hide_idle, "nobody has video: stage is empty but the button stays");
+        // A video tile stays, the idle ones are hidden; the button is still there.
+        let with_cam = vec![(user(1, "a"), Some(VideoKind::Camera)), (user(2, "b"), None)];
+        t += 0.1;
+        run_stage(&ctx, &mut app, &with_cam, t, vec![]);
+        click_at(&ctx, &mut app, &with_cam, toggle, &mut t);
+        assert!(!app.config.stage_hide_idle, "the same button shows everyone again");
     }
 
     #[test]

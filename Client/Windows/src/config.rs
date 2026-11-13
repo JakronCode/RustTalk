@@ -174,6 +174,9 @@ pub struct ClientConfig {
     /// Presenter layout: cut the presenter out of their camera picture (locally).
     #[serde(default)]
     pub remove_background: bool,
+    /// Stage: show only people with a camera or screen share (locally).
+    #[serde(default)]
+    pub stage_hide_idle: bool,
 }
 
 /// Local layout of the voice stage. Only the mode is saved: who is focused
@@ -283,6 +286,7 @@ impl Default for ClientConfig {
             threat_feed: None,
             stage_mode: StageMode::Grid,
             remove_background: false,
+            stage_hide_idle: false,
         }
     }
 }
@@ -431,6 +435,7 @@ mod tests {
             threat_feed: Some("feeds/urlhaus.txt".into()),
             stage_mode: StageMode::Presenter,
             remove_background: true,
+            stage_hide_idle: true,
         };
         let text = toml::to_string_pretty(&cfg).unwrap();
         let back: ClientConfig = toml::from_str(&text).unwrap();
@@ -450,6 +455,7 @@ mod tests {
         assert_eq!(back.sidebar_width, 320.0);
         assert_eq!(back.stage_mode, StageMode::Presenter);
         assert!(back.remove_background);
+        assert!(back.stage_hide_idle);
         assert!(!back.animate_gifs);
         assert!(!back.flash_taskbar && !back.sound_leave && back.sound_join);
         assert!(!back.announce_names);
