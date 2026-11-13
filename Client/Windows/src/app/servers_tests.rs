@@ -97,7 +97,7 @@ pub(in crate::app) fn moved(app: &mut RustTalkApp, id: SessionId, client_id: u64
     );
 }
 
-fn chat(app: &mut RustTalkApp, id: SessionId, channel_id: u64, text: &str) {
+pub(in crate::app) fn chat(app: &mut RustTalkApp, id: SessionId, channel_id: u64, text: &str) {
     app.handle_event(
         id,
         NetEvent::Message(ServerMessage::Chat {

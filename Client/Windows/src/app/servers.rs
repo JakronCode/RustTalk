@@ -192,6 +192,10 @@ impl RustTalkApp {
             .to_string();
         self.editing_bookmark = None;
         if self.srv.connected {
+            // Messages that arrived while this channel was hidden are seen now.
+            if let Some(ch) = self.srv.selected_channel {
+                self.srv.unread.remove(&ch);
+            }
             self.prepare_all_names();
         }
     }

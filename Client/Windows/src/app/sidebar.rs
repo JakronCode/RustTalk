@@ -129,7 +129,7 @@ impl RustTalkApp {
         let open = ui.memory(|m| m.is_popup_open(popup_id));
         let icon_rect = egui::Rect::from_center_size(rect.left_center() + egui::vec2(26.0, 0.0), egui::vec2(28.0, 28.0));
         let settings = self.srv.server_settings.clone();
-        let title = if connected { settings.name.clone() } else { self.server_label(self.srv.id) };
+        let title = if connected { settings.name.clone() } else if self.srv.is_placeholder() { "New server".to_string() } else { self.server_label(self.srv.id) };
         if connected {
             server_settings::paint_server_icon(ui, icon_rect, &settings, &mut self.textures);
         } else {

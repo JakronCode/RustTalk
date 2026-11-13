@@ -14,6 +14,9 @@ const ACTION_W: f32 = 44.0;
 /// Shown beside every connect action, before the user enrolls a server.
 pub(super) const RECONNECT_NOTE: &str = "\"Connect and remember\" reconnects a saved server whenever RustTalk starts (chat only, never voice or camera) until you disconnect it. \"Connect once\" does not. A disconnected server sends no messages or notifications.";
 
+/// Short help in the dropdown; the full consent text is in the remember modal.
+const DROPDOWN_NOTE: &str = "Disconnect stops live notifications.";
+
 /// Which connect route asked, so the answer repeats it exactly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RememberPrompt {
@@ -29,6 +32,8 @@ pub(super) enum SwitchAction {
     Select(String),
     Connect(String),
     Disconnect(String),
+    /// Open the connect form on a blank placeholder; nothing disconnects.
+    Add,
 }
 
 impl RustTalkApp {
@@ -37,7 +42,22 @@ impl RustTalkApp {
             SwitchAction::Select(key) => self.select_server(&key),
             SwitchAction::Connect(key) => self.request_connect_row(&key),
             SwitchAction::Disconnect(key) => self.disconnect_server(&key),
+            SwitchAction::Add => self.add_server(),
         }
+    }
+
+    /// Views a blank session with the connect form. The server shown so far
+    /// stays connected (voice included); selecting any row leaves the form.
+    pub(super) fn add_server(&mut self) {
+        if self.srv.is_placeholder() {
+            self.show_connect_form = true;
+            return;
+        }
+        let id = self.next_session_id;
+        self.next_session_id += 1;
+        self.others.push(ServerSession::new(id, ""));
+        self.view_session(id);
+        self.show_connect_form = true;
     }
 
     /// Saved server that RustTalk would not reconnect at start yet: connecting
@@ -132,7 +152,11 @@ impl RustTalkApp {
                     }
                 }
             });
-        reconnect_note(ui);
+        if !self.srv.is_placeholder() && theme::menu_item(ui, icons::regular::PLUS, "Add server", false).clicked() {
+            *close = true;
+            action = Some(SwitchAction::Add);
+        }
+        ui.add(egui::Label::new(egui::RichText::new(DROPDOWN_NOTE).size(11.5).color(theme::MUTED)).wrap());
         action
     }
 }

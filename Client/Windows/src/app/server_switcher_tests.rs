@@ -1,4 +1,4 @@
-use super::super::servers::tests::{app, bookmark, closed_port, drain, login, moved, welcome};
+use super::super::servers::tests::{app, chat, bookmark, closed_port, drain, login, moved, welcome};
 use super::*;
 use crate::audio::test_devices::Devices;
 
@@ -259,4 +259,63 @@ fn rows_show_status_unread_and_voice_and_widgets_have_labels() {
     for want in ["Alpha, Connected".to_string(), "Disconnect from Alpha".to_string(), format!("Connect to {b}")] {
         assert!(labels.iter().any(|l| l.starts_with(&want)), "missing label {want}: {labels:?}");
     }
+}
+
+#[test]
+fn add_server_keeps_connections_and_voice_and_leaves_without_disconnecting() {
+    let _devices = Devices::new();
+    let mut app = app();
+    let [a, b] = names("add");
+    let (ia, mut ra) = login_named(&mut app, &a, "Alpha");
+    let (ib, _rb) = login_named(&mut app, &b, "Beta");
+    app.view_session(ia);
+    app.join_channel(2);
+    moved(&mut app, ia, 1, 2);
+    let mut t = 0.0;
+    let out = open_menu(&mut app, &mut t);
+    assert!(pos_of(&out, "Add server").y < pos_of(&out, "Server Settings").y, "Add server sits before the settings");
+    assert!(text_at(&out, "Disconnect stops live notifications.").is_some(), "short note");
+    click(&mut app, pos_of(&out, "Add server"), &mut t);
+    assert!(app.srv.is_placeholder() && app.show_connect_form, "blank connect form");
+    assert!(app.session(ia).unwrap().connected && app.session(ib).unwrap().connected);
+    assert_eq!(app.voice_owner, Some(ia));
+    assert!(app.in_voice());
+    let _ = drain(&mut ra);
+    // The switcher stays reachable; Alpha's row returns to it.
+    let out = open_menu(&mut app, &mut t);
+    assert!(text_at(&out, "Add server").is_none(), "no second blank form");
+    click(&mut app, pos_of(&out, "Alpha"), &mut t);
+    assert_eq!(app.srv.id, ia);
+    assert!(app.others.iter().all(|s| !s.is_placeholder()), "cancelled form leaves no session behind");
+    assert!(app.session(ib).unwrap().connected && app.voice_owner == Some(ia) && app.in_voice());
+    assert!(drain(&mut ra).is_empty(), "nothing sent to the voice server");
+    // Add a third server from the form.
+    app.add_server();
+    app.config.server_address = closed_port();
+    app.start_connect(false);
+    let third = app.srv.id;
+    assert!(![ia, ib].contains(&third));
+    assert!(app.session(ia).unwrap().connected && app.session(ib).unwrap().connected);
+    assert_eq!(app.voice_owner, Some(ia));
+    assert_eq!(app.all_sessions().filter(|s| s.is_placeholder()).count(), 0);
+    assert_eq!(app.all_sessions().count(), 3);
+}
+
+#[test]
+fn viewing_a_server_marks_its_shown_channel_read_only() {
+    let _devices = Devices::new();
+    let mut app = app();
+    let [a, b] = names("unr");
+    let (ia, _ra) = login_named(&mut app, &a, "Alpha");
+    let (ib, _rb) = login_named(&mut app, &b, "Beta");
+    app.view_session(ia);
+    let lobby = app.session(ib).unwrap().selected_channel.unwrap();
+    chat(&mut app, ib, lobby, "hi");
+    chat(&mut app, ib, 3, "elsewhere");
+    assert!(app.session(ib).unwrap().unread.contains(&lobby));
+    app.view_session(ib);
+    assert!(!app.srv.unread.contains(&lobby), "shown channel is read");
+    assert!(app.srv.unread.contains(&3), "hidden channel stays unread");
+    chat(&mut app, ia, 1, "later");
+    assert!(app.session(ia).unwrap().unread.contains(&1), "other server keeps its unread");
 }
