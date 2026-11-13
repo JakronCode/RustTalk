@@ -1383,6 +1383,7 @@ fn stale_decoder_results_are_ignored_across_voice_servers_and_restarts() {
                 tx,
                 tex: None,
                 last_request: None,
+                cutout: Default::default(),
             },
         );
         app.next_video_view

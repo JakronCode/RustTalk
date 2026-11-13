@@ -12,7 +12,7 @@ pub(super) static DEV_TILE_MENU: std::sync::Mutex<Option<String>> = std::sync::M
 impl RustTalkApp {
     /// "..." button in the bottom right corner of a stage tile (visible on
     /// hover or while its menu is open): opens the user menu.
-    fn tile_menu_button(&mut self, ui: &mut egui::Ui, tile: egui::Rect, tile_hovered: bool, user: &UserInfo, kind: Option<VideoKind>) {
+    pub(super) fn tile_menu_button(&mut self, ui: &mut egui::Ui, tile: egui::Rect, tile_hovered: bool, user: &UserInfo, kind: Option<VideoKind>) {
         let popup_id = ui.make_persistent_id(("tile_menu", user.id, kind));
         let open = ui.memory(|m| m.is_popup_open(popup_id));
         let rect = egui::Rect::from_center_size(tile.right_bottom() + egui::vec2(-22.0, -20.0), egui::vec2(30.0, 24.0));
@@ -97,6 +97,9 @@ impl RustTalkApp {
                         {
                             self.open_channel_settings(ch_id);
                         }
+                        if kind == ChannelKind::Voice {
+                            self.stage_layout_controls(ui, ch_id);
+                        }
                         let searching = self.chat_search.is_some();
                         let state = if searching { theme::IconState::Active } else { theme::IconState::Normal };
                         if theme::icon_button(ui, icons::regular::MAGNIFYING_GLASS, state, "Search this channel").clicked() {
@@ -154,14 +157,7 @@ impl RustTalkApp {
         ch_id: u64,
         cmd_tx: &net::CommandSender,
     ) {
-        let members: Vec<UserInfo> = self
-            .srv.channels
-            .get(&ch_id)
-            .map(|c| c.user_ids.clone())
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|id| self.srv.users.get(&id).cloned())
-            .collect();
+        let members = self.channel_members(ch_id);
         let (talking, _) = self.voice_maps();
         let self_tx = self.viewing_voice() && self.control.transmitting.load(Ordering::Relaxed);
 
@@ -196,65 +192,10 @@ impl RustTalkApp {
                 };
                 // Streams of others only arrive once watched (opt-in): until
                 // then their tile is a "Watch" card.
-                let mut tiles: Vec<(UserInfo, Option<VideoKind>)> = Vec::new();
-                for user in &members {
-                    if self.streams_of(user).contains(&VideoKind::Screen) {
-                        tiles.push((user.clone(), Some(VideoKind::Screen)));
-                    }
-                }
-                for user in &members {
-                    let cam = self.streams_of(user).contains(&VideoKind::Camera);
-                    tiles.push((user.clone(), cam.then_some(VideoKind::Camera)));
-                }
-
+                let tiles = self.stage_tiles(&members);
                 let area = ui.available_rect_before_wrap();
                 ui.allocate_rect(area, egui::Sense::hover());
-                let gap = 12.0;
-                let (cols, tile) = stage_grid(tiles.len(), area.size(), gap);
-                let mut open_fs = None;
-                for (i, rect) in grid_rects(tiles.len(), cols, tile, gap, area).into_iter().enumerate() {
-                    let (user, kind) = &tiles[i];
-                    let me = user.id == self.srv.my_id;
-                    let resp = match kind {
-                        Some(kind) if !me && !self.watching.contains(&(user.id, *kind)) => {
-                            let speaking = *kind == VideoKind::Camera && speaking_of(user);
-                            let resp = watch_tile(ui, rect, user, *kind, speaking);
-                            if resp.clicked() {
-                                self.watch(user.id, *kind);
-                            }
-                            resp
-                        }
-                        Some(kind) => {
-                            let tex = self.video_frames.get(&(user.id, *kind)).and_then(|v| v.tex.clone());
-                            // Speaking ring only on the person's camera, not on screen shares.
-                            let speaking = *kind == VideoKind::Camera && speaking_of(user);
-                            let resp = video_tile(ui, rect, tex.as_ref(), user, *kind, speaking, me);
-                            if resp.clicked() {
-                                open_fs = Some((user.id, *kind));
-                            }
-                            // Watching someone else: "stop watching" in the top right corner.
-                            if !me && (resp.hovered() || ui.rect_contains_pointer(rect)) {
-                                let b = egui::Rect::from_center_size(rect.right_top() + egui::vec2(-22.0, 22.0), egui::vec2(30.0, 30.0));
-                                let stop = ui
-                                    .put(b, egui::Button::new(egui::RichText::new(icons::regular::EYE_SLASH).size(16.0).color(egui::Color32::WHITE)).fill(egui::Color32::from_black_alpha(160)).corner_radius(15.0))
-                                    .on_hover_text("Stop watching");
-                                if stop.clicked() {
-                                    self.unwatch(user.id, *kind);
-                                }
-                            }
-                            resp
-                        }
-                        None => member_card(ui, rect, user, speaking_of(user), me),
-                    };
-                    // Right click / "..." button: same menu as in the sidebar.
-                    if !me {
-                        resp.context_menu(|ui| self.user_menu(ui, user));
-                        self.tile_menu_button(ui, rect, resp.hovered(), user, *kind);
-                    }
-                }
-                if let Some(key) = open_fs {
-                    self.enter_fullscreen(key);
-                }
+                self.ui_stage_tiles(ui, area, &tiles, &speaking_of);
             });
 
         // Text feed below the stage.
@@ -713,7 +654,7 @@ fn status_badges(p: &egui::Painter, rect: egui::Rect, user: &UserInfo) {
 }
 
 /// Name pill in the bottom left corner of a tile.
-fn name_pill(p: &egui::Painter, rect: egui::Rect, text: String) {
+pub(super) fn name_pill(p: &egui::Painter, rect: egui::Rect, text: String) {
     let size = (rect.height() * 0.075).clamp(12.0, 15.0);
     let galley = p.layout_no_wrap(text, egui::FontId::proportional(size), egui::Color32::WHITE);
     let pill = egui::Rect::from_min_size(
@@ -725,7 +666,7 @@ fn name_pill(p: &egui::Painter, rect: egui::Rect, text: String) {
 }
 
 /// Member without camera: avatar + name, scales with the tile.
-fn member_card(ui: &mut egui::Ui, rect: egui::Rect, user: &UserInfo, speaking: bool, me: bool) -> egui::Response {
+pub(super) fn member_card(ui: &mut egui::Ui, rect: egui::Rect, user: &UserInfo, speaking: bool, me: bool) -> egui::Response {
     let resp = ui.interact(rect, ui.id().with(("member_tile", user.id)), egui::Sense::click());
     let p = ui.painter();
     p.rect_filled(rect, 10.0, theme::avatar_color(&user.name).linear_multiply(0.35));
@@ -751,7 +692,7 @@ fn member_card(ui: &mut egui::Ui, rect: egui::Rect, user: &UserInfo, speaking: b
 /// avatar card: green frame while the person speaks, no avatar.
 /// A stream we don't receive yet: avatar, what is shared and a "Watch" button
 /// (the whole tile is the button).
-fn watch_tile(ui: &mut egui::Ui, rect: egui::Rect, user: &UserInfo, kind: VideoKind, speaking: bool) -> egui::Response {
+pub(super) fn watch_tile(ui: &mut egui::Ui, rect: egui::Rect, user: &UserInfo, kind: VideoKind, speaking: bool) -> egui::Response {
     let resp = ui.interact(rect, ui.id().with(("watch_tile", user.id, kind)), egui::Sense::click());
     let p = ui.painter();
     p.rect_filled(rect, 10.0, egui::Color32::from_rgb(0x11, 0x12, 0x14));
@@ -784,7 +725,8 @@ fn watch_tile(ui: &mut egui::Ui, rect: egui::Rect, user: &UserInfo, kind: VideoK
     resp.on_hover_text("Click to watch - nothing is downloaded until you do").on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn video_tile(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn video_tile(
     ui: &mut egui::Ui,
     rect: egui::Rect,
     tex: Option<&egui::TextureHandle>,
@@ -792,6 +734,7 @@ fn video_tile(
     kind: VideoKind,
     speaking: bool,
     me: bool,
+    show_name: bool,
 ) -> egui::Response {
     let resp = ui.interact(rect, ui.id().with(("stage_tile", user.id, kind)), egui::Sense::click());
     let p = ui.painter();
@@ -813,7 +756,9 @@ fn video_tile(
         VideoKind::Screen => format!("{}  {name}", kind_icon(kind)),
         VideoKind::Camera => name,
     };
-    name_pill(p, rect, label);
+    if show_name {
+        name_pill(p, rect, label);
+    }
     if kind == VideoKind::Camera {
         status_badges(p, rect, user);
     }

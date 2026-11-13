@@ -162,6 +162,26 @@ pub struct ClientConfig {
     /// Local threat feed file the user imported (read only, never downloaded by RustTalk).
     #[serde(default)]
     pub threat_feed: Option<String>,
+    /// How the voice stage arranges its tiles (local view only, never sent).
+    #[serde(default)]
+    pub stage_mode: StageMode,
+    /// Presenter layout: cut the presenter out of their camera picture (locally).
+    #[serde(default)]
+    pub remove_background: bool,
+}
+
+/// Local layout of the voice stage. Only the mode is saved: who is focused
+/// is picked per session (user ids are per server connection).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StageMode {
+    /// All tiles the same size.
+    #[default]
+    Grid,
+    /// One tile large, the others in a strip beside or below it.
+    Focus,
+    /// One user's screen large, their camera small in the bottom left.
+    Presenter,
 }
 
 fn default_sidebar_width() -> f32 {
@@ -253,6 +273,8 @@ impl Default for ClientConfig {
             sidebar_width: default_sidebar_width(),
             trusted_links: Default::default(),
             threat_feed: None,
+            stage_mode: StageMode::Grid,
+            remove_background: false,
         }
     }
 }
@@ -397,6 +419,8 @@ mod tests {
             sidebar_width: 320.0,
             trusted_links: [("https://github.com".to_string(), 1_700_000_000)].into_iter().collect(),
             threat_feed: Some("feeds/urlhaus.txt".into()),
+            stage_mode: StageMode::Presenter,
+            remove_background: true,
         };
         let text = toml::to_string_pretty(&cfg).unwrap();
         let back: ClientConfig = toml::from_str(&text).unwrap();
@@ -414,6 +438,8 @@ mod tests {
         assert!(back.compact);
         assert_eq!(back.accent_color, [0xEB, 0x45, 0x95]);
         assert_eq!(back.sidebar_width, 320.0);
+        assert_eq!(back.stage_mode, StageMode::Presenter);
+        assert!(back.remove_background);
         assert!(!back.animate_gifs);
         assert!(!back.flash_taskbar && !back.sound_leave && back.sound_join);
         assert!(!back.announce_names);

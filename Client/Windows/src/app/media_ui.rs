@@ -145,6 +145,16 @@ impl RustTalkApp {
                 if resp.double_clicked() {
                     leave = true;
                 }
+                // Presenter layout maximized: the camera stays on top of the screen.
+                if let Some(user) = self.presenter_of(key) {
+                    let speaking = talking.get(&user.id).is_some_and(|t| t.elapsed() < Duration::from_millis(250))
+                        || (user.id == self.srv.my_id && self_transmitting);
+                    let mut open = None;
+                    // Same corner as on the stage: bottom left of the 16:9 frame.
+                    let frame = egui::Rect::from_center_size(rect.center(), theme::fit_size(egui::vec2(16.0, 9.0), rect.size()));
+                    self.presenter_overlay(ui, frame, &user, speaking, &mut open);
+                    switch_to = open.or(switch_to);
+                }
             });
 
         // --- Overlays: Titel links oben, Beenden rechts oben ---
@@ -1281,6 +1291,8 @@ pub(super) struct VideoView {
     pub(super) tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     pub(super) tex: Option<egui::TextureHandle>,
     pub(super) last_request: Option<Instant>,
+    /// Cut the person out of this camera's pictures (Presenter, "Remove background").
+    pub(super) cutout: Arc<AtomicBool>,
 }
 
 /// From decoder threads to the UI, naming the tile (`VideoView::id`) they decode for.
@@ -1291,17 +1303,26 @@ pub(super) enum DecodeMsg {
 
 impl VideoView {
     /// Starts the decoder thread (ends when the view and its sender are dropped).
-    fn spawn(key: (u64, VideoKind), id: u64, out: std::sync::mpsc::Sender<DecodeMsg>, ctx: egui::Context) -> Self {
+    pub(super) fn spawn(key: (u64, VideoKind), id: u64, out: std::sync::mpsc::Sender<DecodeMsg>, ctx: egui::Context) -> Self {
         let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
+        let cutout = Arc::new(AtomicBool::new(false));
+        let want_cutout = cutout.clone();
         let _ = std::thread::Builder::new().name(format!("video-dec-{}", key.0)).spawn(move || {
             let mut dec = match crate::video_codec::H264Decoder::new() {
                 Ok(d) => d,
                 Err(e) => return tracing::warn!("{e:#}"),
             };
+            // Model thread while background removal is wanted, ended when not.
+            let mut cutout: Option<crate::segment::Cutout> = None;
             for frame in rx {
                 match dec.decode(&frame) {
-                    Ok(crate::video_codec::Decoded::Picture(img)) => {
+                    Ok(crate::video_codec::Decoded::Picture(mut img)) => {
                         dec.got_picture();
+                        if want_cutout.load(Ordering::Relaxed) {
+                            cutout.get_or_insert_with(crate::segment::Cutout::start).apply(&mut img);
+                        } else {
+                            cutout = None;
+                        }
                         if out.send(DecodeMsg::Picture(key, id, img)).is_err() {
                             break;
                         }
@@ -1315,6 +1336,6 @@ impl VideoView {
                 }
             }
         });
-        Self { id, tx, tex: None, last_request: None }
+        Self { id, tx, tex: None, last_request: None, cutout }
     }
 }
