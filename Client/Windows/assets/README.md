@@ -83,3 +83,30 @@ RUSTSEC-2026-0459 (libsqlite3-sys), RUSTSEC-2026-0194 and RUSTSEC-2026-0195
 (quick-xml), RUSTSEC-2026-0293 (ringbuf), plus 12 warnings. No advisory was
 reported against the three new packages. Existing warnings include unmaintained
 bincode, also used by syntect's embedded trusted dump loader.
+
+# Emoji font and data (#55)
+
+`NotoEmoji-wght.ttf` is the unmodified monochrome Noto Emoji v3.002 variable
+font (`NotoEmoji[wght].ttf`) from
+[google/fonts b78877b777ed3a18a1b431b0df7d8ee3f84c2e5f](https://github.com/google/fonts/tree/b78877b777ed3a18a1b431b0df7d8ee3f84c2e5f/ofl/notoemoji),
+SHA-256 `de6c18832938afc99caf132b39d6a30a19bac7f2e812e28db2535b4608d27551`,
+1,982,596 bytes. Copyright 2013, 2022 Google; SIL Open Font License 1.1, text in
+`NOTO-EMOJI-OFL.txt`. It is embedded in the client and placed before egui's
+older built-in emoji font, whose coverage stops before Unicode 9 (no 🤣 or 🤡).
+egui draws its default instance (weight 400) in one text color; it does not
+shape, so ZWJ sequences, skin tones, keycaps and flags show as their parts.
+
+Emoji names, CLDR groups and GitHub (gemoji) shortcodes come from the
+[`emojis`](https://crates.io/crates/emojis) 0.9.1 crate, `(MIT OR Apache-2.0)
+AND Unicode-3.0`, maintained. It adds `phf` and `phf_shared` (MIT) and
+`siphasher` (MIT OR Apache-2.0) to the lockfile; none of the four has a build
+script, and only `siphasher` uses `unsafe` (unaligned loads while hashing static
+lookup keys). A short table in `src/app/emoji.rs` adds Discord names that gemoji lacks (`:clown:`, `:nerd:`,
+...). The picker lists single-code-point emoji up to Unicode 15.1 without skin
+tones; a test checks that every one has a glyph in the bundled font.
+
+Shortcode conversion runs only on the sender's own text when sending or saving
+an edit. It is a single linear pass over a message already capped at
+`MAX_CHAT_LEN` characters, with names limited to 64 ASCII bytes. A test checks
+that no shortcode is shorter than its emoji, so conversion cannot exceed the
+limit. Received messages are not rewritten.

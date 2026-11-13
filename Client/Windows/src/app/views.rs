@@ -376,7 +376,7 @@ impl RustTalkApp {
         }
     }
 
-    /// Message composer: attach button, input field, GIF search, send.
+    /// Message composer: attach button, input field, emoji and GIF pickers, send.
     fn composer(
         &mut self,
         ui: &mut egui::Ui,
@@ -421,7 +421,7 @@ impl RustTalkApp {
                     {
                         self.pick_image();
                     }
-                    let right_w = 76.0;
+                    let right_w = 110.0;
                     let mut layouter = super::markdown::composer;
                     let resp = ui.add(
                         egui::TextEdit::multiline(&mut self.chat_input)
@@ -471,8 +471,16 @@ impl RustTalkApp {
                             if self.giphy.open {
                                 self.close_gif_picker();
                             } else {
+                                self.emoji = Default::default();
                                 self.open_gif_picker();
                             }
+                        }
+                        let emoji_color = if self.emoji.open { theme::accent() } else { theme::MUTED };
+                        let emoji = theme::ghost_button(ui, egui::RichText::new(icons::regular::SMILEY).size(18.0).color(emoji_color))
+                            .on_hover_text("Emoji");
+                        self.emoji_button_rect = Some(emoji.rect);
+                        if emoji.clicked() {
+                            self.toggle_emoji_picker(ch_id);
                         }
                         if send || enter {
                             self.send_chat(ch_id, cmd_tx);
@@ -484,7 +492,7 @@ impl RustTalkApp {
 
     /// Sends text + attached image (as a reply if one is selected).
     pub(super) fn send_chat(&mut self, ch_id: u64, cmd_tx: &net::CommandSender) {
-        let text = self.chat_input.trim().to_string();
+        let text = super::emoji::replace_shortcodes(self.chat_input.trim());
         if text.is_empty() && self.pending_image.is_none() {
             return;
         }
@@ -858,7 +866,7 @@ fn video_tile(
 }
 
 /// Stable id of the message input of a channel (for focusing it).
-fn composer_id(ch_id: u64) -> egui::Id {
+pub(super) fn composer_id(ch_id: u64) -> egui::Id {
     egui::Id::new(("composer", ch_id))
 }
 

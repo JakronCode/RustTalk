@@ -21,6 +21,7 @@ mod connect;
 mod connection_ui;
 #[cfg(debug_assertions)]
 mod dev_input;
+mod emoji;
 mod join_error;
 mod lifecycle;
 mod limits;
@@ -394,6 +395,8 @@ pub struct RustTalkApp {
     next_gif_request: u64,
     /// Screen rect of the GIF button (the picker opens above it).
     gif_button_rect: Option<egui::Rect>,
+    emoji: emoji::EmojiPicker,
+    emoji_button_rect: Option<egui::Rect>,
     giphy_tx: std::sync::mpsc::Sender<GiphyMsg>,
     giphy_rx: std::sync::mpsc::Receiver<GiphyMsg>,
 }
@@ -402,6 +405,7 @@ impl RustTalkApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut fonts = egui::FontDefinitions::default();
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+        emoji::add_font(&mut fonts);
         cc.egui_ctx.set_fonts(fonts);
 
         let config = ClientConfig::load();
@@ -536,6 +540,8 @@ impl RustTalkApp {
             gif_target: None,
             next_gif_request: 0,
             gif_button_rect: None,
+            emoji: Default::default(),
+            emoji_button_rect: None,
             giphy_tx: giphy_tx.clone(),
             giphy_rx,
         }
@@ -718,7 +724,7 @@ impl RustTalkApp {
             }
             ChatAction::SaveEdit => {
                 let Some(id) = self.editing.take() else { return };
-                let text = std::mem::take(&mut self.edit_text).trim().to_string();
+                let text = emoji::replace_shortcodes(std::mem::take(&mut self.edit_text).trim());
                 let original = self.srv.chat.values().flatten().find(|l| l.id == id).map(|l| l.text.clone());
                 if text.is_empty() {
                     // Like Discord: saving an empty message asks to delete it.
@@ -1305,6 +1311,7 @@ impl eframe::App for RustTalkApp {
         self.ui_confirm_delete_message(ctx);
         self.ui_mod_dialog(ctx);
         self.ui_gif_picker(ctx);
+        self.ui_emoji_picker(ctx);
         self.ui_camera_dialog(ctx);
         self.ui_audio_picker(ctx);
         self.ui_screen_picker(ctx);
