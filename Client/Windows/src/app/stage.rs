@@ -196,9 +196,17 @@ pub(super) fn nearest_corner(content: egui::Rect, cam: egui::Rect) -> CamCorner 
     }
 }
 
-/// Round icon button on top of a tile or camera: dark, accent colored on hover, hand cursor.
-fn round_button(ui: &mut egui::Ui, center: egui::Pos2, diameter: f32, icon: &str, tip: &str) -> egui::Response {
-    let rect = egui::Rect::from_center_size(center, egui::vec2(diameter, diameter));
+/// A round button's rectangle around `center`.
+fn round_rect(center: egui::Pos2, diameter: f32) -> egui::Rect {
+    egui::Rect::from_center_size(center, egui::vec2(diameter, diameter))
+}
+
+/// The one button style of the stage (tile overlays, camera, layout buttons): dark circle,
+/// accent coloured on hover with a ring, darker while pressed, hand cursor and always a
+/// tooltip. `active` = green, for a layout that is switched on.
+pub(super) fn round_button(ui: &mut egui::Ui, rect: egui::Rect, icon: &str, tip: &str, active: bool) -> egui::Response {
+    let center = rect.center();
+    let diameter = rect.width().min(rect.height());
     let id = ui.id().with(("round_button", tip, center.x.round() as i32, center.y.round() as i32));
     let resp = ui.interact(rect, id, egui::Sense::click());
     let hot = resp.hovered();
@@ -206,6 +214,8 @@ fn round_button(ui: &mut egui::Ui, center: egui::Pos2, diameter: f32, icon: &str
         (theme::accent().gamma_multiply(0.75), theme::on_accent())
     } else if hot {
         (theme::accent(), theme::on_accent())
+    } else if active {
+        (theme::GREEN, egui::Color32::WHITE)
     } else {
         (egui::Color32::from_black_alpha(170), egui::Color32::WHITE)
     };
@@ -217,6 +227,24 @@ fn round_button(ui: &mut egui::Ui, center: egui::Pos2, diameter: f32, icon: &str
     }
     p.text(center, egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(diameter * 0.55), fg);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip)
+}
+
+/// A button centre moved left of `avoid` (the presenter's camera) when it would sit under it.
+fn dodge(center: egui::Pos2, diameter: f32, avoid: Option<egui::Rect>) -> egui::Pos2 {
+    match avoid {
+        Some(r) if round_rect(center, diameter).intersects(r.expand(6.0)) => {
+            egui::pos2(r.left() - 8.0 - diameter / 2.0, center.y)
+        }
+        _ => center,
+    }
+}
+
+/// Where the presenter's camera sits on the presented screen `content` (also while dragged).
+fn cam_rect_at(content: egui::Rect, aspect: f32, corner: CamCorner, offset: egui::Vec2) -> egui::Rect {
+    let r = overlay_rect(content, aspect, corner).translate(offset);
+    let dx = (content.left() - r.left()).max(0.0) - (r.right() - content.right()).max(0.0);
+    let dy = (content.top() - r.top()).max(0.0) - (r.bottom() - content.bottom()).max(0.0);
+    r.translate(egui::vec2(dx, dy))
 }
 
 fn tile_label(user: &UserInfo, kind: Option<VideoKind>) -> String {
@@ -312,26 +340,20 @@ impl RustTalkApp {
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
             |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                // Lit while something from the menu is in effect.
-                let state = if mode == StageMode::Presenter || self.config.stage_hide_idle {
-                    theme::IconState::Active
-                } else {
-                    theme::IconState::Normal
+                let mut button = |ui: &mut egui::Ui, icon: &str, tip: &str, active: bool| {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
+                    round_button(ui, rect, icon, tip, active)
                 };
-                more = Some(theme::icon_button(
+                // Lit while something from the menu is in effect.
+                more = Some(button(
                     ui,
                     icons::regular::DOTS_THREE,
-                    state,
                     "More: Presenter layout, video only, who is shown",
+                    mode == StageMode::Presenter || self.config.stage_hide_idle,
                 ));
                 for m in [StageMode::Focus, StageMode::Grid] {
-                    let state = if m == mode {
-                        theme::IconState::Active
-                    } else {
-                        theme::IconState::Normal
-                    };
                     let tip = format!("{}: {} (only on your screen)", m.label(), m.hint());
-                    if theme::icon_button(ui, m.icon(), state, &tip).clicked() {
+                    if button(ui, m.icon(), &tip, m == mode).clicked() {
                         picked = Some(m);
                     }
                 }
@@ -406,7 +428,9 @@ impl RustTalkApp {
                             } else {
                                 kind.map(kind_icon).unwrap_or(icons::regular::USER)
                             };
-                            if theme::menu_item(ui, icon, &tile_label(user, *kind), false).clicked()
+                            if theme::menu_item(ui, icon, &tile_label(user, *kind), false)
+                                .on_hover_text("Show this one large")
+                                .clicked()
                             {
                                 chosen = Some((user.id, *kind));
                             }
@@ -430,7 +454,7 @@ impl RustTalkApp {
                                     theme::menu_item(ui, icon, &label, false)
                                 })
                                 .inner;
-                            if item.clicked() {
+                            if item.clone().on_hover_text("Present this person").clicked() {
                                 chosen = Some((user.id, None));
                             }
                             if let Some(why) = blocker {
@@ -456,6 +480,7 @@ impl RustTalkApp {
                     "Automatic",
                     false,
                 )
+                .on_hover_text("Pick the best one by itself")
                 .clicked()
                 {
                     self.stage_pick = match mode {
@@ -707,9 +732,9 @@ impl RustTalkApp {
                 if resp.clicked() {
                     *open_fs = Some((user.id, kind));
                 }
-                if !main && ui.rect_contains_pointer(rect) {
-                    let at = rect.right_bottom() + egui::vec2(if me { -20.0 } else { -56.0 }, -20.0);
-                    if round_button(ui, at, 28.0, icons::regular::CORNERS_OUT, "Fullscreen").clicked() {
+                if ui.rect_contains_pointer(rect) {
+                    let at = rect.right_bottom() + egui::vec2(if me { -22.0 } else { -60.0 }, -22.0);
+                    if round_button(ui, round_rect(at, 30.0), icons::regular::CORNERS_OUT, "Fullscreen", false).clicked() {
                         *open_fs = Some((user.id, kind));
                     }
                 }
@@ -717,8 +742,14 @@ impl RustTalkApp {
                 // (next to the focus button on small tiles).
                 if !me && (resp.hovered() || ui.rect_contains_pointer(rect)) {
                     let x = if main { -22.0 } else { -64.0 };
-                    let at = rect.right_top() + egui::vec2(x, 22.0);
-                    if round_button(ui, at, 30.0, icons::regular::EYE_SLASH, "Stop watching").clicked() {
+                    let mut at = rect.right_top() + egui::vec2(x, 22.0);
+                    // Presenter: the camera over the screen may sit in this corner.
+                    if main && kind == VideoKind::Screen && self.config.stage_mode == StageMode::Presenter {
+                        let has_cam = self.streams_of(user).contains(&VideoKind::Camera);
+                        let cam = has_cam.then(|| self.presenter_cam_rect(rect, user.id));
+                        at = dodge(at, 30.0, cam);
+                    }
+                    if round_button(ui, round_rect(at, 30.0), icons::regular::EYE_SLASH, "Stop watching", false).clicked() {
                         self.unwatch(user.id, kind);
                     }
                 }
@@ -729,7 +760,7 @@ impl RustTalkApp {
         // Hovering a small tile: a button to focus it (the tile itself keeps its own click).
         if !main && ui.rect_contains_pointer(rect) {
             let at = rect.right_top() + egui::vec2(-22.0, 22.0);
-            let focus = round_button(ui, at, 30.0, StageMode::Focus.icon(), "Focus on this");
+            let focus = round_button(ui, round_rect(at, 30.0), StageMode::Focus.icon(), "Focus on this", false);
             if focus.clicked() {
                 *focus_click = Some((user.id, kind));
             }
@@ -756,7 +787,19 @@ impl RustTalkApp {
         }
     }
 
-    /// The presenter's camera, small in the bottom left of their screen.
+    /// Rectangle of `user_id`'s camera over their presented screen `content`.
+    fn presenter_cam_rect(&self, content: egui::Rect, user_id: u64) -> egui::Rect {
+        let key = (user_id, VideoKind::Camera);
+        let watched = user_id == self.srv.my_id || self.watching.contains(&key);
+        let aspect = watched
+            .then(|| self.video_frames.get(&key).and_then(|v| v.tex.clone()))
+            .flatten()
+            .map(|t| t.size_vec2())
+            .map_or(ASPECT, |s| s.x / s.y);
+        cam_rect_at(content, aspect, self.config.presenter_cam_corner, self.cam_drag)
+    }
+
+    /// The presenter's camera, small in a corner of their screen.
     pub(super) fn presenter_overlay(
         &mut self,
         ui: &mut egui::Ui,
@@ -776,13 +819,8 @@ impl RustTalkApp {
             .as_ref()
             .map(|t| t.size_vec2())
             .map_or(ASPECT, |s| s.x / s.y);
-        let base = overlay_rect(content, aspect, self.config.presenter_cam_corner);
-        let moved = |offset: egui::Vec2| {
-            let r = base.translate(offset);
-            let dx = (content.left() - r.left()).max(0.0) - (r.right() - content.right()).max(0.0);
-            let dy = (content.top() - r.top()).max(0.0) - (r.bottom() - content.bottom()).max(0.0);
-            r.translate(egui::vec2(dx, dy))
-        };
+        let corner = self.config.presenter_cam_corner;
+        let moved = |offset: egui::Vec2| cam_rect_at(content, aspect, corner, offset);
         let resp = ui.interact(
             moved(self.cam_drag),
             ui.id().with(("presenter_cam", user.id)),
@@ -855,7 +893,7 @@ impl RustTalkApp {
         // Hovering someone else's camera: a small "stop watching" button in the corner.
         if watched && user.id != self.srv.my_id && ui.rect_contains_pointer(rect) && !resp.dragged() {
             let at = rect.right_top() + egui::vec2(-16.0, 16.0);
-            let stop = round_button(ui, at, 24.0, icons::regular::EYE_SLASH, "Stop watching the camera");
+            let stop = round_button(ui, round_rect(at, 24.0), icons::regular::EYE_SLASH, "Stop watching the camera", false);
             if stop.clicked() {
                 self.unwatch(user.id, VideoKind::Camera);
                 return;
@@ -1185,6 +1223,20 @@ mod tests {
         assert_eq!(app.fullscreen, None, "the tile itself is no button");
         click_at(&ctx, &mut app, &tiles, first.right_bottom() + egui::vec2(-20.0, -20.0), &mut t);
         assert_eq!(app.fullscreen, Some((app.srv.my_id, VideoKind::Camera)), "its own fullscreen button is");
+    }
+
+    #[test]
+    fn a_button_moves_left_of_the_camera_that_would_cover_it() {
+        let content = area(1000.0, 560.0);
+        let corner_button = egui::pos2(content.right() - 22.0, content.top() + 22.0);
+        let cam_top_right = cam_rect_at(content, ASPECT, CamCorner::TopRight, egui::Vec2::ZERO);
+        let moved = dodge(corner_button, 30.0, Some(cam_top_right));
+        assert!(moved.x < cam_top_right.left(), "left of the camera");
+        assert!(!round_rect(moved, 30.0).intersects(cam_top_right));
+        assert_eq!(moved.y, corner_button.y);
+        let cam_bottom_left = cam_rect_at(content, ASPECT, CamCorner::BottomLeft, egui::Vec2::ZERO);
+        assert_eq!(dodge(corner_button, 30.0, Some(cam_bottom_left)), corner_button, "no camera there: stays");
+        assert_eq!(dodge(corner_button, 30.0, None), corner_button);
     }
 
     #[test]
