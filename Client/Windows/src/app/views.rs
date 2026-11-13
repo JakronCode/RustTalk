@@ -407,9 +407,10 @@ impl RustTalkApp {
             }
         }
         self.composer_context_bar(ui, ch_id);
-        self.mention_suggestions(ui, ch_id);
         let name = self.channel_name(ch_id);
-        egui::Frame::default()
+        let focused = ui.memory(|m| m.has_focus(composer_id(ch_id)));
+        self.mention_keys(ui.ctx(), ch_id, focused);
+        let frame = egui::Frame::default()
             .fill(theme::INPUT)
             .corner_radius(8.0)
             .inner_margin(egui::Margin::symmetric(8, 6))
@@ -434,7 +435,7 @@ impl RustTalkApp {
                             .frame(false)
                             .desired_width(ui.available_width() - right_w),
                     );
-                    // After Reply / Edit / a picked @name: type right away, cursor at the end.
+                    // After Reply / Edit: type right away, cursor at the end.
                     if std::mem::take(&mut self.focus_composer) {
                         resp.request_focus();
                         if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), resp.id) {
@@ -488,6 +489,7 @@ impl RustTalkApp {
                     });
                 });
             });
+        self.mention_popup(ui.ctx(), ch_id, focused, frame.response.rect);
     }
 
     /// Sends text + attached image (as a reply if one is selected).
@@ -620,42 +622,6 @@ impl RustTalkApp {
         }
         if confirm || cancel || !open {
             self.confirm_delete_msg = None;
-        }
-    }
-
-    /// While typing "@na": buttons for matching users (click completes the name).
-    fn mention_suggestions(&mut self, ui: &mut egui::Ui, _ch_id: u64) {
-        let Some(raw) = mention_prefix(&self.chat_input) else { return };
-        let typed_len = raw.len(); // bytes of the original text (not of the lowercase copy)
-        let prefix = raw.to_lowercase();
-        let mut names: Vec<String> = self
-            .srv.users
-            .values()
-            .filter(|u| u.id != self.srv.my_id && u.name.to_lowercase().starts_with(&prefix))
-            .map(|u| u.name.clone())
-            .collect();
-        names.sort_by_key(|n| n.to_lowercase());
-        names.dedup();
-        names.truncate(6);
-        if names.is_empty() {
-            return;
-        }
-        let mut pick = None;
-        ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new(icons::regular::AT).color(theme::MUTED));
-            for n in &names {
-                if ui.small_button(n).clicked() {
-                    pick = Some(n.clone());
-                }
-            }
-        });
-        if let Some(name) = pick {
-            let cut = self.chat_input.len() - typed_len - 1; // remove '@' + the typed prefix
-            if self.chat_input.is_char_boundary(cut) {
-                self.chat_input.truncate(cut);
-                self.chat_input.push_str(&format!("@{name} "));
-            }
-            self.focus_composer = true;
         }
     }
 

@@ -257,6 +257,7 @@ impl RustTalkApp {
         self.chat_action = None;
         self.close_gif_picker();
         self.emoji = Default::default();
+        self.mention = Default::default();
         self.gif_target = None;
         self.mod_dialog = None;
         self.pending_image = None;
