@@ -222,6 +222,9 @@ impl RustTalkApp {
                 }
                 egui::Key::Escape => {
                     self.mention.dismissed = Some((self.chat_input.clone(), m.at));
+                    self.mention
+                        .deferred
+                        .retain(|event| popup_key(event).is_none());
                     break;
                 }
                 egui::Key::Tab | egui::Key::Enter => {
@@ -235,6 +238,10 @@ impl RustTalkApp {
     }
 
     fn accept_mention(&mut self, ctx: &egui::Context, ch_id: u64, m: &Active, name: &str) {
+        // A mouse selection may happen while completion keys await the next frame.
+        self.mention
+            .deferred
+            .retain(|event| popup_key(event).is_none());
         let id = composer_id(ch_id);
         match complete(&mut self.chat_input, m.at, m.cursor, name, MAX_CHAT_LEN) {
             Some(end) => {

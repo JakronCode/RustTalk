@@ -1156,7 +1156,7 @@ mod tests {
         let key = |key| egui::Event::Key {
             key, physical_key: None, pressed: true, repeat: false, modifiers: Default::default(),
         };
-        for (events, expected) in [
+        for (mut events, expected) in [
             (vec![key(egui::Key::ArrowDown), key(egui::Key::Enter)], "@Anton "),
             (vec![key(egui::Key::ArrowDown), key(egui::Key::Escape)], "@an"),
             (vec![key(egui::Key::ArrowDown), key(egui::Key::ArrowUp), key(egui::Key::Tab)], "@Anna "),
@@ -1165,6 +1165,8 @@ mod tests {
             (vec![egui::Event::Paste("t".into()), key(egui::Key::Tab)], "@Anton "),
             (vec![key(egui::Key::Enter), egui::Event::Text("t".into())], "@Anna t"),
             (vec![egui::Event::Text("t".into()), key(egui::Key::ArrowDown), key(egui::Key::Enter)], "@Anton "),
+            (vec![egui::Event::Text("t".into()), key(egui::Key::Enter), egui::Event::PointerMoved(egui::Pos2::ZERO)], "@Anna "),
+            (vec![egui::Event::Text("t".into()), key(egui::Key::Escape), egui::Event::PointerMoved(egui::Pos2::ZERO)], "@Anna "),
         ] {
             let mut app = app();
             let (session, mut commands) = login(&mut app, "test.invalid:7331", 1);
@@ -1186,9 +1188,12 @@ mod tests {
                     events, focused: true, ..Default::default()
                 };
                 input.viewports.entry(egui::ViewportId::ROOT).or_default().focused = Some(true);
-                let _ = ctx.run(input, |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| app.composer(ui, 3, &sender));
-                });
+                ctx.run(input, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        ui.add_space(300.0);
+                        app.composer(ui, 3, &sender);
+                    });
+                })
             };
             draw(&mut app, vec![]);
             let mut state = egui::TextEdit::load_state(&ctx, id).unwrap();
@@ -1196,6 +1201,18 @@ mod tests {
             state.store(&ctx, id);
             ctx.memory_mut(|m| m.request_focus(id));
             draw(&mut app, vec![]);
+            let output = draw(&mut app, vec![]);
+            if matches!(events.last(), Some(egui::Event::PointerMoved(_))) {
+                let pos = output.shapes.iter().find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.job.text == "Anna" => Some(text.pos + text.galley.size() / 2.0),
+                    _ => None,
+                }).expect("first suggestion rendered");
+                events.pop();
+                events.push(egui::Event::PointerMoved(pos));
+                events.push(egui::Event::PointerButton {
+                    pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default(),
+                });
+            }
             while commands.try_recv().is_some() {}
             draw(&mut app, events);
             draw(&mut app, vec![]); // deferred popup actions use the updated text/cursor
