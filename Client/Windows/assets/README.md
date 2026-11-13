@@ -110,3 +110,21 @@ an edit. It is a single linear pass over a message already capped at
 `MAX_CHAT_LEN` characters, with names limited to 64 ASCII bytes. A test checks
 that no shortcode is shorter than its emoji, so conversion cannot exceed the
 limit. Received messages are not rewritten.
+
+# Person segmentation model
+
+`selfie_segmentation_landscape.onnx` is used by "Remove background" in the
+Presenter stage layout (`src/segment.rs`). It is embedded in the client; no
+runtime download occurs, and the client checks its SHA-256 before loading it.
+
+- Model: MediaPipe Selfie Segmentation (landscape, 144x256 input) by Google,
+  Apache License 2.0 (model card: Tingbo Hou, Siargey Pisarchyk, Karthik
+  Raveendran, 2021). License text in `SELFIE-SEGMENTATION-LICENSE.txt`.
+- File: ONNX conversion from
+  [onnx-community/mediapipe_selfie_segmentation_landscape](https://huggingface.co/onnx-community/mediapipe_selfie_segmentation_landscape),
+  revision `2497d5bec26c626c7b3c4edc6e1fefc21b64f6c3`, `onnx/model.onnx`,
+  462,338 bytes, SHA-256
+  `7a0adcfdb1715d3b0ff0f61486d8a181c33f4a208343a5abfccbc6540e872d24`.
+- The conversion is a third-party file (licence tag Apache-2.0, matching the
+  upstream model card); it is a single file with standard ONNX operators and
+  no external data. Check the hash and the model card again before replacing it.

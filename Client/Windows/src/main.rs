@@ -20,6 +20,8 @@ mod install;
 mod logo;
 mod media;
 mod net;
+mod onnx;
+mod segment;
 mod notify;
 mod update;
 #[cfg(windows)]

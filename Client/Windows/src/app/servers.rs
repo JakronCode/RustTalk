@@ -890,6 +890,7 @@ impl RustTalkApp {
         self.local_preview_tex = None;
         self.video_frames.clear();
         self.watching.clear();
+        self.stage_pick = Default::default();
         self.video_stopped.clear();
         for e in self.video_epoch.iter() {
             e.fetch_add(1, Ordering::Relaxed);

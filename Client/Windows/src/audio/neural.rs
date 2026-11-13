@@ -94,7 +94,7 @@ impl Engine {
         let config: Config = serde_json::from_str(&std::fs::read_to_string(dir.join("tts.json")).context("tts.json missing")?)?;
         let indexer: Vec<i64> =
             serde_json::from_str(&std::fs::read_to_string(dir.join("unicode_indexer.json")).context("unicode_indexer.json missing")?)?;
-        let env = ort::init().with_name("rusttalk-speech").build().map_err(ort_err)?;
+        let env = crate::onnx::env()?;
         let open = |file: &str| -> Result<Session> {
             let builder = Session::builder(&env).map_err(ort_err)?;
             let mut builder = builder.with_intra_threads(THREADS).map_err(ort_err)?;

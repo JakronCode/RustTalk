@@ -37,12 +37,13 @@ mod servers;
 mod session;
 mod settings;
 mod sidebar;
+mod stage;
 mod theme;
 mod update_ui;
 mod views;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -327,6 +328,10 @@ pub struct RustTalkApp {
     video_frames: HashMap<(u64, VideoKind), media_ui::VideoView>,
     /// Streams of others we chose to watch (opt-in; the server only sends these).
     watching: HashSet<(u64, VideoKind)>,
+    /// Who the Focus / Presenter layout shows (local only, per voice session).
+    stage_pick: stage::StagePick,
+    /// Camera the Presenter overlay cut out this frame (applied next frame).
+    cutout_key: Option<(u64, VideoKind)>,
     /// Recently ended streams: late frames must not bring the tile back
     /// (otherwise the last picture stays frozen on screen).
     video_stopped: HashMap<(u64, VideoKind), Instant>,
@@ -506,6 +511,8 @@ impl RustTalkApp {
             pending_image: None,
             video_frames: HashMap::new(),
             watching: HashSet::new(),
+            stage_pick: Default::default(),
+            cutout_key: None,
             video_stopped: HashMap::new(),
             video_epoch: Arc::new([std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)]),
             video_tx,
@@ -1345,6 +1352,11 @@ impl RustTalkApp {
     /// Main view while connected: sidebar + content (or fullscreen stream).
     /// Every frame, whichever server is viewed: media follows the voice server.
     fn media_upkeep(&mut self) {
+        // Background removal only for the camera the overlay drew last frame.
+        let cutout = self.cutout_key.take();
+        for (key, view) in &self.video_frames {
+            view.cutout.store(Some(*key) == cutout, Ordering::Relaxed);
+        }
         // Screen thread ended with an error (e.g. window closed).
         if self.take_screen_failure() && self.screen.is_some() {
             self.screen = None;
@@ -1418,6 +1430,20 @@ impl RustTalkApp {
                 if secs > 0 && share.1.is_some_and(|t| t.elapsed() >= Duration::from_secs(secs)) {
                     self.toggle_screen();
                     share.0 = 2;
+                }
+            }
+        }
+        // `RUSTTALK_DEV_FAKE_VIDEO=1`: drawn stand-ins for our own camera and
+        // screen tiles (screenshots without a real webcam or desktop).
+        #[cfg(debug_assertions)]
+        if std::env::var("RUSTTALK_DEV_FAKE_VIDEO").is_ok() && self.in_voice() {
+            for kind in [VideoKind::Camera, VideoKind::Screen] {
+                let key = (self.srv.my_id, kind);
+                if !self.video_frames.contains_key(&key) {
+                    self.next_video_view += 1;
+                    let view = media_ui::VideoView::spawn(key, self.next_video_view, self.video_tx.clone(), self.ctx.clone());
+                    let _ = self.video_tx.send(media_ui::DecodeMsg::Picture(key, view.id, stage::dev_fake_picture(kind)));
+                    self.video_frames.insert(key, view);
                 }
             }
         }
