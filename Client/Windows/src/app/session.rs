@@ -65,7 +65,6 @@ pub(super) struct Reconnect {
 }
 
 /// Connection state of one server, as the server switcher shows it.
-#[cfg_attr(not(test), allow(dead_code))] // shortcut: used by the switcher UI (#22) once it lands
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ServerStatus {
     Disconnected,
@@ -82,7 +81,6 @@ pub(super) enum ServerStatus {
 }
 
 /// One row of the server switcher (saved servers first, then unsaved live ones).
-#[cfg_attr(not(test), allow(dead_code))] // shortcut: used by the switcher UI (#22) once it lands
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ServerRow {
     /// Normalized address: pass it to `select_server`, `connect_server`, `disconnect_server`.
@@ -123,8 +121,9 @@ pub(super) struct ServerSession {
     pub upload_backlog: Arc<AtomicUsize>,
     /// Login finished (Welcome received). `cmd_tx` alone = connecting.
     pub connected: bool,
-    /// Started by the user: a successful login enrolls the server for startup.
-    pub explicit: bool,
+    /// The user chose "Connect and remember": a successful login enrolls the
+    /// server for startup. Only that choice sets it; plain connects never do.
+    pub remember: bool,
     pub reconnect: Option<Reconnect>,
     /// Not started: the active session limit was reached.
     pub overflow: bool,
@@ -187,7 +186,7 @@ impl ServerSession {
             event_rx,
             upload_backlog: Arc::new(AtomicUsize::new(0)),
             connected: false,
-            explicit: false,
+            remember: false,
             reconnect: None,
             overflow: false,
             last_error: None,
@@ -237,7 +236,6 @@ impl ServerSession {
                 && self.draft.is_empty())
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn status(&self) -> ServerStatus {
         if self.connected {
             ServerStatus::Connected

@@ -28,6 +28,7 @@ mod markdown;
 mod moderation_ui;
 mod poke;
 mod server_settings;
+mod server_switcher;
 mod servers;
 mod session;
 mod settings;
@@ -348,6 +349,8 @@ pub struct RustTalkApp {
     mod_dialog: Option<moderation_ui::ModDialog>,
     /// Started via an invite link: connect right away.
     connect_on_start: bool,
+    /// "Connect and remember?" question for a saved server not remembered yet.
+    remember_prompt: Option<server_switcher::RememberPrompt>,
     /// Focus the password field on the next frame.
     focus_password: bool,
     /// Original address of the saved server being edited.
@@ -490,6 +493,7 @@ impl RustTalkApp {
             giphy: GifPicker::default(),
             mod_dialog: None,
             connect_on_start,
+            remember_prompt: None,
             focus_password: false,
             editing_bookmark: None,
             server_nickname,
@@ -777,7 +781,7 @@ impl RustTalkApp {
                 };
                 s.replay = None; // new key: its receive counters start fresh
                 let rc = s.reconnect.take();
-                let explicit = std::mem::take(&mut s.explicit);
+                let remember = std::mem::take(&mut s.remember);
                 let (key, name) = (s.key.clone(), s.server_settings.name.clone());
                 let tx = s.cmd_tx.clone();
                 if viewed {
@@ -791,7 +795,7 @@ impl RustTalkApp {
                 if let (true, Some(tx)) = (muted || deafened, tx) {
                     let _ = tx.send(Command::SetMute { muted, deafened });
                 }
-                if explicit {
+                if remember {
                     self.enroll(&key, &name);
                 }
                 if let Some(rc) = rc {
@@ -1169,7 +1173,7 @@ impl eframe::App for RustTalkApp {
         self.poll_background(ctx);
         self.poll_video(ctx);
         if std::mem::take(&mut self.connect_on_start) && self.srv.cmd_tx.is_none() {
-            self.start_connect();
+            self.start_connect(false);
         }
         if std::mem::take(&mut self.startup_pending) {
             self.connect_enrolled_servers();
@@ -1258,6 +1262,7 @@ impl eframe::App for RustTalkApp {
         self.ui_audio_picker(ctx);
         self.ui_screen_picker(ctx);
         self.ui_update_dialog(ctx, false);
+        self.ui_remember_prompt(ctx);
 
         self.sync_mic_preview();
         if self.audio.is_none() {
@@ -1309,7 +1314,7 @@ impl RustTalkApp {
             self.leave_fullscreen();
         }
 
-        self.ui_sidebar(ctx, &cmd_tx);
+        self.ui_sidebar(ctx, Some(&cmd_tx));
         self.ui_main(ctx, &cmd_tx);
         // Toast only without an open dialog (it would cover dialog buttons).
         let dialog_open = self.channel_settings.is_some()
@@ -1357,7 +1362,7 @@ impl RustTalkApp {
             0 => {
                 STAGE.store(1, Ordering::Relaxed);
                 if std::env::var("RUSTTALK_DEV_AUTOCONNECT").is_ok() {
-                    self.start_connect();
+                    self.start_connect(false);
                 }
             }
             1 if self.srv.connected || std::env::var("RUSTTALK_DEV_AUTOCONNECT").is_err() => {

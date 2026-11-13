@@ -2,8 +2,8 @@
 //! (persistent per server), reconnecting enrolled servers at startup, retries
 //! within limits, and the single voice session.
 //!
-//! API for the server switcher: `server_rows`, `select_server`,
-//! `connect_server`, `disconnect_server`, `voice_server`.
+//! API for the server switcher (`server_switcher.rs`): `server_rows`,
+//! `select_server`, `connect_server`, `disconnect_server`, `voice_server`.
 
 use super::session::{ServerRow, ServerStatus};
 use super::*;
@@ -31,7 +31,7 @@ impl RustTalkApp {
         self.all_sessions().map(|s| s.id).collect()
     }
 
-    fn session_by_key(&self, key: &str) -> Option<SessionId> {
+    pub(super) fn session_by_key(&self, key: &str) -> Option<SessionId> {
         self.all_sessions()
             .find(|s| !key.is_empty() && s.key == key)
             .map(|s| s.id)
@@ -42,7 +42,7 @@ impl RustTalkApp {
         self.all_sessions().any(|s| s.connected)
     }
 
-    fn bookmark_for(&self, key: &str) -> Option<&ServerBookmark> {
+    pub(super) fn bookmark_for(&self, key: &str) -> Option<&ServerBookmark> {
         self.config
             .bookmarks
             .iter()
@@ -110,8 +110,6 @@ impl RustTalkApp {
     // ----- Server switcher ------------------------------------------------
 
     /// Saved servers first (in their order), then live servers that are not saved.
-    // shortcut: only tests call this until the server switcher UI (#22) lands; then drop the allow.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn server_rows(&self) -> Vec<ServerRow> {
         let voice = self.voice().map(|s| s.id);
         let row = |key: String,
@@ -228,12 +226,11 @@ impl RustTalkApp {
         self.leave_fullscreen();
     }
 
-    /// Server switcher: connects a server. A successful login enrolls a saved
-    /// server for startup. An unknown certificate still needs the user's trust
-    /// on the connect screen before anything is sent.
-    // shortcut: only tests call this until the server switcher UI (#22) lands; then drop the allow.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) fn connect_server(&mut self, key: &str) {
+    /// Connects a server. With `remember` (the user chose "Connect and
+    /// remember") a successful login enrolls the saved server for startup;
+    /// otherwise it is not enrolled. An unknown certificate still needs the
+    /// user's trust on the connect screen before anything is sent.
+    pub(super) fn connect_server(&mut self, key: &str, remember: bool) {
         let address = match self.session_by_key(key) {
             Some(id) => self.session(id).map(|s| s.address.clone()),
             None => self.bookmark_for(key).map(|b| b.address.clone()),
@@ -247,7 +244,7 @@ impl RustTalkApp {
         if s.cmd_tx.is_some() {
             return;
         }
-        s.explicit = true;
+        s.remember = remember;
         if let Some(rc) = s.reconnect.as_mut() {
             rc.next_at = None; // a manual attempt replaces the scheduled one
         }
@@ -262,8 +259,8 @@ impl RustTalkApp {
     }
 
     /// Connect screen: connects (or shows, if it is open already) the server
-    /// in the address field and views it.
-    pub(super) fn start_connect(&mut self) {
+    /// in the address field and views it. `remember` as in `connect_server`.
+    pub(super) fn start_connect(&mut self, remember: bool) {
         // An invite link in the address field: address + invite code.
         if let Some((addr, code)) = moderation_ui::parse_invite_link(&self.config.server_address) {
             self.config.server_address = addr;
@@ -287,7 +284,7 @@ impl RustTalkApp {
         if self.srv.cmd_tx.is_some() {
             return; // connected or connecting already
         }
-        self.srv.explicit = true;
+        self.srv.remember = remember;
         if self.begin_connect(id) {
             self.set_status(format!("Connecting to {}...", self.srv.address));
         } else {
@@ -323,7 +320,7 @@ impl RustTalkApp {
         };
         if active >= MAX_ACTIVE_SESSIONS {
             s.reconnect = None;
-            s.explicit = false;
+            s.remember = false;
             s.overflow = true;
             s.last_error = Some(format!(
                 "Not connected: at most {MAX_ACTIVE_SESSIONS} servers can be open at once"
@@ -504,7 +501,7 @@ impl RustTalkApp {
         self.drop_connection(id);
         if let Some(s) = self.session_mut(id) {
             s.reconnect = None;
-            s.explicit = false;
+            s.remember = false;
             s.overflow = false;
             s.cert_check = None;
             s.join_error = None;
@@ -671,8 +668,6 @@ impl RustTalkApp {
     }
 
     /// Name of the server that has voice, for "voice on ..." indicators.
-    // shortcut: only tests call this until the server switcher UI (#22) lands; then drop the allow.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn voice_server(&self) -> Option<(String, String)> {
         let s = self.voice()?;
         Some((s.key.clone(), self.server_label(s.id)))
@@ -770,7 +765,7 @@ impl RustTalkApp {
     }
 
     /// Leaves voice on `owner`: media stops first, then its server moves us to the lobby.
-    fn leave_voice(&mut self, owner: SessionId) -> bool {
+    pub(super) fn leave_voice(&mut self, owner: SessionId) -> bool {
         let in_voice = self
             .session(owner)
             .filter(|s| s.connected && s.my_voice_channel().is_some());
@@ -872,4 +867,4 @@ impl RustTalkApp {
 
 #[cfg(test)]
 #[path = "servers_tests.rs"]
-mod tests;
+pub(in crate::app) mod tests;

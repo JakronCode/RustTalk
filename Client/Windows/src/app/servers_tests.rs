@@ -8,7 +8,7 @@ const SPAWN: u64 = 1;
 const VOICE: u64 = 2;
 const TEXT: u64 = 3;
 
-fn app() -> RustTalkApp {
+pub(in crate::app) fn app() -> RustTalkApp {
     RustTalkApp::with_config(
         egui::Context::default(),
         ClientConfig {
@@ -21,7 +21,7 @@ fn app() -> RustTalkApp {
     )
 }
 
-fn bookmark(address: &str) -> ServerBookmark {
+pub(in crate::app) fn bookmark(address: &str) -> ServerBookmark {
     ServerBookmark {
         name: String::new(),
         address: address.into(),
@@ -30,7 +30,7 @@ fn bookmark(address: &str) -> ServerBookmark {
 }
 
 /// Server view with us (`my_id`) in the lobby.
-fn welcome(my_id: u64) -> NetEvent {
+pub(in crate::app) fn welcome(my_id: u64) -> NetEvent {
     let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
     udp.connect(udp.local_addr().unwrap()).unwrap();
     NetEvent::Connected {
@@ -75,7 +75,7 @@ fn welcome(my_id: u64) -> NetEvent {
 }
 
 /// A logged-in session for `address` (a fake transport instead of the network).
-fn login(
+pub(in crate::app) fn login(
     app: &mut RustTalkApp,
     address: &str,
     my_id: u64,
@@ -87,7 +87,7 @@ fn login(
     (id, rx)
 }
 
-fn moved(app: &mut RustTalkApp, id: SessionId, client_id: u64, channel_id: u64) {
+pub(in crate::app) fn moved(app: &mut RustTalkApp, id: SessionId, client_id: u64, channel_id: u64) {
     app.handle_event(
         id,
         NetEvent::Message(ServerMessage::UserMoved {
@@ -113,7 +113,7 @@ fn chat(app: &mut RustTalkApp, id: SessionId, channel_id: u64, text: &str) {
     );
 }
 
-fn drain(rx: &mut UnboundedReceiver<Command>) -> Vec<String> {
+pub(in crate::app) fn drain(rx: &mut UnboundedReceiver<Command>) -> Vec<String> {
     let mut out = Vec::new();
     while let Ok(cmd) = rx.try_recv() {
         out.push(format!("{cmd:?}"));
@@ -122,7 +122,7 @@ fn drain(rx: &mut UnboundedReceiver<Command>) -> Vec<String> {
 }
 
 /// A local port nothing listens on: connection attempts fail fast.
-fn closed_port() -> String {
+pub(in crate::app) fn closed_port() -> String {
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     l.local_addr().unwrap().to_string()
 }
@@ -441,7 +441,7 @@ fn startup_and_retries_respect_the_session_and_attempt_limits() {
     );
     // An explicit connect beyond the limit fails with a reason instead of opening a ninth.
     let extra = overflow[0].key.clone();
-    app.connect_server(&extra);
+    app.connect_server(&extra, false);
     assert_eq!(
         app.all_sessions().filter(|s| s.is_active()).count(),
         MAX_ACTIVE_SESSIONS
@@ -479,24 +479,33 @@ fn explicit_disconnect_persists_and_beats_reconnects() {
 }
 
 #[test]
-fn only_an_explicit_login_to_a_saved_server_enrolls_it() {
+fn only_connect_and_remember_enrolls_a_saved_server() {
     let _devices = Devices::new();
     let mut app = app();
-    let saved = closed_port();
-    app.config.bookmarks = vec![bookmark(&saved)];
-    app.config.known_servers.insert(saved.clone(), "AA".into());
-    app.config.server_address = saved.clone();
-    app.start_connect();
-    assert!(app.srv.explicit && app.srv.cmd_tx.is_some());
-    assert!(
-        app.config.auto_connect.is_empty(),
-        "not before the login succeeded"
-    );
+    let (once, remembered, via_row) = (closed_port(), closed_port(), closed_port());
+    app.config.bookmarks = vec![bookmark(&once), bookmark(&remembered), bookmark(&via_row)];
+    // Connect once (form route): a successful login enrolls nothing.
+    app.config.server_address = once.clone();
+    app.start_connect(false);
+    assert!(!app.srv.remember && app.srv.cmd_tx.is_some());
     app.handle_event(app.srv.id, welcome(1));
-    assert!(app.config.auto_connect.contains(&saved));
-    // An unsaved address is never enrolled.
+    assert!(app.config.auto_connect.is_empty());
+    // Switcher route without the choice: same.
+    app.connect_server(&via_row, false);
+    let id = app.session_by_key(&via_row).unwrap();
+    app.handle_event(id, welcome(1));
+    assert!(app.config.auto_connect.is_empty());
+    // Connect and remember: nothing before the login, enrolled after it.
+    app.config.server_address = remembered.clone();
+    app.start_connect(true);
+    assert!(app.srv.remember && app.config.auto_connect.is_empty());
+    app.handle_event(app.srv.id, welcome(1));
+    assert_eq!(app.config.auto_connect, std::collections::BTreeSet::from([remembered.clone()]));
+    // The choice is spent by the login: a later connect once does not renew it.
+    assert!(!app.srv.remember);
+    // An unsaved address is never enrolled, even asked to be remembered.
     let (u, _ru) = login(&mut app, "unsaved.invalid:7331", 1);
-    app.session_mut(u).unwrap().explicit = true;
+    app.session_mut(u).unwrap().remember = true;
     app.handle_event(u, welcome(1));
     assert_eq!(app.config.auto_connect.len(), 1);
 }

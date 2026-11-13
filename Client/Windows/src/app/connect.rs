@@ -5,6 +5,10 @@ use super::*;
 
 impl RustTalkApp {
     pub(super) fn ui_connect(&mut self, ctx: &egui::Context) {
+        // Other servers stay reachable (switcher, voice, mute) while this one is not connected.
+        if self.any_connected() {
+            self.ui_sidebar(ctx, None);
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(theme::DARK))
             .show(ctx, |ui| {
@@ -39,7 +43,7 @@ impl RustTalkApp {
                                     egui::Layout::top_down(egui::Align::Min),
                                     |ui| {
                                         if self.saved_servers(ui) {
-                                            self.start_connect();
+                                            self.request_connect();
                                         }
                                     },
                                 );
@@ -171,6 +175,8 @@ impl RustTalkApp {
         }
         if !self.show_connect_form {
             ui.add_space(8.0);
+            super::server_switcher::reconnect_note(ui);
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if theme::ghost_button_sized(ui, format!("{}  Settings", icons::regular::GEAR_SIX), egui::vec2(0.0, 32.0)).clicked() {
                     self.open_settings(SettingsPage::Voice);
@@ -317,7 +323,7 @@ impl RustTalkApp {
             if trust.clicked() && check.trust(&mut self.config) {
                 self.config.save();
                 self.srv.cert_check = None;
-                self.start_connect();
+                self.start_connect(self.srv.remember); // the choice made before the certificate question
             }
             if theme::ghost_button(ui, "Cancel").clicked() {
                 self.srv.cert_check = None;
@@ -330,7 +336,7 @@ impl RustTalkApp {
     fn run_join_action(&mut self, ctx: &egui::Context, action: super::join_error::Action) {
         use super::join_error::Action;
         match action {
-            Action::Retry => self.start_connect(),
+            Action::Retry => self.start_connect(self.srv.remember),
             Action::EditPassword => {
                 self.show_connect_form = true;
                 self.srv.join_error = None;
@@ -405,8 +411,10 @@ impl RustTalkApp {
             if let Some(rc) = self.srv.reconnect.as_mut() {
                 rc.next_at = None; // manual attempt replaces the scheduled one
             }
-            self.start_connect();
+            self.request_connect();
         }
+        ui.add_space(4.0);
+        super::server_switcher::reconnect_note(ui);
         if let Some(rc) = &self.srv.reconnect {
             ui.add_space(4.0);
             let attempt = rc.attempt;
@@ -431,12 +439,6 @@ impl RustTalkApp {
                     Ok(()) => {
                         self.config.save();
                         self.set_status("Server saved");
-                        // Saved while connected: the user joined it, so it reconnects on start too.
-                        let key = crate::net::normalize_addr(self.config.server_address.trim());
-                        if self.srv.connected && self.srv.key == key {
-                            let name = self.srv.server_settings.name.clone();
-                            self.enroll(&key, &name);
-                        }
                     }
                     Err(message) => self.set_error(message),
                 }

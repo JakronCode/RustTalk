@@ -26,9 +26,8 @@ const SIDEBAR_MAX: f32 = 480.0;
 fn row_h() -> f32 {
     theme::dense(30.0, 24.0)
 }
-/// Width of the server dropdown menu.
+/// Width of the channel, category and user context menus.
 const MENU_W: f32 = 230.0;
-
 impl RustTalkApp {
     /// Children of `parent` (without the lobby), in display order.
     pub(super) fn sorted_children(&self, parent: Option<u64>) -> Vec<ChannelInfo> {
@@ -46,11 +45,14 @@ impl RustTalkApp {
         self.srv.users.get(&self.srv.my_id).map(|u| u.channel_id)
     }
 
+    /// `cmd_tx` is the viewed server's connection; `None` while it is not
+    /// connected (header, switcher and voice panel only).
     pub(super) fn ui_sidebar(
         &mut self,
         ctx: &egui::Context,
-        cmd_tx: &tokio::sync::mpsc::UnboundedSender<Command>,
+        cmd_tx: Option<&tokio::sync::mpsc::UnboundedSender<Command>>,
     ) {
+        let mut switch = None;
         let width = self.config.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
         let panel = egui::SidePanel::left("sidebar")
             .default_width(width)
@@ -67,7 +69,7 @@ impl RustTalkApp {
                             .inner_margin(egui::Margin::symmetric(12, 0))
                             .stroke(egui::Stroke::new(1.0_f32, theme::BORDER)),
                     )
-                    .show_inside(ui, |ui| self.ui_server_header(ui));
+                    .show_inside(ui, |ui| switch = self.ui_server_header(ui));
 
                 egui::TopBottomPanel::bottom("user_panel")
                     .frame(egui::Frame::default().fill(theme::SIDEBAR).inner_margin(egui::Margin::same(8)))
@@ -95,9 +97,15 @@ impl RustTalkApp {
                     .show_inside(ui, |ui| {
                         egui::ScrollArea::vertical()
                             .auto_shrink([false, false])
-                            .show(ui, |ui| self.ui_channel_tree(ui, cmd_tx));
+                            .show(ui, |ui| match cmd_tx {
+                                Some(cmd_tx) => self.ui_channel_tree(ui, cmd_tx),
+                                None => self.ui_not_connected(ui),
+                            });
                     });
             });
+        if let Some(action) = switch {
+            self.apply_switch(action);
+        }
         // Persist once the drag is over (not every frame while dragging).
         let new = panel.response.rect.width().round();
         if (new - self.config.sidebar_width).abs() >= 1.0 && !ctx.input(|i| i.pointer.any_down()) {
@@ -106,70 +114,105 @@ impl RustTalkApp {
         }
     }
 
-    /// Server icon + name with dropdown menu (server settings, create, ...).
-    fn ui_server_header(&mut self, ui: &mut egui::Ui) {
-        let rect = ui.max_rect();
+    /// Server icon + name with the dropdown: server rows, then server and app actions.
+    /// The dropdown is as wide as the header (the sidebar). Returns what the
+    /// user did in the server list; the caller applies it after drawing.
+    fn ui_server_header(&mut self, ui: &mut egui::Ui) -> Option<server_switcher::SwitchAction> {
+        // Whole header width, past the panel margin, so the dropdown lines up with the sidebar.
+        let rect = ui.max_rect().expand2(egui::vec2(12.0, 0.0));
+        let connected = self.is_connected();
         let resp = ui.interact(rect, ui.id().with("server_menu_btn"), egui::Sense::click());
         if resp.hovered() {
-            ui.painter().rect_filled(rect.shrink2(egui::vec2(-12.0, 0.0)), 0.0, theme::HOVER);
+            ui.painter().rect_filled(rect, 0.0, theme::HOVER);
         }
         let popup_id = ui.make_persistent_id("server_menu");
         let open = ui.memory(|m| m.is_popup_open(popup_id));
-        let icon_rect = egui::Rect::from_center_size(rect.left_center() + egui::vec2(14.0, 0.0), egui::vec2(28.0, 28.0));
+        let icon_rect = egui::Rect::from_center_size(rect.left_center() + egui::vec2(26.0, 0.0), egui::vec2(28.0, 28.0));
         let settings = self.srv.server_settings.clone();
-        server_settings::paint_server_icon(ui, icon_rect, &settings, &mut self.textures);
+        let title = if connected { settings.name.clone() } else { self.server_label(self.srv.id) };
+        if connected {
+            server_settings::paint_server_icon(ui, icon_rect, &settings, &mut self.textures);
+        } else {
+            ui.painter().circle_filled(icon_rect.center(), 14.0, theme::avatar_color(&title));
+            ui.painter().text(icon_rect.center(), egui::Align2::CENTER_CENTER, icons::regular::HARD_DRIVES, egui::FontId::proportional(15.0), egui::Color32::WHITE);
+        }
         let font = egui::FontId::proportional(15.5);
-        let name = elide(ui, &settings.name, &font, rect.width() - 64.0);
+        let name = elide(ui, &title, &font, rect.width() - 88.0);
         ui.painter().text(
-            rect.left_center() + egui::vec2(36.0, 0.0),
+            rect.left_center() + egui::vec2(48.0, 0.0),
             egui::Align2::LEFT_CENTER,
             name,
             font,
             theme::HEADER,
         );
         ui.painter().text(
-            rect.right_center(),
+            rect.right_center() - egui::vec2(12.0, 0.0),
             egui::Align2::RIGHT_CENTER,
             if open { icons::regular::X } else { icons::regular::CARET_DOWN },
             egui::FontId::proportional(16.0),
             theme::HEADER,
         );
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Servers and menu, viewing {title}")));
         if resp.clicked() {
             ui.memory_mut(|m| m.toggle_popup(popup_id));
         }
+        let mut action = None;
         egui::popup_below_widget(
             ui,
             popup_id,
             &resp,
-            egui::PopupCloseBehavior::CloseOnClick,
+            egui::PopupCloseBehavior::CloseOnClickOutside,
             |ui| {
-                // Fixed width: items sized from available_width() made the
-                // popup grow every frame.
-                ui.set_width(MENU_W);
+                // Fixed width (the header's): items sized from available_width()
+                // made the popup grow every frame.
+                let margin = egui::Frame::popup(ui.style()).total_margin().sum().x;
+                ui.set_width((rect.width() - margin).max(0.0));
                 ui.spacing_mut().item_spacing.y = 2.0;
-                if theme::menu_item(ui, icons::regular::SHIELD_CHECK, "Server Settings", false).clicked() {
-                    self.open_server_settings(server_settings::ServerTab::Overview);
-                }
+                let mut close = false;
+                action = self.ui_server_rows(ui, &mut close);
                 theme::menu_separator(ui);
-                let admin = self.can(rusttalk_shared::protocol::Role::Admin);
-                ui.add_enabled_ui(admin, |ui| {
-                    if theme::menu_item(ui, icons::regular::PLUS_CIRCLE, "Create Channel", false).on_disabled_hover_text("Only admins").clicked() {
-                        self.open_new_channel(None, ChannelKind::Text);
+                let tip = |admin_only: bool| if connected && admin_only { "Only admins" } else { "Connect to this server first" };
+                ui.add_enabled_ui(connected, |ui| {
+                    if theme::menu_item(ui, icons::regular::SHIELD_CHECK, "Server Settings", false).on_disabled_hover_text(tip(false)).clicked() {
+                        self.open_server_settings(server_settings::ServerTab::Overview);
+                        close = true;
                     }
-                    if theme::menu_item(ui, icons::regular::FOLDER_PLUS, "Create Category", false).on_disabled_hover_text("Only admins").clicked() {
+                });
+                theme::menu_separator(ui);
+                let admin = connected && self.can(rusttalk_shared::protocol::Role::Admin);
+                ui.add_enabled_ui(admin, |ui| {
+                    if theme::menu_item(ui, icons::regular::PLUS_CIRCLE, "Create Channel", false).on_disabled_hover_text(tip(true)).clicked() {
+                        self.open_new_channel(None, ChannelKind::Text);
+                        close = true;
+                    }
+                    if theme::menu_item(ui, icons::regular::FOLDER_PLUS, "Create Category", false).on_disabled_hover_text(tip(true)).clicked() {
                         self.open_new_channel(None, ChannelKind::Category);
+                        close = true;
                     }
                 });
                 theme::menu_separator(ui);
                 if theme::menu_item(ui, icons::regular::GEAR_SIX, "App Settings", false).clicked() {
                     self.open_settings(SettingsPage::Voice);
+                    close = true;
                 }
                 if theme::menu_item(ui, icons::regular::BUG, "Report a Bug", false).clicked() {
                     server_settings::open_bug_report(ui.ctx());
+                    close = true;
+                }
+                if close {
+                    ui.memory_mut(|m| m.close_popup());
                 }
             },
         );
-        resp.on_hover_text(format!("{}  -  {}", settings.name, self.srv.address));
+        resp.on_hover_text(format!("{title}  -  {}", self.srv.address));
+        action
+    }
+
+    /// Sidebar body while the viewed server is not connected.
+    fn ui_not_connected(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.add(egui::Label::new(egui::RichText::new("Not connected to this server.").color(theme::MUTED)).wrap());
+        ui.add(egui::Label::new(egui::RichText::new("Pick another server in the menu above, or connect this one.").size(12.0).color(theme::MUTED)).wrap());
     }
 
     /// Channel tree: lobby pinned on top, then top-level channels and
@@ -702,14 +745,16 @@ impl RustTalkApp {
         self.moderation_menu(ui, user);
     }
 
-    /// "Voice Connected" panel above the user panel; in the lobby it explains
-    /// that talking and sharing are disabled there.
+    /// "Voice Connected" panel above the user panel: shown whichever server is
+    /// viewed, named after the voice server. Hang up leaves voice only; the
+    /// server stays connected.
     fn ui_voice_panel(&mut self, ui: &mut egui::Ui) {
-        // Only for voice on this server (server disconnect sits on the Lobby row).
-        let Some(my_ch) = self.voice_channel().filter(|_| self.viewing_voice()) else { return };
+        let (Some(my_ch), Some(owner), Some((_, server))) = (self.voice_channel(), self.voice_owner, self.voice_server()) else { return };
+        let channel = self.voice().map(|s| s.channel_name(my_ch)).unwrap_or_default();
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
+                ui.set_max_width((ui.available_width() - 40.0).max(20.0)); // room for the hang-up button
                 let r = ui
                     .add(
                         egui::Label::new(
@@ -724,13 +769,11 @@ impl RustTalkApp {
                 if r.clicked() {
                     self.toggle_connection_panel(r.rect.left_top() - egui::vec2(0.0, 8.0));
                 }
-                ui.label(egui::RichText::new(self.channel_name(my_ch)).size(12.0).color(theme::MUTED));
+                ui.add(egui::Label::new(egui::RichText::new(format!("{channel} on {server}")).size(12.0).color(theme::MUTED)).truncate());
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::icon_button(ui, icons::regular::PHONE_DISCONNECT, IconState::Danger, "Leave voice (back to the lobby)").clicked() {
-                    if let Some(spawn) = self.spawn_channel_id() {
-                        self.join_channel(spawn);
-                    }
+                    self.leave_voice(owner);
                 }
             });
         });
@@ -788,7 +831,7 @@ impl RustTalkApp {
                 let max_w = (ui.available_width() - 136.0).max(36.0);
                 let name = elide(ui, &self.config.username, &egui::FontId::proportional(14.0), max_w);
                 ui.label(egui::RichText::new(name).strong().color(theme::HEADER));
-                ui.label(egui::RichText::new("Online").size(11.5).color(theme::MUTED));
+                ui.label(egui::RichText::new(if self.is_connected() { "Online" } else { "Not connected" }).size(11.5).color(theme::MUTED));
             })
             .response
             .on_hover_text(mode);

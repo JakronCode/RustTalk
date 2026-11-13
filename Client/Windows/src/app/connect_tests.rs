@@ -189,3 +189,32 @@ fn removing_another_bookmark_preserves_edit_collision_protection() {
     assert_eq!(app.config.bookmarks[0].nickname(), Some("Other"));
     assert_eq!(app.config.bookmarks[0].password.as_deref(), Some("Other"));
 }
+
+#[test]
+fn saving_a_connected_server_does_not_enroll_it() {
+    let mut app = app();
+    app.config.bookmarks.clear();
+    app.config.server_address = "fresh.invalid:7331".into();
+    app.srv.key = crate::net::normalize_addr("fresh.invalid:7331");
+    app.srv.connected = true;
+    let run = |app: &mut RustTalkApp, time: f64, events: Vec<egui::Event>| {
+        let ctx = app.ctx.clone();
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(420.0, 640.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.connect_form(ui));
+            },
+        )
+    };
+    let pos = text_position(&run(&mut app, 0.0, vec![]), &format!("{}  Save server", icons::regular::BOOKMARK_SIMPLE));
+    let ev = |pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+    run(&mut app, 0.1, vec![egui::Event::PointerMoved(pos), ev(true)]);
+    run(&mut app, 0.2, vec![ev(false)]);
+    assert_eq!(app.config.bookmarks.len(), 1, "saved");
+    assert!(app.config.auto_connect.is_empty(), "saving is not consent to reconnect at start");
+}
