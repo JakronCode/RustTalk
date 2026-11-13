@@ -192,6 +192,15 @@ fn build_out<T: cpal::SizedSample + Send + 'static>(
                     if !levels.is_empty() {
                         control.note_stream_levels(&levels);
                     }
+                } else {
+                    // Deafened: nothing plays, but the mixer still lists who is sending.
+                    let map = mixer.lock().unwrap();
+                    levels.clear();
+                    levels.extend(map.iter().map(|(id, user)| (*id, 0.0, user.last_seen)));
+                    drop(map);
+                    if !levels.is_empty() {
+                        control.note_stream_levels(&levels);
+                    }
                 }
                 // Notification sounds (also while deafened, like Discord).
                 sfx::mix_into(&sfx, &mut chunk);

@@ -264,7 +264,10 @@ impl RustTalkApp {
         egui::SidePanel::right(super::mixer::MIXER_ID)
             .resizable(true)
             .default_width(420.0)
-            .width_range(300.0..=(ui.available_width() * 0.55).clamp(300.0, 640.0))
+            .width_range({
+                let max = (ui.available_width() * 0.55).clamp(160.0, 640.0);
+                300.0f32.min(max)..=max
+            })
             .frame(egui::Frame::default().fill(theme::SIDEBAR).inner_margin(egui::Margin { left: 12, right: 12, top: 8, bottom: 8 }))
             .show_animated_inside(ui, show_mixer, |ui| self.ui_mixer(ui, &members));
 

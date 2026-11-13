@@ -1511,4 +1511,9 @@ fn mixer_volumes_are_per_stream_saved_by_name_and_follow_the_voice_server() {
     assert_eq!(gain(&app, StreamKind::Shared), None);
     assert!(app.control.muted_streams.lock().unwrap().is_empty());
     assert_eq!(app.config.share_volumes.get("anna"), Some(&1.8));
+
+    app.config.user_volumes.insert("bob".into(), f32::NAN);
+    assert_eq!(app.user_volume("bob", StreamKind::Voice), 1.0, "a broken value plays at 100 %");
+    app.apply_user_volume(9, "bob");
+    assert!(!app.user_volumes.lock().unwrap().contains_key(&StreamKind::Voice.key(9)));
 }

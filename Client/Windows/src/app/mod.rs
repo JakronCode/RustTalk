@@ -599,7 +599,8 @@ impl RustTalkApp {
     fn apply_user_volume(&self, id: u64, name: &str) {
         let mut map = self.user_volumes.lock().unwrap();
         for kind in StreamKind::ALL {
-            match self.saved_volumes(kind).get(name) {
+            // A hand-edited `nan` in the config must never reach the mixer.
+            match self.saved_volumes(kind).get(name).filter(|v| v.is_finite()) {
                 Some(&v) => {
                     map.insert(kind.key(id), v.clamp(0.0, crate::audio::MAX_VOLUME));
                 }
@@ -709,7 +710,7 @@ impl RustTalkApp {
     /// Playback volume of one user's stream (1.0 = 100 %), saved by username.
     /// The config is the only source of truth; mixer panel and user menu both read it.
     fn user_volume(&self, name: &str, kind: StreamKind) -> f32 {
-        self.saved_volumes(kind).get(name).copied().unwrap_or(1.0)
+        self.saved_volumes(kind).get(name).copied().filter(|v| v.is_finite()).unwrap_or(1.0)
     }
 
     /// Sets the playback volume of one user's stream of the viewed server and
