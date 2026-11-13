@@ -1153,11 +1153,18 @@ mod tests {
     fn batched_mention_keys_do_not_send_or_cancel_reply() {
         use super::super::servers::tests::{app, login};
         use egui::text::{CCursor, CCursorRange};
-        for (keys, expected) in [
-            (vec![egui::Key::ArrowDown, egui::Key::Enter], "@Anton "),
-            (vec![egui::Key::ArrowDown, egui::Key::Escape], "@an"),
-            (vec![egui::Key::ArrowDown, egui::Key::ArrowUp, egui::Key::Tab], "@Anna "),
-            (vec![egui::Key::Enter, egui::Key::Enter], "@Anna "),
+        let key = |key| egui::Event::Key {
+            key, physical_key: None, pressed: true, repeat: false, modifiers: Default::default(),
+        };
+        for (events, expected) in [
+            (vec![key(egui::Key::ArrowDown), key(egui::Key::Enter)], "@Anton "),
+            (vec![key(egui::Key::ArrowDown), key(egui::Key::Escape)], "@an"),
+            (vec![key(egui::Key::ArrowDown), key(egui::Key::ArrowUp), key(egui::Key::Tab)], "@Anna "),
+            (vec![key(egui::Key::Enter), key(egui::Key::Enter)], "@Anna "),
+            (vec![egui::Event::Text("t".into()), key(egui::Key::Enter)], "@Anton "),
+            (vec![egui::Event::Paste("t".into()), key(egui::Key::Tab)], "@Anton "),
+            (vec![key(egui::Key::Enter), egui::Event::Text("t".into())], "@Anna t"),
+            (vec![egui::Event::Text("t".into()), key(egui::Key::ArrowDown), key(egui::Key::Enter)], "@Anton "),
         ] {
             let mut app = app();
             let (session, mut commands) = login(&mut app, "test.invalid:7331", 1);
@@ -1190,9 +1197,8 @@ mod tests {
             ctx.memory_mut(|m| m.request_focus(id));
             draw(&mut app, vec![]);
             while commands.try_recv().is_some() {}
-            draw(&mut app, keys.into_iter().map(|key| egui::Event::Key {
-                key, physical_key: None, pressed: true, repeat: false, modifiers: Default::default(),
-            }).collect());
+            draw(&mut app, events);
+            draw(&mut app, vec![]); // deferred popup actions use the updated text/cursor
             assert_eq!(app.chat_input, expected);
             assert_eq!(app.reply_to, Some(42));
             assert!(commands.try_recv().is_none(), "completion must not send a chat command");

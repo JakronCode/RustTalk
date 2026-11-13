@@ -24,6 +24,31 @@ pub(super) struct MentionPopup {
     dismissed: Option<(String, usize)>,
     /// The keyboard moved the selection: scroll it into view.
     scroll: bool,
+    deferred: Vec<egui::Event>,
+}
+
+fn popup_key(event: &egui::Event) -> Option<egui::Key> {
+    if let egui::Event::Key {
+        key,
+        pressed: true,
+        modifiers,
+        ..
+    } = event
+    {
+        if modifiers.is_none()
+            && matches!(
+                key,
+                egui::Key::ArrowDown
+                    | egui::Key::ArrowUp
+                    | egui::Key::Escape
+                    | egui::Key::Tab
+                    | egui::Key::Enter
+            )
+        {
+            return Some(*key);
+        }
+    }
+    None
 }
 
 /// The open popup for this frame.
@@ -134,32 +159,50 @@ impl RustTalkApp {
     /// Before the composer's TextEdit: arrows, Tab/Enter and Esc go to the
     /// popup instead of the text (and Enter does not send).
     pub(super) fn mention_keys(&mut self, ctx: &egui::Context, ch_id: u64, focused: bool) {
+        if !focused {
+            self.mention.deferred.clear();
+            return;
+        }
+        let deferred = std::mem::take(&mut self.mention.deferred);
+        ctx.input_mut(|i| {
+            if !deferred.is_empty() {
+                let fresh = std::mem::replace(&mut i.events, deferred);
+                i.events.extend(fresh);
+            }
+            let mut edited = false;
+            let split = i.events.iter().position(|event| {
+                if popup_key(event).is_some() {
+                    edited
+                } else {
+                    edited |= matches!(
+                        event,
+                        egui::Event::Text(_)
+                            | egui::Event::Paste(_)
+                            | egui::Event::Cut
+                            | egui::Event::Ime(_)
+                            | egui::Event::PointerButton { .. }
+                            | egui::Event::Key { pressed: true, .. }
+                    );
+                    false
+                }
+            });
+            if let Some(at) = split {
+                // Let TextEdit apply earlier edits before evaluating the next popup action.
+                self.mention.deferred = i.events.split_off(at);
+            }
+        });
+        if !self.mention.deferred.is_empty() {
+            ctx.request_repaint();
+        }
         let Some(m) = self.active_mention(ctx, ch_id, focused) else {
             return;
         };
         let keys = ctx.input_mut(|i| {
             let mut keys = Vec::new();
             i.events.retain(|event| {
-                if let egui::Event::Key {
-                    key,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } = event
-                {
-                    if modifiers.is_none()
-                        && matches!(
-                            key,
-                            egui::Key::ArrowDown
-                                | egui::Key::ArrowUp
-                                | egui::Key::Escape
-                                | egui::Key::Tab
-                                | egui::Key::Enter
-                        )
-                    {
-                        keys.push(*key);
-                        return false;
-                    }
+                if let Some(key) = popup_key(event) {
+                    keys.push(key);
+                    return false;
                 }
                 true
             });
