@@ -22,6 +22,8 @@ const ASPECT: f32 = 16.0 / 9.0;
 const GAP: f32 = 12.0;
 /// Tiles beside the focused one are at least this fraction of its size.
 const STRIP: f32 = 0.25;
+/// Height kept free under the tiles for the layout buttons.
+const CONTROLS_BAND: f32 = 50.0;
 /// Camera overlay width relative to the presented screen.
 const OVERLAY: f32 = 0.25;
 
@@ -436,6 +438,13 @@ impl RustTalkApp {
         tiles: &[(UserInfo, Option<VideoKind>)],
         speaking_of: &dyn Fn(&UserInfo) -> bool,
     ) {
+        // The layout buttons get their own band under the tiles.
+        let full = area;
+        let area = if tiles.len() > 1 {
+            egui::Rect::from_min_max(area.min, egui::pos2(area.max.x, (area.max.y - CONTROLS_BAND).max(area.min.y)))
+        } else {
+            area
+        };
         let keys: Vec<TileKey> = tiles.iter().map(|(u, k)| (u.id, *k)).collect();
         let mut placed: Vec<(usize, egui::Rect)> = Vec::new();
         let mut overlay: Option<(egui::Rect, usize)> = None;
@@ -539,7 +548,7 @@ impl RustTalkApp {
             self.enter_fullscreen(key);
         }
         if tiles.len() > 1 {
-            self.stage_controls(ui, area, tiles.first().map_or(0, |(u, _)| u.channel_id));
+            self.stage_controls(ui, full, tiles.first().map_or(0, |(u, _)| u.channel_id));
         }
     }
 
@@ -887,8 +896,13 @@ mod tests {
         // Back in Grid, clicking a person tile focuses it.
         click_at(&ctx, &mut app, &tiles, button(0.0, 4.0), &mut t);
         assert_eq!(app.config.stage_mode, StageMode::Grid);
-        let (cols, tile) = stage_grid(3, area.size(), GAP);
-        let first = grid_rects(3, cols, tile, GAP, area)[0];
+        let tile_area = egui::Rect::from_min_max(area.min, egui::pos2(area.max.x, area.max.y - CONTROLS_BAND));
+        let (cols, tile) = stage_grid(3, tile_area.size(), GAP);
+        let first = grid_rects(3, cols, tile, GAP, tile_area)[0];
+        assert!(!first.intersects(egui::Rect::from_min_size(
+            area.right_bottom() - egui::vec2(160.0, 50.0),
+            egui::vec2(160.0, 50.0)
+        )), "tiles stay clear of the buttons");
         click_at(&ctx, &mut app, &tiles, first.center(), &mut t);
         assert_eq!(app.config.stage_mode, StageMode::Focus);
     }
