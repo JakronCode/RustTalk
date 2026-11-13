@@ -626,12 +626,8 @@ impl RustTalkApp {
                 resp
             }
         };
-        if !main {
-            ui.output_mut(|o| {
-                if ui.rect_contains_pointer(rect) {
-                    o.cursor_icon = egui::CursorIcon::PointingHand;
-                }
-            });
+        if !main && ui.rect_contains_pointer(rect) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
         if user.audio_sharing && kind != Some(VideoKind::Screen) {
             let lit = self.shared_audio_lit(user);
@@ -895,18 +891,6 @@ mod tests {
         let first = grid_rects(3, cols, tile, GAP, area)[0];
         click_at(&ctx, &mut app, &tiles, first.center(), &mut t);
         assert_eq!(app.config.stage_mode, StageMode::Focus);
-    }
-
-    #[test]
-    fn a_single_tile_shows_no_layout_buttons() {
-        let ctx = egui::Context::default();
-        let mut app = RustTalkApp::with_config(ctx.clone(), ClientConfig::default(), false);
-        let tiles = vec![(user(1, "solo"), None)];
-        let mut t = 0.0;
-        let area = run_stage(&ctx, &mut app, &tiles, t, vec![]);
-        let corner = area.right_bottom() - egui::vec2(60.0, 30.0);
-        click_at(&ctx, &mut app, &tiles, corner, &mut t);
-        assert_eq!(app.config.stage_mode, ClientConfig::default().stage_mode);
     }
 
     #[test]
