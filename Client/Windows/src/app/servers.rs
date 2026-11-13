@@ -914,7 +914,10 @@ impl RustTalkApp {
         let (muted, deafened) = self.mute_state();
         if let Some(tx) = self
             .voice_owner
-            .filter(|id| self.voice_connection_matches(*id))
+            .filter(|id| {
+                self.voice_connection_matches(*id)
+                    && (self.voice_confirmed || self.voice_pending.is_some())
+            })
             .and_then(|id| self.session(id))
             .and_then(|s| s.cmd_tx.as_ref())
         {

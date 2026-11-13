@@ -793,6 +793,49 @@ fn mirrored_voice_membership_cannot_confirm_a_pending_join() {
 }
 
 #[test]
+fn cancelling_pending_voice_stops_mute_metadata_before_and_after_lobby_ack() {
+    let devices = Devices::new();
+    let mut app = app();
+    let (a, mut ra) = login(&mut app, "a.invalid:7331", 1);
+    let (b, mut rb) = login(&mut app, "b.invalid:7331", 1);
+    app.view_session(a);
+    moved(&mut app, a, 1, VOICE);
+    message(
+        &mut app,
+        a,
+        ServerMessage::ChannelCreated {
+            channel: channel(4, ChannelKind::Voice, "requested".into()),
+        },
+    );
+    app.join_channel(4);
+    app.join_channel(SPAWN);
+    drain(&mut ra);
+    app.view_session(b);
+    for acknowledged in [false, true] {
+        if acknowledged {
+            moved(&mut app, a, 1, SPAWN);
+        }
+        app.toggle_mute();
+        app.toggle_deafen();
+        assert!(
+            drain(&mut ra).is_empty(),
+            "cancelled join must not receive toggles"
+        );
+        assert!(
+            drain(&mut rb).is_empty(),
+            "viewing chat is not voice consent"
+        );
+        assert_eq!(devices.0.borrow().input_starts, 0);
+    }
+    moved(&mut app, a, 1, 4);
+    assert!(
+        app.voice().is_none(),
+        "late voice acknowledgement stays unauthorized"
+    );
+    assert_eq!(devices.0.borrow().input_starts, 0);
+}
+
+#[test]
 fn a_pending_join_only_accepts_the_requested_channel() {
     let devices = Devices::new();
     let mut app = app();
