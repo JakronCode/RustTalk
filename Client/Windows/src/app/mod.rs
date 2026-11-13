@@ -361,6 +361,7 @@ pub struct RustTalkApp {
     screen_audio_failed: bool,
     /// Last audio-sharing status sent to the voice server (resent only when it changes).
     audio_flag_sent: bool,
+    audio_flag_at: Option<Instant>,
     audio_only: bool,
     shared_audio_source: crate::audio::share_source::AudioShareSource,
     audio_picker: Option<audio_picker::AudioPicker>,
@@ -530,6 +531,7 @@ impl RustTalkApp {
             screen_audio: None,
             screen_audio_failed: false,
             audio_flag_sent: false,
+            audio_flag_at: None,
             audio_only: false,
             shared_audio_source: Default::default(),
             audio_picker: None,

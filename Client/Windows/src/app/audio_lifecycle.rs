@@ -15,6 +15,9 @@ fn set_active<T>(
     Ok(())
 }
 
+/// Ask the server again after this long if it still disagrees about our audio sharing.
+const AUDIO_FLAG_RESEND: Duration = Duration::from_secs(3);
+
 fn wants_shared_audio(audio_only: bool, screen: bool, share_screen_audio: bool) -> bool {
     audio_only || (cfg!(any(windows, target_os = "linux")) && screen && share_screen_audio)
 }
@@ -162,17 +165,22 @@ impl RustTalkApp {
     }
 
     /// Tells the voice server whether we share computer audio. Tracks what was queued on this
-    /// connection (not the server's echo, which can arrive late), so every change is sent.
+    /// connection (the server's echo can arrive late), and asks again when the server still
+    /// disagrees after a while (e.g. it refused a change that came too fast).
     pub(super) fn sync_audio_flag(&mut self) {
-        if self.voice().is_none() {
+        let Some(session) = self.voice() else {
             self.audio_flag_sent = false; // a new voice connection starts as "not sharing"
+            self.audio_flag_at = None;
             return;
-        }
+        };
+        let known = session.users.get(&session.my_id).is_some_and(|u| u.audio_sharing);
         let wanted = self.screen_audio.is_some();
-        if wanted != self.audio_flag_sent {
+        let stale = known != wanted && self.audio_flag_at.is_none_or(|t| t.elapsed() >= AUDIO_FLAG_RESEND);
+        if wanted != self.audio_flag_sent || stale {
             if let Some(tx) = self.voice_tx() {
                 if tx.send(Command::SetAudioSharing(wanted)).is_ok() {
                     self.audio_flag_sent = wanted;
+                    self.audio_flag_at = Some(Instant::now());
                 }
             }
         }
@@ -414,6 +422,32 @@ mod tests {
         event(&mut app, NetEvent::Message(ServerMessage::AudioSharingChanged { client_id: 1, sharing: true })); // late echo
         app.sync_audio_flag();
         assert!(commands.try_recv().is_none(), "the stop is already queued, the server's final state follows it");
+    }
+
+    #[test]
+    fn a_refused_change_is_asked_again_after_the_cooldown() {
+        use crate::audio::share_source::AudioShareSource;
+        let _devices = Devices::new();
+        let mut app = app();
+        let mut commands = connect(&mut app);
+        join(&mut app, 2);
+        while commands.try_recv().is_some() {}
+        app.start_audio_selection(AudioShareSource::System);
+        app.sync_audio_flag();
+        assert!(matches!(commands.try_recv(), Some(Command::SetAudioSharing(true))));
+        // The server refused (rate limit): no echo. Not asked again straight away ...
+        app.sync_audio_flag();
+        assert!(commands.try_recv().is_none());
+        // ... but once the cooldown passed, it is.
+        app.audio_flag_at = Some(Instant::now() - AUDIO_FLAG_RESEND - Duration::from_millis(1));
+        app.sync_audio_flag();
+        assert!(matches!(commands.try_recv(), Some(Command::SetAudioSharing(true))));
+        app.sync_audio_flag();
+        assert!(commands.try_recv().is_none(), "one request per cooldown, not one per frame");
+        event(&mut app, NetEvent::Message(ServerMessage::AudioSharingChanged { client_id: 1, sharing: true }));
+        app.audio_flag_at = Some(Instant::now() - AUDIO_FLAG_RESEND * 2);
+        app.sync_audio_flag();
+        assert!(commands.try_recv().is_none(), "agreement ends the retries");
     }
 
     #[test]
