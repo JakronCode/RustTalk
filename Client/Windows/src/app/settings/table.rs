@@ -38,6 +38,7 @@ pub(crate) enum SectionId {
     Sounds,
     SpokenNames,
     Encryption,
+    Links,
     Data,
     Developer,
     Version,
@@ -137,6 +138,7 @@ pub(crate) const GROUPS: &[Group] = &[
                 page: SettingsPage::Advanced, title: "Advanced", icon: ic::SLIDERS_HORIZONTAL,
                 sections: &[
                     s(S::Encryption, "Encryption", &["encryption", "tls", "certificate", "fingerprint", "known servers", "forget", "trust", "security"]),
+                    s(S::Links, "Links", &["links", "urls", "browser", "trusted sites", "trust", "always open", "revoke", "threat feed", "malware", "phishing", "malicious", "urlhaus", "blocklist", "security"]),
                     s(S::Data, "Data", &["data", "settings file", "config", "show in folder", "reset all settings", "defaults"]),
                     s(S::Developer, "Developer", &["developer", "debug overlay", "statistics", "log level", "logs"]),
                 ],

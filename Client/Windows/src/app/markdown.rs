@@ -1,9 +1,11 @@
-//! Deliberately small, bounded chat dialect; links, images and HTML stay inert text.
+//! Deliberately small, bounded chat dialect. Only bare http(s) links are live (see
+//! `links`); markdown links, images and HTML stay inert text.
 use super::theme;
 use eframe::egui::{self, text::LayoutJob, Color32, FontId, TextFormat};
 use std::{
     collections::{HashMap, VecDeque},
     hash::{Hash, Hasher},
+    ops::Range,
     sync::mpsc,
     time::{Duration, Instant},
 };
@@ -18,6 +20,8 @@ const MAX_BLOCKS: usize = 256;
 const CACHE_SIZE: usize = 64;
 const CODE_BYTES: usize = 4096;
 const MEASUREMENT_LIMIT: usize = 10_000;
+const MAX_LINKS: usize = 64;
+const LINK: Color32 = Color32::from_rgb(0x00, 0xA8, 0xFC);
 
 fn bounded(s: &str) -> &str {
     let mut end = s.len().min(MAX_BYTES);
@@ -31,6 +35,8 @@ fn bounded(s: &str) -> &str {
 struct Block {
     job: LayoutJob,
     language: Option<String>,
+    /// Byte ranges in `job.text` and their validated targets.
+    links: Vec<(Range<usize>, url::Url)>,
 }
 
 fn format(size: f32, mono: bool) -> TextFormat {
@@ -45,7 +51,16 @@ fn format(size: f32, mono: bool) -> TextFormat {
     }
 }
 
-fn inline(text: &str, style: TextFormat, depth: usize, budget: &mut usize, job: &mut LayoutJob) {
+type Links = Vec<(Range<usize>, url::Url)>;
+
+fn inline(
+    text: &str,
+    style: TextFormat,
+    depth: usize,
+    budget: &mut usize,
+    job: &mut LayoutJob,
+    links: &mut Links,
+) {
     if depth == 8 || *budget < text.len() {
         job.append(text, 0.0, style);
         return;
@@ -58,6 +73,19 @@ fn inline(text: &str, style: TextFormat, depth: usize, budget: &mut usize, job: 
             if "*_~`\\".contains(escaped) {
                 job.append(&escaped.to_string(), 0.0, style.clone());
                 pos += 1 + escaped.len_utf8();
+                continue;
+            }
+        }
+        // Links win over emphasis markers so `_` or `*` inside a URL stay part of it.
+        if links.len() < MAX_LINKS {
+            if let Some((len, url)) = super::links::detect(rest, text[..pos].chars().next_back()) {
+                let mut styled = style.clone();
+                styled.color = LINK;
+                styled.underline = egui::Stroke::new(1.0_f32, LINK);
+                let start = job.text.len();
+                job.append(&rest[..len], 0.0, styled);
+                links.push((start..job.text.len(), url));
+                pos += len;
                 continue;
             }
         }
@@ -92,7 +120,7 @@ fn inline(text: &str, style: TextFormat, depth: usize, budget: &mut usize, job: 
                     if m == "`" {
                         job.append(&tail[..end], 0.0, styled);
                     } else {
-                        inline(&tail[..end], styled, depth + 1, budget, job);
+                        inline(&tail[..end], styled, depth + 1, budget, job, links);
                     }
                     pos += m.len() * 2 + end;
                     continue;
@@ -120,6 +148,7 @@ fn parse(text: &str) -> Vec<Block> {
             blocks.push(Block {
                 job,
                 language: None,
+                links: Vec::new(),
             });
             break;
         }
@@ -137,6 +166,7 @@ fn parse(text: &str) -> Vec<Block> {
             blocks.push(Block {
                 job,
                 language: Some(tag.trim().to_ascii_lowercase()),
+                links: Vec::new(),
             });
             continue;
         }
@@ -164,10 +194,19 @@ fn parse(text: &str) -> Vec<Block> {
         // Ordered list numbers are already the right visible marker.
         let mut job = LayoutJob::default();
         job.append(prefix, 0.0, format(size, false));
-        inline(body, format(size, false), 0, &mut budget, &mut job);
+        let mut links = Vec::new();
+        inline(
+            body,
+            format(size, false),
+            0,
+            &mut budget,
+            &mut job,
+            &mut links,
+        );
         blocks.push(Block {
             job,
             language: None,
+            links,
         });
     }
     for block in &mut blocks {
@@ -191,6 +230,7 @@ fn parse(text: &str) -> Vec<Block> {
         return vec![Block {
             job,
             language: None,
+            links: Vec::new(),
         }];
     }
     blocks
@@ -332,6 +372,8 @@ pub(super) struct Cache {
     pending: bool,
     tx: mpsc::SyncSender<Work>,
     rx: mpsc::Receiver<(u64, Vec<Block>)>,
+    /// Link clicked this frame, for the confirmation dialog.
+    clicked: Option<url::Url>,
 }
 
 impl Default for Cache {
@@ -362,11 +404,16 @@ impl Default for Cache {
             pending: false,
             tx,
             rx,
+            clicked: None,
         }
     }
 }
 
 impl Cache {
+    pub(super) fn take_clicked(&mut self) -> Option<url::Url> {
+        self.clicked.take()
+    }
+
     pub(super) fn show(&mut self, ui: &mut egui::Ui, id: u64, text: &str) {
         if let Ok((serial, blocks)) = self.rx.try_recv() {
             self.pending = false;
@@ -413,6 +460,7 @@ impl Cache {
                 submitted: false,
             }
         };
+        let mut clicked = None;
         let response = ui.vertical(|ui| {
             for (i, block) in entry.blocks.iter().enumerate() {
                 if let Some(tag) = &block.language {
@@ -431,14 +479,19 @@ impl Cache {
                                 ui.add(egui::Label::new(block.job.clone()).wrap());
                             });
                     });
-                } else {
+                } else if block.links.is_empty() {
                     ui.add(egui::Label::new(block.job.clone()).wrap());
+                } else if let Some(url) = link_label(ui, block) {
+                    clicked = Some(url);
                 }
             }
             if text.len() > MAX_BYTES {
                 ui.label("[message display truncated]");
             }
         });
+        if clicked.is_some() {
+            self.clicked = clicked;
+        }
         if ui.is_rect_visible(response.response.rect)
             && !entry.submitted
             && !self.pending
@@ -472,6 +525,60 @@ impl Cache {
     }
 }
 
+/// Paints a block like `egui::Label` (selection included) and returns the link clicked.
+fn link_label(ui: &mut egui::Ui, block: &Block) -> Option<url::Url> {
+    let selectable = ui.style().interaction.selectable_labels;
+    let (pos, galley, response) = egui::Label::new(block.job.clone())
+        .wrap()
+        .sense(egui::Sense::click())
+        .layout_in_ui(ui);
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), galley.text())
+    });
+    let hit = response
+        .hover_pos()
+        .and_then(|p| link_at(&galley, p - pos, &block.links));
+    if ui.is_rect_visible(response.rect) {
+        let color = ui.visuals().text_color();
+        if selectable {
+            egui::text_selection::LabelSelectionState::label_text_selection(
+                ui,
+                &response,
+                pos,
+                galley,
+                color,
+                egui::Stroke::NONE,
+            );
+        } else {
+            ui.painter().galley(pos, galley, color);
+        }
+    }
+    let url = &block.links[hit?].1;
+    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    response.clicked().then(|| url.clone())
+}
+
+/// Index of the link whose glyph is at `p` (galley coordinates).
+fn link_at(
+    galley: &egui::Galley,
+    p: egui::Vec2,
+    links: &[(Range<usize>, url::Url)],
+) -> Option<usize> {
+    let mut chars = 0;
+    for row in &galley.rows {
+        if row.rect.min.y <= p.y && p.y < row.rect.max.y {
+            let i = row
+                .glyphs
+                .iter()
+                .position(|g| g.pos.x <= p.x && p.x < g.max_x())?;
+            let byte = galley.job.text.char_indices().nth(chars + i)?.0;
+            return links.iter().position(|(r, _)| r.contains(&byte));
+        }
+        chars += row.char_count_including_newline();
+    }
+    None
+}
+
 /// Keep the original text and cursor offsets; only fenced lines change font.
 pub(super) fn composer(ui: &egui::Ui, text: &str, width: f32) -> std::sync::Arc<egui::Galley> {
     let mut job = LayoutJob::default();
@@ -502,6 +609,7 @@ mod tests {
             pending: true,
             tx,
             rx,
+            clicked: None,
         };
         let ctx = egui::Context::default();
         let draw = |cache: &mut Cache, offset, timestamps, text: &str| {
@@ -595,6 +703,7 @@ mod tests {
             pending: true,
             tx,
             rx,
+            clicked: None,
         };
         let ctx = egui::Context::default();
         let text = "ordinary words ".repeat(130);
@@ -675,6 +784,7 @@ mod tests {
             pending: true,
             tx,
             rx,
+            clicked: None,
         };
         let ctx = egui::Context::default();
         let _ = ctx.run(Default::default(), |ctx| {
@@ -783,5 +893,101 @@ mod tests {
         let mut large = parse(&format!("```rust\n{}\n```", "a".repeat(5000)));
         highlight(&mut large, &syntaxes, &highlight_theme());
         assert_eq!(large[0].job.sections.len(), 1);
+    }
+
+    #[test]
+    fn links_outside_code_keep_text_and_are_bounded() {
+        let blocks = parse("see https://example.com/a_b_c, `https://code.example` **https://bold.example**\n```\nhttps://fenced.example\n```\n> https://quote.example/x\nhttps://user@evil.example javascript:alert(1) https://evil\u{202E}.example");
+        let linked: Vec<&str> = blocks
+            .iter()
+            .flat_map(|b| b.links.iter().map(move |(r, _)| &b.job.text[r.clone()]))
+            .collect();
+        assert_eq!(
+            linked,
+            [
+                "https://example.com/a_b_c",
+                "https://bold.example",
+                "https://quote.example/x"
+            ]
+        );
+        assert_eq!(
+            plain("see https://example.com/a_b_c, done"),
+            "see https://example.com/a_b_c, done"
+        );
+        assert_eq!(
+            parse(&"https://a.example ".repeat(200))[0].links.len(),
+            MAX_LINKS
+        );
+        let capped = parse(&format!(
+            "{}https://a.example",
+            "x\n".repeat(MAX_BLOCKS + 10)
+        ));
+        assert!(
+            capped.iter().all(|b| b.links.is_empty()),
+            "lines past the block cap stay plain"
+        );
+    }
+
+    #[test]
+    fn clicking_a_link_reports_only_its_target() {
+        let (tx, _work) = mpsc::sync_channel(1);
+        let (_result, rx) = mpsc::sync_channel(1);
+        let mut cache = Cache {
+            entries: VecDeque::new(),
+            serial: 0,
+            measurements: HashMap::new(),
+            pending: true,
+            tx,
+            rx,
+            clicked: None,
+        };
+        let ctx = egui::Context::default();
+        let click = |cache: &mut Cache, text: &str, at: egui::Pos2| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            for events in [
+                vec![],
+                vec![egui::Event::PointerMoved(at)],
+                vec![button(true)],
+                vec![button(false)],
+            ] {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        events,
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(400.0, 200.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| cache.show(ui, 1, text));
+                    },
+                );
+            }
+            cache.take_clicked().map(|u| u.to_string())
+        };
+        // Panel content starts at (8, 8).
+        assert_eq!(
+            click(&mut cache, "https://example.com/x", egui::pos2(20.0, 16.0)).as_deref(),
+            Some("https://example.com/x")
+        );
+        assert_eq!(
+            click(
+                &mut cache,
+                "plain words https://example.com/x",
+                egui::pos2(12.0, 16.0)
+            ),
+            None
+        );
+        assert_eq!(
+            click(&mut cache, "https://example.com/x", egui::pos2(380.0, 16.0)),
+            None,
+            "beyond the text"
+        );
     }
 }

@@ -155,6 +155,13 @@ pub struct ClientConfig {
     /// Width of the channel sidebar in points (drag its right edge).
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: f32,
+    /// Link origins ("https://host[:port]") opened without asking -> unix time trusted.
+    /// Bounded and expiring; see `app::links`.
+    #[serde(default)]
+    pub trusted_links: std::collections::BTreeMap<String, u64>,
+    /// Local threat feed file the user imported (read only, never downloaded by RustTalk).
+    #[serde(default)]
+    pub threat_feed: Option<String>,
 }
 
 fn default_sidebar_width() -> f32 {
@@ -244,6 +251,8 @@ impl Default for ClientConfig {
             compact: false,
             accent_color: DEFAULT_ACCENT,
             sidebar_width: default_sidebar_width(),
+            trusted_links: Default::default(),
+            threat_feed: None,
         }
     }
 }
@@ -386,6 +395,8 @@ mod tests {
             compact: true,
             accent_color: [0xEB, 0x45, 0x95],
             sidebar_width: 320.0,
+            trusted_links: [("https://github.com".to_string(), 1_700_000_000)].into_iter().collect(),
+            threat_feed: Some("feeds/urlhaus.txt".into()),
         };
         let text = toml::to_string_pretty(&cfg).unwrap();
         let back: ClientConfig = toml::from_str(&text).unwrap();
@@ -414,6 +425,8 @@ mod tests {
         assert_eq!(back.known_servers.get("10.0.0.5:7331").map(String::as_str), Some("AB:CD"));
         assert!(back.auto_connect.contains("10.69.40.101:7331"));
         assert_eq!(back.user_volumes.get("anna"), Some(&1.5));
+        assert_eq!(back.trusted_links.get("https://github.com"), Some(&1_700_000_000));
+        assert_eq!(back.threat_feed.as_deref(), Some("feeds/urlhaus.txt"));
     }
 
     #[test]
@@ -483,5 +496,6 @@ mod tests {
         assert_eq!(cfg.sidebar_width, 260.0);
         assert!(cfg.server_address.ends_with(":7331"));
         assert!(cfg.auto_connect.is_empty(), "existing installs are not enrolled");
+        assert!(cfg.trusted_links.is_empty() && cfg.threat_feed.is_none(), "links ask and no feed by default");
     }
 }

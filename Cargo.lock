@@ -4807,6 +4807,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-normalization",
  "ureq 2.12.1",
+ "url",
  "windows 0.62.2",
  "windows-core 0.62.2",
  "winreg",
