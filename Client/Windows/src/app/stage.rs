@@ -252,12 +252,11 @@ impl RustTalkApp {
         }
     }
 
-    /// Layout buttons (Grid / Focus / Presenter) in the bottom right corner of the stage and,
-    /// for Focus / Presenter, a menu with who is shown.
+    /// Grid and Focus buttons plus a "..." menu (Presenter, video only, who is shown) in the
+    /// bottom right corner of the stage.
     pub(super) fn stage_controls(&mut self, ui: &mut egui::Ui, area: egui::Rect, ch_id: u64) {
         let mode = self.config.stage_mode;
-        let count = if mode == StageMode::Grid { 4.0 } else { 5.0 };
-        let size = egui::vec2(count * 34.0 + 8.0, 40.0);
+        let size = egui::vec2(3.0 * 34.0 + 8.0, 40.0);
         let pill = egui::Rect::from_min_size(
             area.right_bottom() - size - egui::vec2(10.0, 10.0),
             size,
@@ -265,7 +264,7 @@ impl RustTalkApp {
         ui.painter()
             .rect_filled(pill, 10.0, egui::Color32::from_black_alpha(170));
         let mut picked = None;
-        let mut target = None;
+        let mut more = None;
         let mut toggle_idle = false;
         ui.scope_builder(
             egui::UiBuilder::new()
@@ -273,7 +272,7 @@ impl RustTalkApp {
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
             |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                for m in [StageMode::Grid, StageMode::Focus, StageMode::Presenter] {
+                for m in [StageMode::Grid, StageMode::Focus] {
                     let state = if m == mode {
                         theme::IconState::Active
                     } else {
@@ -284,37 +283,21 @@ impl RustTalkApp {
                         picked = Some(m);
                     }
                 }
-                if mode != StageMode::Grid {
-                    target = Some(theme::icon_button(
-                        ui,
-                        icons::regular::USER_FOCUS,
-                        theme::IconState::Normal,
-                        &format!("Who {} shows (only on your screen)", mode.label()),
-                    ));
-                }
-                let hiding = self.config.stage_hide_idle;
-                let state = if hiding { theme::IconState::Active } else { theme::IconState::Normal };
-                let tip = if hiding {
-                    "Showing only camera and screen shares: click to show everyone (only on your screen)"
+                // Lit while something from the menu is in effect.
+                let state = if mode == StageMode::Presenter || self.config.stage_hide_idle {
+                    theme::IconState::Active
                 } else {
-                    "Show only camera and screen shares, hide people without video (only on your screen)"
+                    theme::IconState::Normal
                 };
-                if theme::icon_button(ui, icons::regular::VIDEO_CAMERA, state, tip).clicked() {
-                    toggle_idle = true;
-                }
+                more = Some(theme::icon_button(
+                    ui,
+                    icons::regular::DOTS_THREE,
+                    state,
+                    "More: Presenter layout, video only, who is shown",
+                ));
             },
         );
-        if toggle_idle {
-            self.config.stage_hide_idle = !self.config.stage_hide_idle;
-            self.config.save();
-        }
-        if let Some(m) = picked {
-            if m != mode {
-                self.config.stage_mode = m;
-                self.config.save();
-            }
-        }
-        let Some(resp) = target else { return };
+        let Some(resp) = more else { return };
         let popup_id = ui.make_persistent_id("stage_target_menu");
         if resp.clicked() {
             ui.memory_mut(|m| m.toggle_popup(popup_id));
@@ -334,6 +317,28 @@ impl RustTalkApp {
             |ui| {
                 ui.set_min_width(300.0);
                 ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(egui::RichText::new("Layout").strong().color(theme::HEADER));
+                theme::menu_separator(ui);
+                let presenter = StageMode::Presenter;
+                let icon = if mode == presenter { icons::regular::CHECK } else { presenter.icon() };
+                if theme::menu_item(ui, icon, presenter.label(), false)
+                    .on_hover_text(presenter.hint())
+                    .clicked()
+                {
+                    picked = Some(presenter);
+                }
+                let hiding = self.config.stage_hide_idle;
+                let icon = if hiding { icons::regular::CHECK_SQUARE } else { icons::regular::SQUARE };
+                if theme::menu_item(ui, icon, "Only camera and screen shares", false)
+                    .on_hover_text("Hides people without a camera or screen share (only on your screen)")
+                    .clicked()
+                {
+                    toggle_idle = true;
+                }
+                if mode == StageMode::Grid {
+                    return;
+                }
+                theme::menu_separator(ui);
                 ui.label(
                     egui::RichText::new(format!("{} on", mode.label()))
                         .strong()
@@ -435,6 +440,16 @@ impl RustTalkApp {
                 }
             },
         );
+        if toggle_idle {
+            self.config.stage_hide_idle = !self.config.stage_hide_idle;
+            self.config.save();
+        }
+        if let Some(m) = picked {
+            if m != mode {
+                self.config.stage_mode = m;
+                self.config.save();
+            }
+        }
         if toggle_cutout {
             self.config.remove_background = !self.config.remove_background;
             self.config.save();
@@ -870,16 +885,16 @@ mod tests {
         }
     }
 
-    /// Runs the stage in a 1200x700 screen; returns the stage area it drew into.
-    fn run_stage(
+    /// Runs the stage in a 1200x700 screen; returns the stage area and what was drawn.
+    fn run_stage_out(
         ctx: &egui::Context,
         app: &mut RustTalkApp,
         tiles: &[(UserInfo, Option<VideoKind>)],
         time: f64,
         events: Vec<egui::Event>,
-    ) -> egui::Rect {
+    ) -> (egui::Rect, egui::FullOutput) {
         let mut area = egui::Rect::NOTHING;
-        let _ = ctx.run(
+        let out = ctx.run(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 700.0))),
                 time: Some(time),
@@ -893,7 +908,27 @@ mod tests {
                 });
             },
         );
-        area
+        (area, out)
+    }
+
+    fn run_stage(
+        ctx: &egui::Context,
+        app: &mut RustTalkApp,
+        tiles: &[(UserInfo, Option<VideoKind>)],
+        time: f64,
+        events: Vec<egui::Event>,
+    ) -> egui::Rect {
+        run_stage_out(ctx, app, tiles, time, events).0
+    }
+
+    /// Centre of a drawn text, e.g. a menu entry.
+    fn text_pos(out: &egui::FullOutput, text: &str) -> Option<egui::Pos2> {
+        out.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(t) if t.galley.job.text == text => {
+                Some(t.pos + t.galley.size() / 2.0)
+            }
+            _ => None,
+        })
     }
 
     fn click_at(ctx: &egui::Context, app: &mut RustTalkApp, tiles: &[(UserInfo, Option<VideoKind>)], pos: egui::Pos2, t: &mut f64) {
@@ -909,6 +944,13 @@ mod tests {
         }
     }
 
+    /// The pill's buttons: Grid, Focus, "...".
+    fn button_pos(area: egui::Rect, n: f32) -> egui::Pos2 {
+        let size = egui::vec2(3.0 * 34.0 + 8.0, 40.0);
+        let pill = egui::Rect::from_min_size(area.right_bottom() - size - egui::vec2(10.0, 10.0), size);
+        egui::pos2(pill.left() + 4.0 + 16.0 + 34.0 * n, pill.center().y)
+    }
+
     #[test]
     fn stage_buttons_switch_layout_and_a_tile_click_focuses_it() {
         let ctx = egui::Context::default();
@@ -917,21 +959,21 @@ mod tests {
         app.config.stage_mode = StageMode::Grid;
         let mut t = 0.0;
         let area = run_stage(&ctx, &mut app, &tiles, t, vec![]);
-        // Pill: bottom right of the stage, one button per layout.
-        let button = |n: f32, count: f32| {
-            let size = egui::vec2(count * 34.0 + 8.0, 40.0);
-            let pill = egui::Rect::from_min_size(area.right_bottom() - size - egui::vec2(10.0, 10.0), size);
-            egui::pos2(pill.left() + 4.0 + 16.0 + 34.0 * n, pill.center().y)
-        };
-        click_at(&ctx, &mut app, &tiles, button(2.0, 4.0), &mut t);
-        assert_eq!(app.config.stage_mode, StageMode::Presenter);
-        click_at(&ctx, &mut app, &tiles, button(0.0, 5.0), &mut t);
-        assert_eq!(app.config.stage_mode, StageMode::Grid);
-        click_at(&ctx, &mut app, &tiles, button(1.0, 4.0), &mut t);
+        click_at(&ctx, &mut app, &tiles, button_pos(area, 1.0), &mut t);
         assert_eq!(app.config.stage_mode, StageMode::Focus);
-        // Back in Grid, clicking a person tile focuses it.
-        click_at(&ctx, &mut app, &tiles, button(0.0, 5.0), &mut t);
+        click_at(&ctx, &mut app, &tiles, button_pos(area, 0.0), &mut t);
         assert_eq!(app.config.stage_mode, StageMode::Grid);
+        // Presenter lives in the "..." menu.
+        click_at(&ctx, &mut app, &tiles, button_pos(area, 2.0), &mut t);
+        t += 0.1;
+        let (_, out) = run_stage_out(&ctx, &mut app, &tiles, t, vec![]);
+        let presenter = text_pos(&out, "Presenter").expect("menu lists Presenter");
+        click_at(&ctx, &mut app, &tiles, presenter, &mut t);
+        assert_eq!(app.config.stage_mode, StageMode::Presenter);
+        click_at(&ctx, &mut app, &tiles, button_pos(area, 0.0), &mut t); // closes the open menu
+        click_at(&ctx, &mut app, &tiles, button_pos(area, 0.0), &mut t);
+        assert_eq!(app.config.stage_mode, StageMode::Grid);
+        // Back in Grid, clicking a person tile focuses it.
         let tile_area = egui::Rect::from_min_max(area.min, egui::pos2(area.max.x, area.max.y - CONTROLS_BAND));
         let (cols, tile) = stage_grid(3, tile_area.size(), GAP);
         let first = grid_rects(3, cols, tile, GAP, tile_area)[0];
@@ -944,27 +986,27 @@ mod tests {
     }
 
     #[test]
-    fn hiding_people_without_video_keeps_the_button_to_bring_them_back() {
+    fn hiding_people_without_video_keeps_the_menu_to_bring_them_back() {
         let ctx = egui::Context::default();
         let mut app = RustTalkApp::with_config(ctx.clone(), ClientConfig::default(), false);
         let tiles: Vec<_> = (1..=3).map(|i| (user(i, &format!("user{i}")), None)).collect();
         app.config.stage_mode = StageMode::Grid;
         let mut t = 0.0;
         let area = run_stage(&ctx, &mut app, &tiles, t, vec![]);
-        let toggle = {
-            let size = egui::vec2(4.0 * 34.0 + 8.0, 40.0);
-            let pill = egui::Rect::from_min_size(area.right_bottom() - size - egui::vec2(10.0, 10.0), size);
-            egui::pos2(pill.left() + 4.0 + 16.0 + 34.0 * 3.0, pill.center().y)
+        let toggle = |app: &mut RustTalkApp, t: &mut f64, tiles: &[(UserInfo, Option<VideoKind>)]| {
+            click_at(&ctx, app, tiles, button_pos(area, 2.0), t);
+            *t += 0.1;
+            let (_, out) = run_stage_out(&ctx, app, tiles, *t, vec![]);
+            let entry = text_pos(&out, "Only camera and screen shares").expect("menu entry");
+            click_at(&ctx, app, tiles, entry, t);
         };
         assert!(!app.config.stage_hide_idle);
-        click_at(&ctx, &mut app, &tiles, toggle, &mut t);
-        assert!(app.config.stage_hide_idle, "nobody has video: stage is empty but the button stays");
-        // A video tile stays, the idle ones are hidden; the button is still there.
-        let with_cam = vec![(user(1, "a"), Some(VideoKind::Camera)), (user(2, "b"), None)];
-        t += 0.1;
-        run_stage(&ctx, &mut app, &with_cam, t, vec![]);
-        click_at(&ctx, &mut app, &with_cam, toggle, &mut t);
-        assert!(!app.config.stage_hide_idle, "the same button shows everyone again");
+        toggle(&mut app, &mut t, &tiles);
+        assert!(app.config.stage_hide_idle, "nobody has video: stage is empty but the menu stays");
+        // Close the menu, then bring everyone back with the same entry.
+        click_at(&ctx, &mut app, &tiles, button_pos(area, 0.0), &mut t);
+        toggle(&mut app, &mut t, &tiles);
+        assert!(!app.config.stage_hide_idle, "the same entry shows everyone again");
     }
 
     #[test]
