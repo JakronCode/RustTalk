@@ -116,16 +116,35 @@ pub(super) fn replace_shortcodes(text: &str) -> String {
             .unwrap_or(body);
         let start = body.as_ptr() as usize - line.as_ptr() as usize;
         out.push_str(&line[..start]);
-        replace_inline(body, 0, &mut budget, &mut out);
+        let mut code = vec![false; body.len()];
+        mark_inline_code(body, 0, &mut budget, &mut code);
+        let mut pos = 0;
+        while pos < body.len() {
+            let rest = &body[pos..];
+            if let Some(candidate) = rest.strip_prefix(':') {
+                if let Some((len, e)) =
+                    shortcode_len(candidate).and_then(|len| Some((len, lookup(&candidate[..len])?)))
+                {
+                    if !code[pos..pos + len + 2].iter().any(|&protected| protected) {
+                        out.push_str(e.as_str());
+                        pos += len + 2;
+                        continue;
+                    }
+                }
+            }
+            let take = rest.chars().next().map_or(1, char::len_utf8);
+            out.push_str(&rest[..take]);
+            pos += take;
+        }
         out.push_str(&line[start + body.len()..]);
     }
     out
 }
 
 // Match markdown::inline's delimiter precedence, recursion and work budget.
-fn replace_inline(text: &str, depth: usize, budget: &mut usize, out: &mut String) {
+fn mark_inline_code(text: &str, depth: usize, budget: &mut usize, code: &mut [bool]) {
     if depth == 8 || *budget < text.len() {
-        out.push_str(text);
+        code.fill(true);
         return;
     }
     *budget -= text.len();
@@ -135,7 +154,6 @@ fn replace_inline(text: &str, depth: usize, budget: &mut usize, out: &mut String
         if let Some(escaped) = rest.strip_prefix('\\').and_then(|s| s.chars().next()) {
             if "*_~`\\".contains(escaped) {
                 let take = 1 + escaped.len_utf8();
-                out.push_str(&rest[..take]);
                 pos += take;
                 continue;
             }
@@ -155,30 +173,23 @@ fn replace_inline(text: &str, depth: usize, budget: &mut usize, out: &mut String
                         .count();
                     (end > 0 && (m == "`" || slashes % 2 == 0)).then_some(end)
                 }) {
-                    out.push_str(m);
+                    let start = pos + m.len();
                     if m == "`" {
-                        out.push_str(&tail[..end]);
+                        code[pos..start + end + m.len()].fill(true);
                     } else {
-                        replace_inline(&tail[..end], depth + 1, budget, out);
+                        mark_inline_code(
+                            &tail[..end],
+                            depth + 1,
+                            budget,
+                            &mut code[start..start + end],
+                        );
                     }
-                    out.push_str(m);
                     pos += m.len() * 2 + end;
                     continue;
                 }
             }
         }
-        if let Some(candidate) = rest.strip_prefix(':') {
-            if let Some((len, e)) =
-                shortcode_len(candidate).and_then(|len| Some((len, lookup(&candidate[..len])?)))
-            {
-                out.push_str(e.as_str());
-                pos += len + 2;
-                continue;
-            }
-        }
-        let take = rest.chars().next().map_or(1, char::len_utf8);
-        out.push_str(&rest[..take]);
-        pos += take;
+        pos += rest.chars().next().map_or(1, char::len_utf8);
     }
 }
 
@@ -531,6 +542,14 @@ mod tests {
         assert_eq!(
             replace_shortcodes("**:rofl:** `:clown:`"),
             "**🤣** `:clown:`"
+        );
+    }
+
+    #[test]
+    fn alias_delimiters_do_not_change_original_code_boundaries() {
+        assert_eq!(
+            replace_shortcodes(":clown_face: `x _ `:rofl:`"),
+            "🤡 `x _ `:rofl:`"
         );
     }
 
