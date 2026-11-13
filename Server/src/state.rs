@@ -27,6 +27,10 @@ pub const MAX_VIDEO_BACKLOG: usize = 3 * 1024 * 1024;
 /// Min. time between two pokes from the same sender to the same target.
 pub const POKE_COOLDOWN: Duration = Duration::from_secs(3);
 
+/// At most this many audio sharing changes per window and client.
+const MAX_AUDIO_CHANGES: usize = 10;
+const AUDIO_CHANGE_WINDOW: Duration = Duration::from_secs(10);
+
 /// Sender name of server announcements in text channels (client id 0).
 pub const ANNOUNCER_NAME: &str = "RustTalk";
 
@@ -43,6 +47,8 @@ pub struct Client {
     pub sharing: bool,
     /// Shares computer audio (voice channels only).
     pub audio_sharing: bool,
+    /// When audio sharing last changed (bounds how fast it can flip).
+    pub audio_changes: VecDeque<Instant>,
     /// Streams this client is sending (known from its first frame of each kind).
     pub streams: BTreeSet<VideoKind>,
     /// Streams this client watches: (sender, kind). Only these frames reach it.
@@ -838,6 +844,7 @@ impl State {
                 deafened: false,
                 sharing: false,
                 audio_sharing: false,
+                audio_changes: VecDeque::new(),
                 streams: BTreeSet::new(),
                 watching: HashSet::new(),
                 udp_token: token,
@@ -1274,7 +1281,20 @@ impl State {
         if sharing && !in_voice {
             return Err("Audio sharing is only possible in voice channels".to_string());
         }
-        Ok(std::mem::replace(&mut client.audio_sharing, sharing) != sharing)
+        if client.audio_sharing == sharing {
+            return Ok(false);
+        }
+        // Every change is broadcast to everyone: bound how fast one client can flip it.
+        let now = Instant::now();
+        while client.audio_changes.front().is_some_and(|t| now.duration_since(*t) > AUDIO_CHANGE_WINDOW) {
+            client.audio_changes.pop_front();
+        }
+        if client.audio_changes.len() >= MAX_AUDIO_CHANGES {
+            return Err("Audio sharing changed too often, wait a moment".to_string());
+        }
+        client.audio_changes.push_back(now);
+        client.audio_sharing = sharing;
+        Ok(true)
     }
 
     /// Who gets a stream: members of the sender's channel who watch it.

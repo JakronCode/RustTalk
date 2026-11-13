@@ -161,20 +161,19 @@ impl RustTalkApp {
         }
     }
 
-    /// Tells the voice server whether we share computer audio; sent once per change.
+    /// Tells the voice server whether we share computer audio. Tracks what was queued on this
+    /// connection (not the server's echo, which can arrive late), so every change is sent.
     pub(super) fn sync_audio_flag(&mut self) {
-        let Some(session) = self.voice() else {
-            self.audio_flag_sent = false;
+        if self.voice().is_none() {
+            self.audio_flag_sent = false; // a new voice connection starts as "not sharing"
             return;
-        };
-        let known = session.users.get(&session.my_id).is_some_and(|u| u.audio_sharing);
+        }
         let wanted = self.screen_audio.is_some();
-        if known == wanted {
-            self.audio_flag_sent = wanted;
-        } else if self.audio_flag_sent != wanted {
+        if wanted != self.audio_flag_sent {
             if let Some(tx) = self.voice_tx() {
-                let _ = tx.send(Command::SetAudioSharing(wanted));
-                self.audio_flag_sent = wanted;
+                if tx.send(Command::SetAudioSharing(wanted)).is_ok() {
+                    self.audio_flag_sent = wanted;
+                }
             }
         }
     }
@@ -396,6 +395,25 @@ mod tests {
         app.stop_shared_audio();
         app.sync_audio_flag();
         assert!(matches!(commands.try_recv(), Some(Command::SetAudioSharing(false))));
+    }
+
+    #[test]
+    fn stopping_before_the_server_echo_still_sends_the_stop() {
+        use crate::audio::share_source::AudioShareSource;
+        let _devices = Devices::new();
+        let mut app = app();
+        let mut commands = connect(&mut app);
+        join(&mut app, 2);
+        while commands.try_recv().is_some() {}
+        app.start_audio_selection(AudioShareSource::System);
+        app.sync_audio_flag();
+        assert!(matches!(commands.try_recv(), Some(Command::SetAudioSharing(true))));
+        app.stop_shared_audio(); // before the server answered
+        app.sync_audio_flag();
+        assert!(matches!(commands.try_recv(), Some(Command::SetAudioSharing(false))));
+        event(&mut app, NetEvent::Message(ServerMessage::AudioSharingChanged { client_id: 1, sharing: true })); // late echo
+        app.sync_audio_flag();
+        assert!(commands.try_recv().is_none(), "the stop is already queued, the server's final state follows it");
     }
 
     #[test]

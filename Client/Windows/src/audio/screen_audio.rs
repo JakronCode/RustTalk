@@ -38,16 +38,46 @@ struct Source {
     stop: Arc<AtomicBool>,
     buf: [f32; FRAME_SAMPLES],
     have: usize,
+    /// Mixed on the clock; re-primed (one frame of cushion) after an underrun.
+    primed: bool,
+    waited: u8,
 }
+
+/// More than this much audio piled up in one source is cut back to two frames.
+const MAX_BACKLOG: usize = FRAME_SAMPLES * 6;
+/// One mix tick.
+const FRAME_PERIOD: Duration = Duration::from_millis(20);
 
 impl Source {
     fn channel() -> (HeapProd<f32>, Self) {
         let (prod, cons) = HeapRb::<f32>::new(SAMPLE_RATE as usize * 2).split();
-        (prod, Self { cons, stop: Arc::new(AtomicBool::new(false)), buf: [0.0; FRAME_SAMPLES], have: 0 })
+        (prod, Self { cons, stop: Arc::new(AtomicBool::new(false)), buf: [0.0; FRAME_SAMPLES], have: 0, primed: false, waited: 0 })
     }
 
+    /// A stopped source with less than a frame left is done; its tail is dropped.
     fn finished(&self) -> bool {
-        self.stop.load(Ordering::Relaxed) && self.have == 0 && self.cons.is_empty()
+        self.stop.load(Ordering::Relaxed) && self.have < FRAME_SAMPLES && self.cons.is_empty()
+    }
+
+    /// Refills `buf`; true when this tick has a whole frame of this source to mix.
+    fn next_frame(&mut self) -> bool {
+        self.have += self.cons.pop_slice(&mut self.buf[self.have..]);
+        let backlog = self.cons.occupied_len();
+        if backlog > MAX_BACKLOG {
+            self.cons.skip(backlog - FRAME_SAMPLES * 2);
+            self.have += self.cons.pop_slice(&mut self.buf[self.have..]);
+        }
+        let full = self.have == FRAME_SAMPLES;
+        if !full {
+            self.primed = false;
+            self.waited = 0;
+            return false;
+        }
+        if !self.primed {
+            self.waited = self.waited.saturating_add(1);
+            self.primed = self.cons.occupied_len() >= FRAME_SAMPLES || self.waited > 2 || self.stop.load(Ordering::Relaxed);
+        }
+        self.primed
     }
 }
 
@@ -184,21 +214,17 @@ impl ScreenAudio {
     }
 }
 
-/// Sums what every source delivered into `frame` once any source has a whole frame.
-fn mix_ready(sources: &mut [Source], frame: &mut [f32; FRAME_SAMPLES]) -> bool {
-    for s in sources.iter_mut() {
-        s.have += s.cons.pop_slice(&mut s.buf[s.have..]);
-    }
-    if !sources.iter().any(|s| s.have == FRAME_SAMPLES) {
-        return false;
-    }
+/// One 20 ms tick: sums a frame of every source that has one (a stalled or silent source
+/// contributes nothing) and clamps to full scale.
+fn mix_tick(sources: &mut [Source], frame: &mut [f32; FRAME_SAMPLES]) {
     frame.fill(0.0);
     for s in sources.iter_mut() {
-        for (out, v) in frame.iter_mut().zip(&s.buf[..s.have]) { *out += v; }
-        s.have = 0;
+        if s.next_frame() {
+            for (out, v) in frame.iter_mut().zip(&s.buf) { *out += v; }
+            s.have = 0;
+        }
     }
     for v in frame.iter_mut() { *v = v.clamp(-1.0, 1.0); }
-    true
 }
 
 fn encode_loop(
@@ -230,17 +256,24 @@ fn encode_loop(
     let mut frame = [0f32; FRAME_SAMPLES];
     let mut opus = [0u8; 1500];
     let (mut seq, mut ts, mut quiet) = (1u32, 0u32, SILENCE_HANGOVER);
+    let mut next = Instant::now();
     while !stop.load(Ordering::Relaxed) {
+        let now = Instant::now();
+        if now < next {
+            std::thread::sleep((next - now).min(Duration::from_millis(5)));
+            continue;
+        }
+        next += FRAME_PERIOD;
+        if now > next + Duration::from_millis(100) {
+            next = now + FRAME_PERIOD; // fell behind: do not burst to catch up
+        }
         // An app that closed leaves the mix; the last source ending ends the share.
         sources.retain(|s| !s.finished());
         if sources.is_empty() {
             stop.store(true, Ordering::Relaxed);
             break;
         }
-        if !mix_ready(&mut sources, &mut frame) {
-            std::thread::sleep(Duration::from_millis(3));
-            continue;
-        }
+        mix_tick(&mut sources, &mut frame);
         // Remove what RustTalk itself plays (the other people's voices).
         if let Some(a) = aec.as_mut() {
             for half in frame.chunks_mut(AEC_FRAME) {
@@ -316,37 +349,86 @@ mod tests {
         assert_eq!(devices.0.borrow().systems, 0);
     }
 
+    fn feed(prod: &mut HeapProd<f32>, value: f32, frames: usize) {
+        use ringbuf::traits::Producer;
+        prod.push_slice(&vec![value; FRAME_SAMPLES * frames]);
+    }
+
     #[test]
     fn sources_are_summed_clamped_and_a_stalled_one_does_not_block() {
+        let (mut a_prod, a) = Source::channel();
+        let (mut b_prod, b) = Source::channel();
+        let mut sources = vec![a, b];
+        let mut frame = [0.0; FRAME_SAMPLES];
+        mix_tick(&mut sources, &mut frame);
+        assert!(frame.iter().all(|v| *v == 0.0), "nothing buffered yet");
+        feed(&mut a_prod, 0.25, 3);
+        mix_tick(&mut sources, &mut frame);
+        assert!(frame.iter().all(|v| *v == 0.25), "a silent source must not stall the mix");
+        feed(&mut b_prod, 0.5, 3);
+        mix_tick(&mut sources, &mut frame);
+        assert!(frame.iter().all(|v| *v == 0.75));
+        let (mut c_prod, c) = Source::channel();
+        let (mut d_prod, d) = Source::channel();
+        feed(&mut c_prod, 0.9, 3);
+        feed(&mut d_prod, 0.9, 3);
+        mix_tick(&mut [c, d], &mut frame);
+        assert!(frame.iter().all(|v| *v == 1.0), "sum must not exceed full scale");
+    }
+
+    #[test]
+    fn staggered_sources_give_one_mixed_frame_per_tick() {
         use ringbuf::traits::Producer;
         let (mut a_prod, a) = Source::channel();
         let (mut b_prod, b) = Source::channel();
         let mut sources = vec![a, b];
         let mut frame = [0.0; FRAME_SAMPLES];
-        assert!(!mix_ready(&mut sources, &mut frame), "nothing buffered yet");
-        a_prod.push_slice(&[0.25; FRAME_SAMPLES]);
-        assert!(mix_ready(&mut sources, &mut frame), "a silent source must not stall the mix");
-        assert!(frame.iter().all(|v| *v == 0.25));
-        a_prod.push_slice(&[0.25; FRAME_SAMPLES]);
-        b_prod.push_slice(&[0.5; FRAME_SAMPLES]);
-        assert!(mix_ready(&mut sources, &mut frame));
-        assert!(frame.iter().all(|v| *v == 0.75));
-        a_prod.push_slice(&[0.9; FRAME_SAMPLES]);
-        b_prod.push_slice(&[0.9; FRAME_SAMPLES]);
-        assert!(mix_ready(&mut sources, &mut frame));
-        assert!(frame.iter().all(|v| *v == 1.0), "sum must not exceed full scale");
+        // b delivers 10 ms (half a frame) behind a, in 480-sample blocks.
+        feed(&mut a_prod, 0.25, 2);
+        b_prod.push_slice(&[0.5; FRAME_SAMPLES / 2]);
+        mix_tick(&mut sources, &mut frame);
+        assert!(frame.iter().all(|v| *v == 0.25), "b has no whole frame yet");
+        b_prod.push_slice(&[0.5; FRAME_SAMPLES * 2]);
+        mix_tick(&mut sources, &mut frame);
+        assert!(frame.iter().all(|v| *v == 0.75), "both sources land in the same packet");
     }
 
     #[test]
-    fn finished_source_leaves_the_mix_after_its_audio_is_drained() {
+    fn partial_delivery_never_shifts_a_source_and_backlog_is_bounded() {
         use ringbuf::traits::Producer;
-        let (mut prod, mut source) = Source::channel();
+        let (mut prod, source) = Source::channel();
+        let mut sources = vec![source];
+        let mut frame = [0.0; FRAME_SAMPLES];
+        prod.push_slice(&[0.3; FRAME_SAMPLES - 1]);
+        mix_tick(&mut sources, &mut frame);
+        assert!(frame.iter().all(|v| *v == 0.0), "a partial frame waits");
+        assert_eq!(sources[0].have, FRAME_SAMPLES - 1);
+        feed(&mut prod, 0.3, 40);
+        mix_tick(&mut sources, &mut frame);
+        assert!(sources[0].cons.occupied_len() <= MAX_BACKLOG, "a burst is cut back");
+    }
+
+    #[test]
+    fn a_stopped_source_with_a_partial_tail_ends_and_so_does_the_share() {
+        use ringbuf::traits::Producer;
+        let (mut prod, source) = Source::channel();
+        let (_render_prod, render_cons) = HeapRb::<f32>::new(FRAME_SAMPLES).split();
         prod.push_slice(&[0.1; 10]);
         source.stop.store(true, Ordering::Relaxed);
-        assert!(!source.finished(), "buffered audio is still played out");
-        source.have += source.cons.pop_slice(&mut source.buf[..]);
-        source.have = 0;
-        assert!(source.finished());
+        let stop = Arc::new(AtomicBool::new(false));
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender.connect("127.0.0.1:9").unwrap();
+        let cipher = Arc::new(PacketCipher::new(&[7; 32]).unwrap());
+        let worker = std::thread::spawn({
+            let stop = stop.clone();
+            move || encode_loop(vec![source], render_cons, sender, 1, cipher, Arc::new(super::super::link::LinkStats::default()), stop, Activity::new())
+        });
+        let start = Instant::now();
+        while !stop.load(Ordering::Relaxed) {
+            assert!(start.elapsed() < Duration::from_secs(2), "sharing must end when its only source is gone");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        worker.join().unwrap();
     }
 
     #[cfg(target_os = "linux")]

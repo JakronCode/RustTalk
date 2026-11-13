@@ -168,12 +168,19 @@ impl IActivateAudioInterfaceCompletionHandler_Impl for Activation_Impl {
 }
 
 fn activate(pid: u32, stop: &AtomicBool) -> Result<IAudioClient> {
-    anyhow::ensure!(
-        ACTIVATING
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok(),
-        "Previous application audio activation is still finishing"
-    );
+    // Several apps in one mix activate one after the other; wait for our turn.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while ACTIVATING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        anyhow::ensure!(!stop.load(Ordering::Relaxed), "Audio capture stopped");
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "Previous application audio activation is still finishing"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let (tx, rx) = mpsc::sync_channel(1);
     let activation = Activation {
         ready: tx,

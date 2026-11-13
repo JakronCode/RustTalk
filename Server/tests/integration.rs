@@ -1121,6 +1121,19 @@ async fn audio_sharing_status_follows_voice_membership() {
             "leaving voice ends audio sharing: {msgs:?}"
         );
     }
+
+    // Flipping it over and over is cut off instead of flooding everyone.
+    send(&mut a, &ClientMessage::JoinChannel { channel_id: 2 }).await;
+    drain(&mut a, 300).await;
+    drain(&mut b, 300).await;
+    for i in 0..40 {
+        send(&mut a, &ClientMessage::SetAudioSharing { sharing: i % 2 == 0 }).await;
+    }
+    let msgs = drain(&mut b, 1000).await;
+    let changes = msgs.iter().filter(|m| matches!(m, ServerMessage::AudioSharingChanged { .. })).count();
+    assert!(changes <= 10, "bounded broadcasts, got {changes}");
+    let errors = drain(&mut a, 300).await;
+    assert!(errors.iter().any(|m| matches!(m, ServerMessage::Error { .. })), "the flood is refused with an error");
 }
 
 /// Video-Relay: Sharing-Status + JPEG-Frames kommen bei Channel-Mitgliedern an.
