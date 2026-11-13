@@ -754,8 +754,10 @@ pub(super) fn video_tile(
     speaking: bool,
     me: bool,
     show_name: bool,
+    clickable: bool,
 ) -> egui::Response {
-    let resp = ui.interact(rect, ui.id().with(("stage_tile", user.id, kind)), egui::Sense::click());
+    let sense = if clickable { egui::Sense::click() } else { egui::Sense::hover() };
+    let resp = ui.interact(rect, ui.id().with(("stage_tile", user.id, kind)), sense);
     let p = ui.painter();
     p.rect_filled(rect, 10.0, egui::Color32::BLACK);
     match tex {
@@ -786,13 +788,17 @@ pub(super) fn video_tile(
     } else if resp.hovered() {
         p.rect_stroke(rect, 10.0, egui::Stroke::new(2.0_f32, theme::accent()), egui::StrokeKind::Inside);
     }
-    if resp.hovered() {
+    if clickable && resp.hovered() {
         // Bottom right belongs to the "..." menu button; fullscreen hint next to it.
         let c = rect.right_bottom() + egui::vec2(if me { -20.0 } else { -56.0 }, -20.0);
         p.circle_filled(c, 14.0, egui::Color32::from_black_alpha(150));
         p.text(c, egui::Align2::CENTER_CENTER, icons::regular::CORNERS_OUT, egui::FontId::proportional(16.0), egui::Color32::WHITE);
     }
-    resp.on_hover_text("Click for fullscreen").on_hover_cursor(egui::CursorIcon::PointingHand)
+    if clickable {
+        resp.on_hover_text("Click for fullscreen").on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        resp
+    }
 }
 
 /// Stable id of the message input of a channel (for focusing it).

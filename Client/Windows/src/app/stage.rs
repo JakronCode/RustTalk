@@ -196,6 +196,29 @@ pub(super) fn nearest_corner(content: egui::Rect, cam: egui::Rect) -> CamCorner 
     }
 }
 
+/// Round icon button on top of a tile or camera: dark, accent colored on hover, hand cursor.
+fn round_button(ui: &mut egui::Ui, center: egui::Pos2, diameter: f32, icon: &str, tip: &str) -> egui::Response {
+    let rect = egui::Rect::from_center_size(center, egui::vec2(diameter, diameter));
+    let id = ui.id().with(("round_button", tip, center.x.round() as i32, center.y.round() as i32));
+    let resp = ui.interact(rect, id, egui::Sense::click());
+    let hot = resp.hovered();
+    let (fill, fg) = if resp.is_pointer_button_down_on() {
+        (theme::accent().gamma_multiply(0.75), theme::on_accent())
+    } else if hot {
+        (theme::accent(), theme::on_accent())
+    } else {
+        (egui::Color32::from_black_alpha(170), egui::Color32::WHITE)
+    };
+    let radius = diameter / 2.0 + if hot { 1.5 } else { 0.0 };
+    let p = ui.painter();
+    p.circle_filled(center, radius, fill);
+    if hot {
+        p.circle_stroke(center, radius, egui::Stroke::new(1.5_f32, egui::Color32::from_white_alpha(200)));
+    }
+    p.text(center, egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(diameter * 0.55), fg);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip)
+}
+
 fn tile_label(user: &UserInfo, kind: Option<VideoKind>) -> String {
     match kind {
         Some(VideoKind::Screen) => format!("{} - screen", user.name),
@@ -274,33 +297,21 @@ impl RustTalkApp {
     /// bottom right corner of the stage.
     pub(super) fn stage_controls(&mut self, ui: &mut egui::Ui, area: egui::Rect, ch_id: u64) {
         let mode = self.config.stage_mode;
-        let size = egui::vec2(3.0 * 34.0 + 8.0, 40.0);
-        let pill = egui::Rect::from_min_size(
-            area.right_bottom() - size - egui::vec2(10.0, 10.0),
-            size,
-        );
-        ui.painter()
-            .rect_filled(pill, 10.0, egui::Color32::from_black_alpha(170));
         let mut picked = None;
         let mut more = None;
         let mut toggle_idle = false;
-        ui.scope_builder(
+        // Built from the right so the pill is exactly as wide as its buttons.
+        let bg = ui.painter().add(egui::Shape::Noop);
+        let anchor = egui::Rect::from_min_max(
+            egui::pos2(area.right() - 10.0 - 300.0, area.bottom() - 10.0 - 32.0 - 8.0),
+            egui::pos2(area.right() - 10.0, area.bottom() - 10.0),
+        );
+        let inner = ui.scope_builder(
             egui::UiBuilder::new()
-                .max_rect(pill.shrink(4.0))
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                .max_rect(anchor.shrink(4.0))
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
             |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                for m in [StageMode::Grid, StageMode::Focus] {
-                    let state = if m == mode {
-                        theme::IconState::Active
-                    } else {
-                        theme::IconState::Normal
-                    };
-                    let tip = format!("{}: {} (only on your screen)", m.label(), m.hint());
-                    if theme::icon_button(ui, m.icon(), state, &tip).clicked() {
-                        picked = Some(m);
-                    }
-                }
                 // Lit while something from the menu is in effect.
                 let state = if mode == StageMode::Presenter || self.config.stage_hide_idle {
                     theme::IconState::Active
@@ -313,7 +324,26 @@ impl RustTalkApp {
                     state,
                     "More: Presenter layout, video only, who is shown",
                 ));
+                for m in [StageMode::Focus, StageMode::Grid] {
+                    let state = if m == mode {
+                        theme::IconState::Active
+                    } else {
+                        theme::IconState::Normal
+                    };
+                    let tip = format!("{}: {} (only on your screen)", m.label(), m.hint());
+                    if theme::icon_button(ui, m.icon(), state, &tip).clicked() {
+                        picked = Some(m);
+                    }
+                }
             },
+        );
+        ui.painter().set(
+            bg,
+            egui::epaint::RectShape::filled(
+                inner.response.rect.expand(4.0),
+                10.0,
+                egui::Color32::from_black_alpha(170),
+            ),
         );
         let Some(resp) = more else { return };
         let popup_id = ui.make_persistent_id("stage_target_menu");
@@ -662,6 +692,7 @@ impl RustTalkApp {
                     .video_frames
                     .get(&(user.id, kind))
                     .and_then(|v| v.tex.clone());
+                // Only the big tile is one big fullscreen button; small ones get a real button.
                 let resp = video_tile(
                     ui,
                     rect,
@@ -671,29 +702,23 @@ impl RustTalkApp {
                     cam_speaking,
                     me,
                     show_name,
+                    main,
                 );
                 if resp.clicked() {
                     *open_fs = Some((user.id, kind));
                 }
-                // Watching someone else: "stop watching" in the top right corner.
+                if !main && ui.rect_contains_pointer(rect) {
+                    let at = rect.right_bottom() + egui::vec2(if me { -20.0 } else { -56.0 }, -20.0);
+                    if round_button(ui, at, 28.0, icons::regular::CORNERS_OUT, "Fullscreen").clicked() {
+                        *open_fs = Some((user.id, kind));
+                    }
+                }
+                // Watching someone else: "stop watching" in the top right corner
+                // (next to the focus button on small tiles).
                 if !me && (resp.hovered() || ui.rect_contains_pointer(rect)) {
-                    let b = egui::Rect::from_center_size(
-                        rect.right_top() + egui::vec2(-58.0, 22.0),
-                        egui::vec2(30.0, 30.0),
-                    );
-                    let stop = ui
-                        .put(
-                            b,
-                            egui::Button::new(
-                                egui::RichText::new(icons::regular::EYE_SLASH)
-                                    .size(16.0)
-                                    .color(egui::Color32::WHITE),
-                            )
-                            .fill(egui::Color32::from_black_alpha(160))
-                            .corner_radius(15.0),
-                        )
-                        .on_hover_text("Stop watching");
-                    if stop.clicked() {
+                    let x = if main { -22.0 } else { -64.0 };
+                    let at = rect.right_top() + egui::vec2(x, 22.0);
+                    if round_button(ui, at, 30.0, icons::regular::EYE_SLASH, "Stop watching").clicked() {
                         self.unwatch(user.id, kind);
                     }
                 }
@@ -703,22 +728,8 @@ impl RustTalkApp {
         };
         // Hovering a small tile: a button to focus it (the tile itself keeps its own click).
         if !main && ui.rect_contains_pointer(rect) {
-            let b = egui::Rect::from_center_size(
-                rect.right_top() + egui::vec2(-22.0, 22.0),
-                egui::vec2(30.0, 30.0),
-            );
-            let focus = ui
-                .put(
-                    b,
-                    egui::Button::new(
-                        egui::RichText::new(StageMode::Focus.icon())
-                            .size(16.0)
-                            .color(egui::Color32::WHITE),
-                    )
-                    .fill(egui::Color32::from_black_alpha(160))
-                    .corner_radius(15.0),
-                )
-                .on_hover_text("Focus on this");
+            let at = rect.right_top() + egui::vec2(-22.0, 22.0);
+            let focus = round_button(ui, at, 30.0, StageMode::Focus.icon(), "Focus on this");
             if focus.clicked() {
                 *focus_click = Some((user.id, kind));
             }
@@ -843,22 +854,8 @@ impl RustTalkApp {
         }
         // Hovering someone else's camera: a small "stop watching" button in the corner.
         if watched && user.id != self.srv.my_id && ui.rect_contains_pointer(rect) && !resp.dragged() {
-            let b = egui::Rect::from_center_size(
-                rect.right_top() + egui::vec2(-16.0, 16.0),
-                egui::vec2(24.0, 24.0),
-            );
-            let stop = ui
-                .put(
-                    b,
-                    egui::Button::new(
-                        egui::RichText::new(icons::regular::EYE_SLASH)
-                            .size(13.0)
-                            .color(egui::Color32::WHITE),
-                    )
-                    .fill(egui::Color32::from_black_alpha(170))
-                    .corner_radius(12.0),
-                )
-                .on_hover_text("Stop watching the camera");
+            let at = rect.right_top() + egui::vec2(-16.0, 16.0);
+            let stop = round_button(ui, at, 24.0, icons::regular::EYE_SLASH, "Stop watching the camera");
             if stop.clicked() {
                 self.unwatch(user.id, VideoKind::Camera);
                 return;
@@ -1020,11 +1017,12 @@ mod tests {
         }
     }
 
-    /// The pill's buttons: Grid, Focus, "...".
-    fn button_pos(area: egui::Rect, n: f32) -> egui::Pos2 {
-        let size = egui::vec2(3.0 * 34.0 + 8.0, 40.0);
-        let pill = egui::Rect::from_min_size(area.right_bottom() - size - egui::vec2(10.0, 10.0), size);
-        egui::pos2(pill.left() + 4.0 + 16.0 + 34.0 * n, pill.center().y)
+    /// Centre of a stage button, found by its icon: 0 Grid, 1 Focus, 2 "...".
+    fn button_pos(ctx: &egui::Context, app: &mut RustTalkApp, tiles: &[(UserInfo, Option<VideoKind>)], n: usize, t: &mut f64) -> egui::Pos2 {
+        *t += 0.1;
+        let (_, out) = run_stage_out(ctx, app, tiles, *t, vec![]);
+        let icon = [StageMode::Grid.icon(), StageMode::Focus.icon(), icons::regular::DOTS_THREE][n];
+        text_pos(&out, icon).expect("stage button")
     }
 
     #[test]
@@ -1035,12 +1033,15 @@ mod tests {
         app.config.stage_mode = StageMode::Grid;
         let mut t = 0.0;
         let area = run_stage(&ctx, &mut app, &tiles, t, vec![]);
-        click_at(&ctx, &mut app, &tiles, button_pos(area, 1.0), &mut t);
+        let pos = button_pos(&ctx, &mut app, &tiles, 1, &mut t);
+        click_at(&ctx, &mut app, &tiles, pos, &mut t);
         assert_eq!(app.config.stage_mode, StageMode::Focus);
-        click_at(&ctx, &mut app, &tiles, button_pos(area, 0.0), &mut t);
+        let pos = button_pos(&ctx, &mut app, &tiles, 0, &mut t);
+        click_at(&ctx, &mut app, &tiles, pos, &mut t);
         assert_eq!(app.config.stage_mode, StageMode::Grid);
         // Presenter lives in the "..." menu.
-        click_at(&ctx, &mut app, &tiles, button_pos(area, 2.0), &mut t);
+        let pos = button_pos(&ctx, &mut app, &tiles, 2, &mut t);
+        click_at(&ctx, &mut app, &tiles, pos, &mut t);
         t += 0.1;
         let (_, out) = run_stage_out(&ctx, &mut app, &tiles, t, vec![]);
         let presenter = text_pos(&out, "Presenter").expect("menu lists Presenter");
@@ -1056,8 +1057,10 @@ mod tests {
         let again = text_pos(&out, "Presenter").expect("menu still open");
         click_at(&ctx, &mut app, &tiles, again, &mut t);
         assert_eq!(app.config.stage_mode, StageMode::Focus);
-        click_at(&ctx, &mut app, &tiles, button_pos(area, 0.0), &mut t); // closes the open menu
-        click_at(&ctx, &mut app, &tiles, button_pos(area, 0.0), &mut t);
+        let pos = button_pos(&ctx, &mut app, &tiles, 0, &mut t);
+        click_at(&ctx, &mut app, &tiles, pos, &mut t); // closes the open menu
+        let pos = button_pos(&ctx, &mut app, &tiles, 0, &mut t);
+        click_at(&ctx, &mut app, &tiles, pos, &mut t);
         assert_eq!(app.config.stage_mode, StageMode::Grid);
         // Back in Grid, clicking a person tile focuses it.
         let tile_area = egui::Rect::from_min_max(area.min, egui::pos2(area.max.x, area.max.y - CONTROLS_BAND));
@@ -1167,6 +1170,24 @@ mod tests {
     }
 
     #[test]
+    fn a_small_video_tile_is_not_a_fullscreen_button_but_has_one() {
+        let ctx = egui::Context::default();
+        let mut app = RustTalkApp::with_config(ctx.clone(), ClientConfig::default(), false);
+        app.config.stage_mode = StageMode::Grid;
+        let me = user(app.srv.my_id, "me");
+        let tiles = vec![(me, Some(VideoKind::Camera)), (user(app.srv.my_id + 1, "other"), None)];
+        let mut t = 0.0;
+        let area = run_stage(&ctx, &mut app, &tiles, t, vec![]);
+        let tile_area = egui::Rect::from_min_max(area.min, egui::pos2(area.max.x, area.max.y - CONTROLS_BAND));
+        let (cols, tile) = stage_grid(2, tile_area.size(), GAP);
+        let first = grid_rects(2, cols, tile, GAP, tile_area)[0];
+        click_at(&ctx, &mut app, &tiles, first.center(), &mut t);
+        assert_eq!(app.fullscreen, None, "the tile itself is no button");
+        click_at(&ctx, &mut app, &tiles, first.right_bottom() + egui::vec2(-20.0, -20.0), &mut t);
+        assert_eq!(app.fullscreen, Some((app.srv.my_id, VideoKind::Camera)), "its own fullscreen button is");
+    }
+
+    #[test]
     fn hiding_people_without_video_keeps_the_menu_to_bring_them_back() {
         let ctx = egui::Context::default();
         let mut app = RustTalkApp::with_config(ctx.clone(), ClientConfig::default(), false);
@@ -1175,7 +1196,8 @@ mod tests {
         let mut t = 0.0;
         let area = run_stage(&ctx, &mut app, &tiles, t, vec![]);
         let toggle = |app: &mut RustTalkApp, t: &mut f64, tiles: &[(UserInfo, Option<VideoKind>)]| {
-            click_at(&ctx, app, tiles, button_pos(area, 2.0), t);
+            let pos = button_pos(&ctx, app, tiles, 2, t);
+            click_at(&ctx, app, tiles, pos, t);
             *t += 0.1;
             let (_, out) = run_stage_out(&ctx, app, tiles, *t, vec![]);
             let entry = text_pos(&out, "Only camera and screen shares").expect("menu entry");
@@ -1185,7 +1207,8 @@ mod tests {
         toggle(&mut app, &mut t, &tiles);
         assert!(app.config.stage_hide_idle, "nobody has video: stage is empty but the menu stays");
         // Close the menu, then bring everyone back with the same entry.
-        click_at(&ctx, &mut app, &tiles, button_pos(area, 0.0), &mut t);
+        let pos = button_pos(&ctx, &mut app, &tiles, 0, &mut t);
+        click_at(&ctx, &mut app, &tiles, pos, &mut t);
         toggle(&mut app, &mut t, &tiles);
         assert!(!app.config.stage_hide_idle, "the same entry shows everyone again");
     }
