@@ -30,6 +30,13 @@ pub struct ApplicationSource {
     created: u64,
 }
 
+#[cfg(test)]
+impl ApplicationSource {
+    pub(crate) fn for_test(pid: u32) -> Self {
+        Self { pid, created: 1 }
+    }
+}
+
 struct Com;
 impl Com {
     fn new() -> Result<Self> {
