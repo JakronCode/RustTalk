@@ -108,8 +108,10 @@ test: ## All tests (serial, like CI)
 	@$(CARGO) test --locked --workspace -- --test-threads=1
 
 .PHONY: test-packaging
-test-packaging: ## AppImage audio packaging regression checks (no build or hardware)
+test-packaging: ## Component routing and AppImage packaging checks (offline, no build or hardware)
 	@python3 scripts/test-appimage-audio.py
+	@python3 scripts/test-component-packaging.py
+	@bash -n scripts/build-component.sh
 	@bash -n scripts/package-linux.sh
 	@bash -n packaging/linux/AppRun
 
@@ -181,3 +183,19 @@ clean: ## Remove build output
 clean-dev: ## Remove the local dev server and client data in .dev
 	@rm -rf $(DEV_DIR)
 	$(call ok,removed $(DEV_DIR))
+
+.PHONY: test-release
+test-release: ## Offline synthetic component release boundary and workflow checks (Python 3.11+)
+	@python3 scripts/component-release-tests.py
+.PHONY: test-update-discovery lint-update-discovery format-update-discovery
+test-update-discovery: ## Strict tags, bounded discovery, updater checks and actual server notices
+	@$(CARGO) test --locked -p rusttalk-shared release:: -- --test-threads=1
+	@$(CARGO) test --locked -p rusttalk-server --bin rusttalk-server update:: -- --test-threads=1
+	@$(CARGO) test --locked -p rusttalk-client update:: -- --test-threads=1
+	@$(CARGO) test --locked -p rusttalk-server --test integration update_ -- --test-threads=1
+
+lint-update-discovery: ## Check both updater crates with existing dependencies
+	@$(CARGO) clippy --locked -p rusttalk-shared -p rusttalk-server -p rusttalk-client --all-targets
+
+format-update-discovery: ## Format only the release and updater sources
+	@rustfmt --edition 2021 shared/src/release.rs shared/update_discovery.rs Server/src/update.rs Client/Windows/src/update.rs

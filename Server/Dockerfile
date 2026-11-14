@@ -24,6 +24,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY shared/Cargo.toml shared/
 COPY shared/src shared/src
+COPY shared/update_discovery.rs shared/
 COPY Server/Cargo.toml Server/
 COPY Server/src Server/src
 COPY Client/Windows/Cargo.toml Client/Windows/
