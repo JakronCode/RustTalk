@@ -405,7 +405,7 @@ pub fn crossed_icon_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> egui
     if resp.hovered() {
         ui.painter().rect_filled(rect, 6.0, RED.gamma_multiply(0.18));
     }
-    paint_crossed(ui.painter(), rect.center(), icon, 18.0, RED, PANEL);
+    paint_crossed(ui.painter(), rect.center(), icon, 18.0, RED, PANEL());
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tooltip)
 }
 

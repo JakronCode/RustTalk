@@ -399,7 +399,8 @@ pub struct RustTalkApp {
     screen_stream: Option<rusttalk_shared::protocol::AudioStreamInfo>,
     /// Separate streams last sent to the voice server / confirmed by its echo.
     announced_streams: Vec<rusttalk_shared::protocol::AudioStreamInfo>,
-    confirmed_streams: Vec<u32>,    /// Last audio-sharing status sent to the voice server (resent only when it changes).
+    confirmed_streams: Vec<u32>,
+    /// Last audio-sharing status sent to the voice server (resent only when it changes).
     audio_flag_sent: bool,
     audio_flag_at: Option<Instant>,
     audio_only: bool,
@@ -580,7 +581,8 @@ impl RustTalkApp {
             screen_audio_app: None,
             screen_stream: None,
             announced_streams: Vec::new(),
-            confirmed_streams: Vec::new(),            audio_flag_sent: false,
+            confirmed_streams: Vec::new(),
+            audio_flag_sent: false,
             audio_flag_at: None,
             audio_only: false,
             shared_audio_source: Default::default(),
