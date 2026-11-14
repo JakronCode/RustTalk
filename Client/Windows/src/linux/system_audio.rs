@@ -109,6 +109,7 @@ pub fn applications(stop: &AtomicBool) -> Result<Vec<super::share_source::AudioA
                     app: app.chars().take(128).collect(),
                     stream: Some(name.clone()),
                     icon_hint,
+                    active: true,
                     source: ApplicationSource {
                         cookie,
                         index: info.index,

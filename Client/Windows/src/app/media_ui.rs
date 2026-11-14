@@ -292,6 +292,7 @@ impl RustTalkApp {
         // A previous capture may still deliver frames or its error: a new epoch drops them.
         self.video_epoch[epoch_slot(VideoKind::Screen)].fetch_add(1, Ordering::Relaxed);
         self.screen = None;
+        self.screen_audio_app = window_audio_app(source);
         self.screen_audio_failed = false; // explicit capture request permits a retry
         // Erst Sharing melden, dann senden (Server relayed nur Sharer).
         let _ = cmd_tx.send(Command::SetSharing(true));
@@ -688,28 +689,43 @@ impl RustTalkApp {
             return;
         }
         let Some(picker) = &mut self.screen_picker else { return };
-        if let Ok(list) = picker.rx.try_recv() {
-            picker.loading = false;
-            picker.selected = None;
-            picker.entries = list
-                .into_iter()
-                .enumerate()
-                .map(|(i, e)| {
-                    let tex = e.thumbnail.as_ref().map(|img| {
-                        ctx.load_texture(
-                            format!("share-thumb-{i}"),
-                            egui::ColorImage::from_rgba_unmultiplied(
-                                [img.width() as usize, img.height() as usize],
-                                img,
-                            ),
-                            egui::TextureOptions::LINEAR,
-                        )
-                    });
-                    (e, tex)
-                })
-                .collect();
-            if !picker.entries.iter().any(|(e, _)| matches!(e.source, ShareSource::Window(_))) {
-                picker.tab = ShareTab::Screens;
+        if picker.pending {
+            ctx.request_repaint_after(Duration::from_millis(100)); // thumbnails may still arrive
+        }
+        let texture = |i: usize, img: &image::RgbaImage| {
+            ctx.load_texture(
+                format!("share-thumb-{i}"),
+                egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img),
+                egui::TextureOptions::LINEAR,
+            )
+        };
+        loop {
+            match picker.rx.try_recv() {
+                Ok(super::PickerMsg::List(list)) => {
+                    picker.loading = false;
+                    picker.selected = None;
+                    picker.entries = list
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, e)| {
+                            let tex = e.thumbnail.as_ref().map(|img| texture(i, img));
+                            (e, tex)
+                        })
+                        .collect();
+                    if !picker.entries.iter().any(|(e, _)| matches!(e.source, ShareSource::Window(_))) {
+                        picker.tab = ShareTab::Screens;
+                    }
+                }
+                Ok(super::PickerMsg::Thumb(i, img)) => {
+                    if let Some(entry) = picker.entries.get_mut(i) {
+                        entry.1 = Some(texture(i, &img));
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    picker.pending = false;
+                    break;
+                }
             }
         }
 
@@ -718,14 +734,15 @@ impl RustTalkApp {
         let active = self.screen.is_some();
         let mut share: Option<ShareSource> = None;
         let mut refresh = false;
-        let dismiss = theme::share_popup(ctx, "screen_share_popup", picker.at, 460.0,
+        let dismiss = theme::popup_frame(ctx, "screen_share_popup", picker.at, 860.0,
             &format!("{}  Share screen", icons::regular::SCREENCAST), |ui| {
+                // Tabs and the action row stay in view; only the cards scroll.
+                let footer_h = 40.0;
                 if cfg!(target_os = "linux") {
                     ui.label("Choose a window or screen in the system permission picker.");
                     if active { ui.weak("Choosing a new source restarts screen capture."); }
                     picker.selected = Some(ShareSource::Monitor(0));
                 } else {
-                // Reiter
                 ui.horizontal(|ui| {
                     let tab_w = (ui.available_width() - 8.0) / 2.0;
                     for (tab, icon, label) in [
@@ -748,7 +765,7 @@ impl RustTalkApp {
                 });
                 ui.add_space(8.0);
 
-                let list_h = 250.0;
+                let list_h = (theme::popup_body_height(ctx) - 42.0 - footer_h).clamp(140.0, 620.0);
                 if picker.loading {
                     ui.allocate_ui(egui::vec2(ui.available_width(), list_h), |ui| {
                         ui.centered_and_justified(|ui| {
@@ -781,8 +798,10 @@ impl RustTalkApp {
                                     "No screens found."
                                 });
                             }
-                            let card_w = (ui.available_width() - 12.0) / 2.0;
-                            for row in items.chunks(2) {
+                            let columns = if ui.available_width() >= 640.0 { 3 } else { 2 };
+                            let gap = ui.spacing().item_spacing.x;
+                            let card_w = (ui.available_width() - gap * (columns - 1) as f32 - 4.0) / columns as f32;
+                            for row in items.chunks(columns) {
                                 ui.horizontal(|ui| {
                                     for &i in row {
                                         let (entry, tex) = &picker.entries[i];
@@ -805,6 +824,7 @@ impl RustTalkApp {
                 }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
+                    ui.set_min_height(footer_h - 6.0);
                     if !cfg!(target_os = "linux") && ui
                         .add_enabled(
                             !picker.loading,
@@ -818,12 +838,7 @@ impl RustTalkApp {
                         refresh = true;
                     }
                     ui.checkbox(&mut picker.include_audio, format!("{}  Share audio", icons::regular::MUSIC_NOTES))
-                        .on_hover_text("Also send what your computer plays (RustTalk voices are filtered out)");
-                });
-                ui.horizontal(|ui| {
-                    if active && theme::ghost_button(ui, egui::RichText::new("Stop sharing").color(theme::RED)).clicked() {
-                        stop = true;
-                    }
+                        .on_hover_text("Also send the sound of the shared window (a whole screen sends everything your computer plays). RustTalk voices are filtered out.");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .add_enabled(
@@ -844,6 +859,9 @@ impl RustTalkApp {
                         }
                         if theme::ghost_button(ui, "Cancel").clicked() {
                             cancel = true;
+                        }
+                        if active && theme::ghost_button(ui, egui::RichText::new("Stop sharing").color(theme::RED)).clicked() {
+                            stop = true;
                         }
                     });
                 });
@@ -1281,6 +1299,18 @@ fn share_card(
     resp.on_hover_text(&entry.title)
 }
 
+/// The app whose sound goes with a shared window; a whole screen shares all sound.
+#[cfg(windows)]
+fn window_audio_app(source: ShareSource) -> Option<crate::audio::share_source::ApplicationSource> {
+    let ShareSource::Window(id) = source else { return None };
+    crate::audio::share_source::ApplicationSource::for_process(video::window_pid(id)?).ok()
+}
+
+#[cfg(not(windows))]
+fn window_audio_app(_: ShareSource) -> Option<crate::audio::share_source::ApplicationSource> {
+    None
+}
+
 /// How long a just-ended stream ignores late frames.
 const STOP_GRACE: Duration = Duration::from_millis(2000);
 
@@ -1409,6 +1439,44 @@ mod fullscreen_audio_tests {
 mod share_popup_tests {
     use super::*;
     use super::super::mixer::tests::voice_app;
+
+    #[cfg(windows)]
+    #[test]
+    fn screen_picker_keeps_tabs_and_actions_visible_with_many_windows() {
+        let ctx = egui::Context::default();
+        let mut app = voice_app(&ctx);
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.screen_picker = Some(ScreenPicker {
+            at: egui::pos2(20.0, 500.0),
+            include_audio: true,
+            tab: ShareTab::Apps,
+            entries: (0..30)
+                .map(|i| (ShareEntry { source: ShareSource::Window(i), title: format!("Window {i}"), subtitle: "App".into(), thumbnail: None }, None))
+                .collect(),
+            selected: None,
+            loading: false,
+            pending: false,
+            rx,
+        });
+        let mut output = None;
+        for frame in 0..3 {
+            output = Some(ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 520.0))),
+                time: Some(frame as f64),
+                ..Default::default()
+            }, |ctx| app.ui_screen_picker(ctx)));
+        }
+        let output = output.unwrap();
+        for label in ["Applications", "Entire Screen", "Refresh", "Share audio", "Cancel", "Go Live"] {
+            let shown = output.shapes.iter().any(|s| match &s.shape {
+                egui::epaint::Shape::Text(t) => t.galley.job.text.ends_with(label)
+                    && s.clip_rect.contains_rect(egui::Rect::from_min_size(t.pos, t.galley.size()))
+                    && t.pos.y >= 0.0 && t.pos.y + t.galley.size().y <= 520.0,
+                _ => false,
+            });
+            assert!(shown, "{label} must stay visible");
+        }
+    }
 
     #[test]
     fn failed_screen_replacement_unregisters_screen_but_keeps_camera() {

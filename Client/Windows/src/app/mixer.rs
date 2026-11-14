@@ -21,11 +21,14 @@ pub(super) fn volume_slider(pct: &mut f32) -> egui::Slider<'_> {
 }
 
 /// Streams to list for `members` (everyone but us, by name): voice always,
-/// shared computer audio while it plays or played a moment ago.
+/// shared computer audio while they share it (even during silence, which is
+/// not sent) or while it played a moment ago. Users with separate app streams
+/// (`separate`) get one row per app from the caller instead.
 pub(super) fn mixer_rows(
     members: &[UserInfo],
     my_id: u64,
     meters: &HashMap<u128, StreamMeter>,
+    separate: &HashSet<u64>,
     now: Instant,
 ) -> Vec<(UserInfo, StreamKind)> {
     let mut others: Vec<&UserInfo> = members.iter().filter(|u| u.id != my_id).collect();
@@ -33,9 +36,10 @@ pub(super) fn mixer_rows(
     let mut rows = Vec::new();
     for user in others {
         rows.push((user.clone(), StreamKind::Voice));
-        let shared = meters
+        let heard = meters
             .get(&StreamKind::Shared.key(user.id))
             .is_some_and(|m| now.saturating_duration_since(m.heard) < SHARE_LINGER);
+        let shared = heard || (user.audio_sharing && !separate.contains(&user.id));
         if shared {
             rows.push((user.clone(), StreamKind::Shared));
         }
@@ -185,8 +189,9 @@ impl RustTalkApp {
         ui.add_space(2.0);
         let now = Instant::now();
         let meters = self.control.stream_meters.lock().unwrap().clone();
-        let mut rows = mixer_rows(members, self.srv.my_id, &meters, now);
         let streams = self.control.shared_streams.lock().unwrap().clone();
+        let separate: HashSet<u64> = streams.iter().filter(|(_, apps)| !apps.is_empty()).map(|(id, _)| *id).collect();
+        let mut rows = mixer_rows(members, self.srv.my_id, &meters, &separate, now);
         for user in members.iter().filter(|u| u.id != self.srv.my_id) {
             if let Some(apps) = streams.get(&user.id) {
                 rows.extend(apps.iter().map(|a| (user.clone(), StreamKind::App(a.id))));
@@ -455,12 +460,22 @@ pub(super) mod tests {
         let members = [user(1, "me"), user(3, "bianka"), user(2, "Anna")];
         let mut meters = HashMap::new();
         meters.insert(StreamKind::Shared.key(3), StreamMeter { level: 0.5, heard: now });
-        let rows: Vec<_> = mixer_rows(&members, 1, &meters, now).into_iter().map(|(u, k)| (u.id, k)).collect();
+        let none = HashSet::new();
+        let rows: Vec<_> = mixer_rows(&members, 1, &meters, &none, now).into_iter().map(|(u, k)| (u.id, k)).collect();
         assert_eq!(rows, [(2, StreamKind::Voice), (3, StreamKind::Voice), (3, StreamKind::Shared)]);
 
         let later = now + SHARE_LINGER + Duration::from_secs(1);
-        let rows = mixer_rows(&members, 1, &meters, later);
+        let rows = mixer_rows(&members, 1, &meters, &none, later);
         assert!(rows.iter().all(|(_, k)| *k == StreamKind::Voice), "stopped share disappears");
+
+        // Still sharing but silent (silence is not sent): the row stays.
+        let mut sharing = members.clone();
+        sharing[2].audio_sharing = true;
+        let rows: Vec<_> = mixer_rows(&sharing, 1, &meters, &none, later).into_iter().map(|(u, k)| (u.id, k)).collect();
+        assert!(rows.contains(&(2, StreamKind::Shared)));
+        let separate: HashSet<u64> = [2].into_iter().collect();
+        let rows = mixer_rows(&sharing, 1, &meters, &separate, later);
+        assert!(rows.iter().all(|(_, k)| *k == StreamKind::Voice), "separate apps get their own rows");
     }
 
     #[test]

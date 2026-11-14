@@ -177,6 +177,18 @@ fn thumb(img: image::RgbaImage) -> image::RgbaImage {
 /// Alle teilbaren Monitore und Fenster inkl. Vorschaubild.
 /// Dauert je nach Fensteranzahl einige 100 ms -> im Hintergrund aufrufen.
 pub fn list_share_sources() -> Vec<ShareEntry> {
+    let mut out = list_share_sources_quick();
+    let sources: Vec<ShareSource> = out.iter().map(|e| e.source).collect();
+    let thumbs = std::sync::Mutex::new(Vec::new());
+    capture_thumbnails(&sources, |i, image| thumbs.lock().unwrap().push((i, image)));
+    for (i, image) in thumbs.into_inner().unwrap_or_default() {
+        out[i].thumbnail = Some(image);
+    }
+    out
+}
+
+/// Monitors and windows without thumbnails: takes milliseconds.
+pub fn list_share_sources_quick() -> Vec<ShareEntry> {
     let mut out = Vec::new();
 
     match xcap::Monitor::all() {
@@ -199,7 +211,7 @@ pub fn list_share_sources() -> Vec<ShareEntry> {
                     source: ShareSource::Monitor(id),
                     title,
                     subtitle,
-                    thumbnail: m.capture_image().ok().map(thumb),
+                    thumbnail: None,
                 });
             }
         }
@@ -226,13 +238,39 @@ pub fn list_share_sources() -> Vec<ShareEntry> {
                     source: ShareSource::Window(id),
                     title,
                     subtitle: app,
-                    thumbnail: w.capture_image().ok().map(thumb),
+                    thumbnail: None,
                 });
             }
         }
         Err(e) => tracing::warn!("Fenster abfragen: {e}"),
     }
     out
+}
+
+/// Captures thumbnails for `sources` on a few threads; `found(index, image)` is
+/// called as each one is ready (a slow window, e.g. Firefox, no longer holds up the rest).
+pub fn capture_thumbnails(sources: &[ShareSource], found: impl Fn(usize, image::RgbaImage) + Sync) {
+    // xcap handles are not Send: every worker looks them up itself and takes every n-th source.
+    const WORKERS: usize = 6;
+    let workers = WORKERS.min(sources.len());
+    let found = &found;
+    std::thread::scope(|s| {
+        for k in 0..workers {
+            s.spawn(move || {
+                let monitors = xcap::Monitor::all().unwrap_or_default();
+                let windows = xcap::Window::all().unwrap_or_default();
+                for i in (k..sources.len()).step_by(workers) {
+                    let image = match sources[i] {
+                        ShareSource::Monitor(id) => monitors.iter().find(|m| m.id().ok() == Some(id)).and_then(|m| m.capture_image().ok()),
+                        ShareSource::Window(id) => windows.iter().find(|w| w.id().ok() == Some(id)).and_then(|w| w.capture_image().ok()),
+                    };
+                    if let Some(image) = image {
+                        found(i, thumb(image));
+                    }
+                }
+            });
+        }
+    });
 }
 
 /// Handle auf die Quelle; wird im Capture-Thread erzeugt.
@@ -282,6 +320,11 @@ fn drop_monitor_stream(mon: &xcap::Monitor) {
     if let (Ok(id), Ok(mut map)) = (mon.id(), stream_cache().lock()) {
         map.remove(&id);
     }
+}
+
+/// Process that owns a shareable window (for "share audio of this window").
+pub fn window_pid(id: u32) -> Option<u32> {
+    xcap::Window::all().ok()?.into_iter().find(|w| w.id().ok() == Some(id))?.pid().ok()
 }
 
 fn find_target(source: ShareSource) -> Result<Target> {
@@ -436,6 +479,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Manual timing: `cargo test -p rusttalk-client share_source_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn share_source_timing() {
+        let start = Instant::now();
+        let quick = list_share_sources_quick();
+        println!("list: {} sources in {:?}", quick.len(), start.elapsed());
+        let sources: Vec<ShareSource> = quick.iter().map(|e| e.source).collect();
+        let start = Instant::now();
+        capture_thumbnails(&sources, |i, _| println!("  thumbnail {} ({}) after {:?}", i, quick[i].subtitle, start.elapsed()));
+    }
 
     #[test]
     fn thumbnail_fits_picker_box() {

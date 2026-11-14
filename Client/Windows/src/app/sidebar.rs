@@ -774,10 +774,13 @@ impl RustTalkApp {
     fn ui_voice_panel(&mut self, ui: &mut egui::Ui) {
         let (Some(my_ch), Some(owner), Some((_, server))) = (self.voice_channel(), self.voice_owner, self.voice_server()) else { return };
         let channel = self.voice().map(|s| s.channel_name(my_ch)).unwrap_or_default();
+        let screen_live = self.screen.is_some();
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
-                ui.set_max_width((ui.available_width() - 40.0).max(20.0)); // room for the hang-up button
+                // Room for the hang-up button (and stop-sharing while live).
+                let buttons = if screen_live { 76.0 } else { 40.0 };
+                ui.set_max_width((ui.available_width() - buttons).max(20.0));
                 let r = ui
                     .add(
                         egui::Label::new(
@@ -798,11 +801,15 @@ impl RustTalkApp {
                 if theme::icon_button(ui, icons::regular::PHONE_DISCONNECT, IconState::Danger, "Leave voice (back to the lobby)").clicked() {
                     self.leave_voice(owner);
                 }
+                if screen_live
+                    && theme::crossed_icon_button(ui, icons::regular::MONITOR, "Stop sharing your screen").clicked()
+                {
+                    self.stop_screen_share();
+                }
             });
         });
 
         let cam_live = self.cam.as_ref().is_some_and(|c| c.is_sending());
-        let screen_live = self.screen.is_some();
         let labels = ["Camera", "Screen", "Audio"];
         let required = labels.iter().map(|label| ui.painter().layout_no_wrap(
             format!("{}  {label}", icons::regular::MUSIC_NOTES),
@@ -816,15 +823,43 @@ impl RustTalkApp {
                 (icons::regular::SCREENCAST, screen_live, "Screen: choose or change the shared screen or window"),
                 (icons::regular::MUSIC_NOTES, active, if active { "Audio: change what is shared or stop sharing" } else { "Audio: choose what to share" }),
             ].into_iter().enumerate() {
-                let label = if compact { "" } else { labels[index] };
-                let (response, quick_stop) = wide_toggle(&mut cols[index], icon, label,
-                    if live { IconState::Active } else { IconState::Normal }, tip, live && index > 0);
-                if quick_stop {
-                    match index {
-                        1 => self.stop_screen_share(),
-                        _ => self.stop_shared_audio(),
+                if index == 1 && live {
+                    let audio_tip = if self.screen_audio_app.is_some() { "Share audio of this window" } else { "Share computer audio" };
+                    let check = if self.config.share_screen_audio { icons::regular::CHECK_SQUARE } else { icons::regular::SQUARE };
+                    let (change, audio) = share_split(&mut cols[1], (icons::regular::SWAP, "Change what you share"), (check, audio_tip), false);
+                    if change.clicked() {
+                        self.toggle_screen();
                     }
-                } else if response.clicked() {
+                    if audio.clicked() {
+                        self.config.share_screen_audio = !self.config.share_screen_audio;
+                        self.config.save();
+                        self.screen_audio_failed = false;
+                        self.sync_shared_audio();
+                    }
+                    continue;
+                }
+                if index == 2 && live {
+                    let (change, stop) = share_split(&mut cols[2],
+                        (icons::regular::MUSIC_NOTES, "Change what audio you stream"),
+                        (icons::regular::MUSIC_NOTES, "Stop all audio streaming"), true);
+                    if change.clicked() {
+                        self.toggle_audio_sharing();
+                    }
+                    if stop.clicked() {
+                        self.stop_audio_only();
+                    }
+                    continue;
+                }
+                let label = if compact { "" } else { labels[index] };
+                // A whole-screen share with sound already sends everything (except RustTalk).
+                let covered = index == 2 && screen_live && self.config.share_screen_audio && self.screen_audio_app.is_none();
+                let (state, tip) = if covered {
+                    (IconState::Disabled, "Your screen share already sends all computer audio (everything except RustTalk). Untick its audio box to pick apps here instead.")
+                } else {
+                    (if live { IconState::Active } else { IconState::Normal }, tip)
+                };
+                let response = wide_toggle(&mut cols[index], icon, label, state, tip);
+                if response.clicked() {
                     match index {
                         0 => self.toggle_cam(),
                         1 => self.toggle_screen(),
@@ -1035,7 +1070,7 @@ fn small_icon(ui: &mut egui::Ui, rect: egui::Rect, icon: &str, tip: &str) -> egu
 }
 
 /// Full-width icon+label toggle (voice panel).
-fn wide_toggle(ui: &mut egui::Ui, icon: &str, label: &str, state: IconState, tip: &str, stoppable: bool) -> (egui::Response, bool) {
+fn wide_toggle(ui: &mut egui::Ui, icon: &str, label: &str, state: IconState, tip: &str) -> egui::Response {
     let (fg, bg) = match state {
         IconState::Active => (egui::Color32::WHITE, theme::GREEN),
         IconState::Disabled => (theme::DISABLED(), theme::SIDEBAR()),
@@ -1046,26 +1081,47 @@ fn wide_toggle(ui: &mut egui::Ui, icon: &str, label: &str, state: IconState, tip
         .fill(bg)
         .min_size(egui::vec2(ui.available_width(), 32.0));
     // Button content follows the layout's alignment; centre it.
-    let response = ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
         ui.add_enabled(state != IconState::Disabled, btn)
             .on_hover_text(tip)
             .on_disabled_hover_text(tip)
     })
-    .inner;
-    // Tiny X on hover while live: stops sharing without opening anything.
-    let mut quick_stop = false;
-    if stoppable {
-        let hovered = ui.rect_contains_pointer(response.rect);
-        let x = egui::Rect::from_center_size(response.rect.right_center() - egui::vec2(12.0, 0.0), egui::vec2(18.0, 18.0));
-        let r = ui.interact(x, response.id.with("quick_stop"), egui::Sense::click());
-        if hovered {
-            ui.painter().circle_filled(x.center(), 9.0, if r.hovered() { theme::RED } else { egui::Color32::BLACK.gamma_multiply(0.35) });
-            ui.painter().text(x.center(), egui::Align2::CENTER_CENTER, icons::regular::X, egui::FontId::proportional(11.0), egui::Color32::WHITE);
-            r.clone().on_hover_text("Stop sharing");
-        }
-        quick_stop = hovered && r.clicked();
+    .inner
+}
+
+/// Live share button split down the middle into two actions, each an (icon, tooltip);
+/// `right_crossed` draws the right icon as its stop version (small x badge).
+fn share_split(ui: &mut egui::Ui, left_part: (&str, &str), right_part: (&str, &str), right_crossed: bool) -> (egui::Response, egui::Response) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), egui::Sense::hover());
+    let mid = rect.center().x;
+    let (left, right) = rect.split_left_right_at_x(mid);
+    let first = ui.interact(left, ui.id().with(("split_left", left_part.1)), egui::Sense::click());
+    let second = ui.interact(right, ui.id().with(("split_right", right_part.1)), egui::Sense::click());
+    let r = ui.visuals().widgets.inactive.corner_radius.nw;
+    let p = ui.painter();
+    p.rect_filled(rect, r, theme::GREEN);
+    let hover = egui::Color32::from_white_alpha(28);
+    if first.hovered() {
+        p.rect_filled(left, egui::CornerRadius { nw: r, sw: r, ne: 0, se: 0 }, hover);
     }
-    (response, quick_stop)
+    if second.hovered() {
+        p.rect_filled(right, egui::CornerRadius { nw: 0, sw: 0, ne: r, se: r }, hover);
+    }
+    p.line_segment(
+        [egui::pos2(mid, rect.top() + 7.0), egui::pos2(mid, rect.bottom() - 7.0)],
+        egui::Stroke::new(1.5_f32, egui::Color32::WHITE.gamma_multiply(0.7)),
+    );
+    let font = egui::FontId::proportional(17.0);
+    p.text(left.center(), egui::Align2::CENTER_CENTER, left_part.0, font.clone(), egui::Color32::WHITE);
+    if right_crossed {
+        theme::paint_crossed(p, right.center(), right_part.0, 17.0, egui::Color32::WHITE, theme::GREEN);
+    } else {
+        p.text(right.center(), egui::Align2::CENTER_CENTER, right_part.0, font, egui::Color32::WHITE);
+    }
+    (
+        first.on_hover_text(left_part.1).on_hover_cursor(egui::CursorIcon::PointingHand),
+        second.on_hover_text(right_part.1).on_hover_cursor(egui::CursorIcon::PointingHand),
+    )
 }
 
 /// Green "online" dot at the bottom right of the own avatar.

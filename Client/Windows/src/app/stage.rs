@@ -281,8 +281,8 @@ impl RustTalkApp {
             .collect()
     }
 
-    /// Stage tiles in order: screen shares first, then everyone else (their
-    /// camera instead of the avatar card when it is on).
+    /// Stage tiles in order: screen shares first, then everyone else. A camera
+    /// or a screen share replaces the person's avatar card.
     pub(super) fn stage_tiles(&self, members: &[UserInfo]) -> Vec<(UserInfo, Option<VideoKind>)> {
         let mut tiles = Vec::new();
         for user in members {
@@ -291,8 +291,12 @@ impl RustTalkApp {
             }
         }
         for user in members {
-            let cam = self.streams_of(user).contains(&VideoKind::Camera);
-            tiles.push((user.clone(), cam.then_some(VideoKind::Camera)));
+            let streams = self.streams_of(user);
+            if streams.contains(&VideoKind::Camera) {
+                tiles.push((user.clone(), Some(VideoKind::Camera)));
+            } else if !streams.contains(&VideoKind::Screen) {
+                tiles.push((user.clone(), None));
+            }
         }
         tiles
     }
