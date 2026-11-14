@@ -294,17 +294,21 @@ impl RustTalkApp {
         self.screen_audio_failed = false; // explicit capture request permits a retry
         // Erst Sharing melden, dann senden (Server relayed nur Sharer).
         let _ = cmd_tx.send(Command::SetSharing(true));
-        match video::start_screen(
+        let result = video::start_screen(
             source,
             self.config.video_quality,
             self.make_frame_sink(VideoKind::Screen),
             self.make_screen_error_sink(),
-        ) {
+        );
+        self.finish_screen_start(result);
+    }
+
+    fn finish_screen_start(&mut self, result: anyhow::Result<VideoCapture>) {
+        match result {
             Ok(cap) => self.screen = Some(cap),
             Err(e) => {
                 self.set_error(format!("Screen share error: {e:#}"));
-                let still = self.cam.as_ref().is_some_and(|c| c.is_sending());
-                let _ = cmd_tx.send(Command::SetSharing(still));
+                self.after_source_stopped(VideoKind::Screen);
             }
         }
     }
@@ -1408,6 +1412,25 @@ mod share_popup_tests {
     use super::super::mixer::tests::voice_app;
 
     #[test]
+    fn failed_screen_replacement_unregisters_screen_but_keeps_camera() {
+        let ctx = egui::Context::default();
+        let mut app = voice_app(&ctx);
+        let (connection, mut commands) = net::Connection::test_pair();
+        app.srv.cmd_tx = Some(connection);
+        let camera_stopped = Arc::new(AtomicBool::new(false));
+        app.cam = Some(VideoCapture {
+            stop: camera_stopped.clone(),
+            sending: Arc::new(AtomicBool::new(true)),
+            keyframe: Arc::new(AtomicBool::new(false)),
+        });
+        app.finish_screen_start(Err(anyhow::anyhow!("replacement unavailable")));
+        assert!(matches!(commands.try_recv(), Some(Command::StopVideo(VideoKind::Screen))));
+        assert!(matches!(commands.try_recv(), Some(Command::SetSharing(true))));
+        assert!(app.screen.is_none() && app.cam.is_some());
+        assert!(!camera_stopped.load(Ordering::Relaxed));
+    }
+
+    #[test]
     fn screen_settings_and_dismissal_keep_capture_and_audio_choice_unchanged() {
         let ctx = egui::Context::default();
         let mut app = voice_app(&ctx);
@@ -1429,6 +1452,14 @@ mod share_popup_tests {
         }, |ctx| app.ui_screen_picker(ctx));
         assert!(app.screen_picker.is_none() && app.screen.is_some());
         assert_eq!(app.config.share_screen_audio, original_audio);
+        assert!(!stopped.load(Ordering::Relaxed));
+        app.toggle_screen();
+        let _ = ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 700.0))),
+            events: vec![egui::Event::PointerButton { pos: egui::pos2(899.0, 1.0), button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() }],
+            ..Default::default()
+        }, |ctx| app.ui_screen_picker(ctx));
+        assert!(app.screen_picker.is_none() && app.screen.is_some());
         assert!(!stopped.load(Ordering::Relaxed));
         app.toggle_screen();
         app.stop_screen_share();
