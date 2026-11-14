@@ -201,58 +201,106 @@ impl RustTalkApp {
             if rows.is_empty() {
                 ui.label(egui::RichText::new("Nobody else is here yet.").color(theme::MUTED));
             }
-            let user_muted = self.local_muted.lock().unwrap().clone();
-            let stream_muted = self.control.muted_streams.lock().unwrap().clone();
-            let deafened = self.control.self_deafened.load(Ordering::Relaxed);
-            for (user, kind) in rows {
-                let key = kind.key(user.id);
-                let whole_user = user_muted.contains(&user.id);
-                let muted = whole_user || stream_muted.contains(&key);
-                let (icon, default_label) = kind_label(kind);
-                let label = if let StreamKind::App(id) = kind {
-                    streams.get(&user.id).and_then(|v| v.iter().find(|s| s.id == id)).map(|s| s.label.as_str()).unwrap_or("Application")
-                } else { default_label };
-                let (mute_enabled, tip) = match kind {
-                    StreamKind::Voice if whole_user => (true, "Unmute for me"),
-                    StreamKind::Voice => (true, "Mute for me (voice and shared audio)"),
-                    StreamKind::Shared | StreamKind::App(_) if whole_user => (false, "Everything from this user is muted"),
-                    StreamKind::Shared | StreamKind::App(_) if muted => (true, "Unmute their shared audio"),
-                    StreamKind::Shared | StreamKind::App(_) => (true, "Mute only their shared audio"),
-                };
-                let row = Row {
-                    title: &user.name,
-                    subtitle: format!("{icon} {label}"),
-                    muted,
-                    mute_enabled,
-                    mute_icon: SPEAKER,
-                    tip,
-                };
-                ui.push_id(key, |ui| {
-                    let level = meters
-                        .get(&key)
-                        .filter(|m| now.saturating_duration_since(m.heard) < METER_FRESH)
-                        .map_or(0.0, |m| m.level);
-                    let gain = if matches!(kind, StreamKind::App(_)) { self.user_volumes.lock().unwrap().get(&key).copied().unwrap_or(1.0) } else { self.user_volume(&user.name, kind) };
-                    let mut pct = (gain * 100.0).round();
-                    let r = mixer_row(ui, &row, &mut pct, level, muted || deafened);
-                    r.title.on_hover_text("Right-click for more").context_menu(|ui| self.user_menu(ui, &user));
-                    if r.mute.clicked() {
-                        match kind {
-                            StreamKind::Voice => toggle(&mut self.local_muted.lock().unwrap(), user.id),
-                            StreamKind::Shared | StreamKind::App(_) => toggle(&mut self.control.muted_streams.lock().unwrap(), key),
-                        }
-                    }
-                    if r.slider.changed() {
-                        if matches!(kind, StreamKind::App(_)) { self.user_volumes.lock().unwrap().insert(key, pct / 100.0); } else { self.set_user_volume(user.id, &user.name, kind, pct / 100.0); }
-                    }
-                    if r.slider.drag_stopped() || (r.slider.changed() && !r.slider.dragged()) {
-                        self.config.save();
-                    }
-                });
-            }
+            self.mixer_stream_rows(ui, rows);
         });
         // Live meters.
         ui.ctx().request_repaint_after(Duration::from_millis(50));
+    }
+
+    pub(super) fn shared_audio_popup(&mut self, ui: &mut egui::Ui, user: &UserInfo, response: &egui::Response) {
+        let available = self.viewing_voice() && self.voice_channel() == Some(user.channel_id);
+        let me = user.id == self.srv.my_id;
+        response.clone().on_hover_text(if !available {
+            "Sharing audio — join their voice channel to adjust volume"
+        } else if me {
+            "Sharing audio — change what you share"
+        } else {
+            "Sharing audio — click for volume and mute (only for you)"
+        }).on_hover_cursor(if available { egui::CursorIcon::PointingHand } else { egui::CursorIcon::Default });
+        if !available {
+            return;
+        }
+        if me {
+            if response.clicked() {
+                self.toggle_audio_sharing();
+            }
+            return;
+        }
+        let popup_id = response.id.with(("shared_audio_mixer", self.srv.id, self.srv.generation, user.id));
+        if response.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(popup_id));
+        }
+        egui::popup_below_widget(ui, popup_id, response, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+            ui.set_width(340.0);
+            ui.label(egui::RichText::new(format!("{}'s shared audio", user.name)).strong());
+            ui.label(egui::RichText::new("Only changes what you hear.").small().color(theme::MUTED));
+            theme::menu_separator(ui);
+            let streams = self.control.shared_streams.lock().unwrap().get(&user.id).cloned().unwrap_or_default();
+            let kinds = if streams.is_empty() {
+                vec![StreamKind::Shared]
+            } else {
+                streams.iter().map(|s| StreamKind::App(s.id)).collect()
+            };
+            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                self.mixer_stream_rows(ui, kinds.into_iter().map(|k| (user.clone(), k)).collect());
+            });
+            ui.ctx().request_repaint_after(Duration::from_millis(50));
+        });
+    }
+
+    fn mixer_stream_rows(&mut self, ui: &mut egui::Ui, rows: Vec<(UserInfo, StreamKind)>) {
+        let now = Instant::now();
+        let meters = self.control.stream_meters.lock().unwrap().clone();
+        let streams = self.control.shared_streams.lock().unwrap().clone();
+        let user_muted = self.local_muted.lock().unwrap().clone();
+        let stream_muted = self.control.muted_streams.lock().unwrap().clone();
+        let deafened = self.control.self_deafened.load(Ordering::Relaxed);
+        for (user, kind) in rows {
+            let key = kind.key(user.id);
+            let whole_user = user_muted.contains(&user.id);
+            let muted = whole_user || stream_muted.contains(&key);
+            let (icon, default_label) = kind_label(kind);
+            let label = if let StreamKind::App(id) = kind {
+                streams.get(&user.id).and_then(|v| v.iter().find(|s| s.id == id)).map(|s| s.label.as_str()).unwrap_or("Application")
+            } else { default_label };
+            let (mute_enabled, tip) = match kind {
+                StreamKind::Voice if whole_user => (true, "Unmute for me"),
+                StreamKind::Voice => (true, "Mute for me (voice and shared audio)"),
+                StreamKind::Shared | StreamKind::App(_) if whole_user => (false, "Everything from this user is muted"),
+                StreamKind::Shared | StreamKind::App(_) if muted => (true, "Unmute their shared audio"),
+                StreamKind::Shared | StreamKind::App(_) => (true, "Mute only their shared audio"),
+            };
+            let row = Row {
+                title: &user.name,
+                subtitle: format!("{icon} {label}"),
+                muted,
+                mute_enabled,
+                mute_icon: SPEAKER,
+                tip,
+            };
+            ui.push_id(key, |ui| {
+                let level = meters
+                    .get(&key)
+                    .filter(|m| now.saturating_duration_since(m.heard) < METER_FRESH)
+                    .map_or(0.0, |m| m.level);
+                let gain = if matches!(kind, StreamKind::App(_)) { self.user_volumes.lock().unwrap().get(&key).copied().unwrap_or(1.0) } else { self.user_volume(&user.name, kind) };
+                let mut pct = (gain * 100.0).round();
+                let r = mixer_row(ui, &row, &mut pct, level, muted || deafened);
+                r.title.on_hover_text("Right-click for more").context_menu(|ui| self.user_menu(ui, &user));
+                if r.mute.clicked() {
+                    match kind {
+                        StreamKind::Voice => toggle(&mut self.local_muted.lock().unwrap(), user.id),
+                        StreamKind::Shared | StreamKind::App(_) => toggle(&mut self.control.muted_streams.lock().unwrap(), key),
+                    }
+                }
+                if r.slider.changed() {
+                    if matches!(kind, StreamKind::App(_)) { self.user_volumes.lock().unwrap().insert(key, pct / 100.0); } else { self.set_user_volume(user.id, &user.name, kind, pct / 100.0); }
+                }
+                if r.slider.drag_stopped() || (r.slider.changed() && !r.slider.dragged()) {
+                    self.config.save();
+                }
+            });
+        }
     }
 
     /// Our own controls (same values as the user panel and Settings): what we
@@ -313,7 +361,7 @@ fn toggle<T: Eq + std::hash::Hash + Copy>(set: &mut HashSet<T>, id: T) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     fn user(id: u64, name: &str) -> UserInfo {
@@ -328,6 +376,80 @@ mod tests {
             role: Default::default(),
             streams: Vec::new(),
         }
+    }
+
+    pub(in crate::app) fn voice_app(ctx: &egui::Context) -> RustTalkApp {
+        let mut app = RustTalkApp::with_config(ctx.clone(), ClientConfig::default(), false);
+        let id = app.ensure_session("voice.invalid:7331").unwrap();
+        app.view_session(id);
+        app.srv.connected = true;
+        app.srv.my_id = 1;
+        app.srv.users.insert(1, user(1, "me"));
+        app.srv.channels.insert(5, ChannelInfo {
+            id: 5, name: "Voice".into(), kind: ChannelKind::Voice,
+            parent: None, position: 0, user_ids: vec![1],
+        });
+        app.voice_owner = Some(app.srv.id);
+        app.voice_generation = app.srv.generation;
+        app.voice_confirmed = true;
+        app
+    }
+
+    pub(in crate::app) fn text_pos(out: &egui::FullOutput, text: &str) -> Option<egui::Pos2> {
+        out.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(t) if t.galley.job.text == text => Some(t.pos + t.galley.size() / 2.0),
+            _ => None,
+        })
+    }
+
+    fn popup_frame(ctx: &egui::Context, app: &mut RustTalkApp, user: &UserInfo, events: Vec<egui::Event>) -> egui::FullOutput {
+        ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+            events, ..Default::default()
+        }, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let response = ui.button("Audio badge");
+                ui.memory_mut(|m| m.open_popup(response.id.with(("shared_audio_mixer", app.srv.id, app.srv.generation, user.id))));
+                app.shared_audio_popup(ui, user, &response);
+            });
+        })
+    }
+
+    #[test]
+    fn audio_badge_popup_controls_only_that_persons_shared_streams() {
+        use rusttalk_shared::protocol::AudioStreamInfo;
+        let ctx = egui::Context::default();
+        let mut app = voice_app(&ctx);
+        let mut target = user(2, "Friend");
+        target.audio_sharing = true;
+        app.control.shared_streams.lock().unwrap().insert(2, vec![
+            AudioStreamInfo { id: 10, label: "Music".into() },
+            AudioStreamInfo { id: 11, label: "Game".into() },
+        ]);
+        for _ in 0..2 { popup_frame(&ctx, &mut app, &target, vec![]); }
+        let out = popup_frame(&ctx, &mut app, &target, vec![]);
+        assert!(text_pos(&out, "Friend's shared audio").is_some());
+        assert!(text_pos(&out, &format!("{} Music", icons::regular::MONITOR_PLAY)).is_some());
+        assert!(text_pos(&out, &format!("{} Game", icons::regular::MONITOR_PLAY)).is_some());
+        assert!(text_pos(&out, "Voice").is_none());
+        let mute = text_pos(&out, icons::regular::SPEAKER_HIGH).expect("app mute button");
+        for pressed in [true, false] {
+            popup_frame(&ctx, &mut app, &target, vec![egui::Event::PointerMoved(mute), egui::Event::PointerButton {
+                pos: mute, button: egui::PointerButton::Primary, pressed, modifiers: Default::default(),
+            }]);
+        }
+        assert_eq!(*app.control.muted_streams.lock().unwrap(), HashSet::from([StreamKind::App(10).key(2)]));
+        assert!(app.local_muted.lock().unwrap().is_empty(), "voice and other people remain audible");
+        app.control.shared_streams.lock().unwrap().clear();
+        let out = popup_frame(&ctx, &mut app, &target, vec![]);
+        assert!(text_pos(&out, &format!("{} Shared audio", icons::regular::MONITOR_PLAY)).is_some(), "silent mixed share still adjustable");
+        target.channel_id = 99;
+        let out = popup_frame(&ctx, &mut app, &target, vec![]);
+        assert!(text_pos(&out, "Friend's shared audio").is_none(), "other channel has no playback controls");
+        target.channel_id = 5;
+        app.voice_owner = None;
+        let out = popup_frame(&ctx, &mut app, &target, vec![]);
+        assert!(text_pos(&out, "Friend's shared audio").is_none(), "other server has no playback controls");
     }
 
     #[test]

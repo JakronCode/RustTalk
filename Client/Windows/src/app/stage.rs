@@ -838,7 +838,16 @@ impl RustTalkApp {
                 *focus_click = Some((user.id, kind));
             }
         }
-        if user.audio_sharing && kind != Some(VideoKind::Screen) {
+        self.stage_audio_badge(ui, rect, user, kind);
+        // Right click / "..." button: same menu as in the sidebar.
+        if !me {
+            resp.context_menu(|ui| self.user_menu(ui, user));
+            self.tile_menu_button(ui, rect, resp.hovered(), user, kind);
+        }
+    }
+
+    fn stage_audio_badge(&mut self, ui: &mut egui::Ui, rect: egui::Rect, user: &UserInfo, kind: Option<VideoKind>) {
+        if user.audio_sharing {
             let lit = self.shared_audio_lit(user);
             let badge = egui::Rect::from_center_size(rect.left_top() + egui::vec2(24.0, 24.0), egui::vec2(28.0, 28.0));
             let p = ui.painter();
@@ -850,13 +859,8 @@ impl RustTalkApp {
                 egui::FontId::proportional(16.0),
                 if lit { egui::Color32::WHITE } else { theme::MUTED },
             );
-            ui.interact(badge, ui.id().with(("audio_badge", user.id, kind)), egui::Sense::hover())
-                .on_hover_text(if lit { "Sharing audio (sound playing)" } else { "Sharing audio" });
-        }
-        // Right click / "..." button: same menu as in the sidebar.
-        if !me {
-            resp.context_menu(|ui| self.user_menu(ui, user));
-            self.tile_menu_button(ui, rect, resp.hovered(), user, kind);
+            let response = ui.interact(badge, ui.id().with(("audio_badge", user.id, kind)), egui::Sense::click());
+            self.shared_audio_popup(ui, user, &response);
         }
     }
 
@@ -972,6 +976,7 @@ impl RustTalkApp {
                 return;
             }
         }
+        self.stage_audio_badge(ui, rect, user, Some(VideoKind::Camera));
         let cursor = if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab };
         let resp = resp.on_hover_cursor(cursor);
         if watched {
@@ -1134,6 +1139,29 @@ mod tests {
         let (_, out) = run_stage_out(ctx, app, tiles, *t, vec![]);
         let icon = [StageMode::Grid.icon(), StageMode::Focus.icon(), icons::regular::DOTS_THREE][n];
         text_pos(&out, icon).expect("stage button")
+    }
+
+    #[test]
+    fn audio_badge_opens_mixer_on_member_camera_and_screen_previews() {
+        for kind in [None, Some(VideoKind::Camera), Some(VideoKind::Screen)] {
+            let ctx = egui::Context::default();
+            let mut app = super::super::mixer::tests::voice_app(&ctx);
+            let mut friend = user(2, "Friend");
+            friend.channel_id = 5;
+            friend.audio_sharing = true;
+            let tiles = [(friend, kind)];
+            let mut t = 0.0;
+            run_stage(&ctx, &mut app, &tiles, t, vec![]);
+            t += 0.1;
+            let (_, out) = run_stage_out(&ctx, &mut app, &tiles, t, vec![]);
+            let note = text_pos(&out, icons::regular::MUSIC_NOTES).expect("shared audio badge");
+            click_at(&ctx, &mut app, &tiles, note, &mut t);
+            t += 0.1;
+            let (_, out) = run_stage_out(&ctx, &mut app, &tiles, t, vec![]);
+            assert!(text_pos(&out, "Friend's shared audio").is_some(), "{kind:?} badge opens mixer");
+            assert!(app.fullscreen.is_none(), "badge does not open fullscreen");
+            assert!(app.watching.is_empty(), "badge does not start video");
+        }
     }
 
     #[test]

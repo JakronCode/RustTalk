@@ -91,6 +91,12 @@ impl RustTalkApp {
                                                     .color(theme::RED),
                                             );
                                         }
+                                        if user.audio_sharing {
+                                            let lit = self.shared_audio_lit(user);
+                                            let response = ui.small_button(egui::RichText::new(icons::regular::MUSIC_NOTES)
+                                                .color(if lit { theme::GREEN } else { theme::MUTED }));
+                                            self.shared_audio_popup(ui, user, &response);
+                                        }
                                         // Streams dieses Users: Klick wechselt die Ansicht.
                                         // Unwatched streams too: clicking one starts watching it.
                                         for k in [VideoKind::Screen, VideoKind::Camera] {
@@ -1337,5 +1343,48 @@ impl VideoView {
             }
         });
         Self { id, tx, tex: None, last_request: None, cutout }
+    }
+}
+
+#[cfg(test)]
+mod fullscreen_audio_tests {
+    use super::*;
+    use super::super::mixer::tests::{text_pos, voice_app};
+
+    fn frame(ctx: &egui::Context, app: &mut RustTalkApp, events: Vec<egui::Event>) -> egui::FullOutput {
+        ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0))),
+            events, ..Default::default()
+        }, |ctx| app.ui_fullscreen(ctx, (1, VideoKind::Screen)))
+    }
+
+    #[test]
+    fn fullscreen_audio_popup_does_not_follow_a_replaced_member() {
+        let ctx = egui::Context::default();
+        let mut app = voice_app(&ctx);
+        for (id, name) in [(2, "Alice"), (3, "Bob")] {
+            let mut user = app.srv.users[&1].clone();
+            user.id = id;
+            user.name = name.into();
+            user.audio_sharing = true;
+            app.srv.users.insert(id, user);
+        }
+        app.srv.channels.get_mut(&5).unwrap().user_ids = vec![1, 2, 3];
+        frame(&ctx, &mut app, vec![]);
+        let out = frame(&ctx, &mut app, vec![]);
+        let note = text_pos(&out, icons::regular::MUSIC_NOTES).expect("fullscreen audio badge");
+        for pressed in [true, false] {
+            frame(&ctx, &mut app, vec![egui::Event::PointerMoved(note), egui::Event::PointerButton {
+                pos: note, button: egui::PointerButton::Primary, pressed, modifiers: Default::default(),
+            }]);
+        }
+        let out = frame(&ctx, &mut app, vec![]);
+        assert!(text_pos(&out, "Alice's shared audio").is_some());
+        app.srv.users.remove(&2);
+        app.srv.channels.get_mut(&5).unwrap().user_ids = vec![1, 3];
+        for _ in 0..2 {
+            let out = frame(&ctx, &mut app, vec![]);
+            assert!(text_pos(&out, "Bob's shared audio").is_none(), "popup must not silently change person");
+        }
     }
 }

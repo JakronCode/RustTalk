@@ -671,13 +671,20 @@ impl RustTalkApp {
         // Status icons right-aligned.
         let mut x = rect.right() - 8.0;
         let sound = !in_lobby && self.shared_audio_lit(user);
+        let mut audio_badge = None;
         let mut icon_at = |icon: &str, color: egui::Color32, tip: &str| {
             let r = egui::Rect::from_center_size(egui::pos2(x - 8.0, rect.center().y), egui::vec2(16.0, 16.0));
             if icon == icons::regular::MUSIC_NOTES && sound {
                 ui.painter().circle_filled(r.center(), 11.0, theme::GREEN.gamma_multiply(0.25));
             }
             ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(14.0), color);
-            ui.interact(r, ui.id().with(("ustat", user.id, tip)), egui::Sense::hover()).on_hover_text(tip);
+            let music = icon == icons::regular::MUSIC_NOTES;
+            let response = ui.interact(r, ui.id().with(("ustat", user.id, icon)), if music { egui::Sense::click() } else { egui::Sense::hover() });
+            if music {
+                audio_badge = Some(response);
+            } else {
+                response.on_hover_text(tip);
+            }
             x -= 20.0;
         };
         if user.audio_sharing && !in_lobby {
@@ -703,6 +710,9 @@ impl RustTalkApp {
             icon_at(icons::regular::SHIELD_CHECK, super::moderation_ui::role_color(user.role), user.role.label());
         }
 
+        if let Some(response) = audio_badge {
+            self.shared_audio_popup(ui, user, &response);
+        }
         if !me {
             resp.context_menu(|ui| self.user_menu(ui, user));
         }
@@ -1134,4 +1144,43 @@ fn pointer_on(ui: &egui::Ui, rect: egui::Rect) -> bool {
     let ctx = ui.ctx();
     let Some(p) = ctx.pointer_hover_pos().or_else(|| ctx.pointer_interact_pos()) else { return false };
     rect.contains(p) && ctx.layer_id_at(p).is_none_or(|l| l == ui.layer_id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::mixer::tests::{text_pos, voice_app};
+
+    fn row_frame(ctx: &egui::Context, app: &mut RustTalkApp, user: &UserInfo, events: Vec<egui::Event>) -> egui::FullOutput {
+        ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+            events, ..Default::default()
+        }, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.set_width(280.0);
+                app.user_row(ui, user, &HashMap::new(), &HashSet::new(), false);
+            });
+        })
+    }
+
+    #[test]
+    fn member_list_audio_badge_opens_friends_mixer() {
+        let ctx = egui::Context::default();
+        let mut app = voice_app(&ctx);
+        let mut friend = app.srv.users[&1].clone();
+        friend.id = 2;
+        friend.name = "Friend".into();
+        friend.audio_sharing = true;
+        row_frame(&ctx, &mut app, &friend, vec![]);
+        let out = row_frame(&ctx, &mut app, &friend, vec![]);
+        let note = text_pos(&out, icons::regular::MUSIC_NOTES).expect("member list badge");
+        for pressed in [true, false] {
+            row_frame(&ctx, &mut app, &friend, vec![egui::Event::PointerMoved(note), egui::Event::PointerButton {
+                pos: note, button: egui::PointerButton::Primary, pressed, modifiers: Default::default(),
+            }]);
+        }
+        let out = row_frame(&ctx, &mut app, &friend, vec![]);
+        assert!(text_pos(&out, "Friend's shared audio").is_some());
+        assert!(app.local_muted.lock().unwrap().is_empty());
+    }
 }
