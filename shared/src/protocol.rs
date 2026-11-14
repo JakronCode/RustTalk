@@ -37,13 +37,35 @@
 //! v15: Encrypted UDP ping/pong (`audio_packet::FLAG_CONTROL`, UDP header
 //!     version 3) with server-side packet counters for the connection stats;
 //!     replayed UDP packets are dropped.
+//! v17: Separate application audio registrations and UDP v4 stream IDs.
 //! v16: Audio sharing status (`UserInfo.audio_sharing`, `SetAudioSharing`,
 //!     `AudioSharingChanged`): who shares computer audio in a voice channel.
 
 use serde::{Deserialize, Serialize};
 
+pub const MAX_AUDIO_STREAMS: usize = 8;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioStreamInfo {
+    pub id: u32,
+    pub label: String,
+}
+
+pub fn valid_audio_streams(streams: &[AudioStreamInfo]) -> bool {
+    streams.len() <= MAX_AUDIO_STREAMS
+        && streams.iter().enumerate().all(|(i, s)| {
+            s.id != 0
+                && !s.label.trim().is_empty()
+                && s.label.len() <= 64
+                && !s.label.chars().any(|c| {
+                    c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+                })
+                && !streams[..i].iter().any(|old| old.id == s.id)
+        })
+}
+
+
 /// Aktuelle Protokollversion. Client und Server müssen übereinstimmen.
-pub const PROTOCOL_VERSION: u16 = 16;
+pub const PROTOCOL_VERSION: u16 = 17;
 
 /// Max. length of a poke message.
 pub const MAX_POKE_LEN: usize = 100;
@@ -439,6 +461,7 @@ pub enum ClientMessage {
         sharing: bool,
     },
     /// Computer audio sharing on/off (voice channels only; the audio itself goes over UDP).
+    SetAudioStreams { streams: Vec<AudioStreamInfo> },
     SetAudioSharing {
         sharing: bool,
     },
@@ -588,6 +611,7 @@ pub enum ServerMessage {
         client_id: u64,
         sharing: bool,
     },
+    AudioStreamsChanged { client_id: u64, streams: Vec<AudioStreamInfo> },
     AudioSharingChanged {
         client_id: u64,
         sharing: bool,

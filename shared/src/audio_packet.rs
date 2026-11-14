@@ -1,10 +1,10 @@
-//! UDP-Audiopakete: fester 20-Byte-Header + Opus-Payload.
+//! UDP-Audiopakete: fester 32-Byte-Header + Opus-Payload.
 //!
 //! ```text
 //!  0                   1                   2                   3
 //!  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-//! |    Magic (0x5254 = "RT")      |  Version (1)  |     Flags     |
+//! |    Magic (0x5254 = "RT")      |  Version (4)  |     Flags     |
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 //! |                         Token (u64)                           |
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -13,6 +13,8 @@
 //! |                       Timestamp (u32)                         |
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 //! |                Counter (u64, nonce of the AEAD)               |
+//! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//! |                        Stream ID (u32)                       |
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 //! |   Opus payload, ChaCha20-Poly1305 encrypted (+16 byte tag)    |
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -26,11 +28,11 @@
 /// Magic-Bytes "RT" (RustTalk), Little-Endian.
 pub const MAGIC: u16 = 0x5254;
 
-/// Protokollversion des Audio-Headers (2 = encrypted, 3 = ping/pong control packets).
-pub const VERSION: u8 = 3;
+/// Protokollversion des Audio-Headers (2 = encrypted, 3 = ping/pong, 4 = stream IDs).
+pub const VERSION: u8 = 4;
 
 /// Länge des Headers in Bytes.
-pub const HEADER_LEN: usize = 28;
+pub const HEADER_LEN: usize = 32;
 
 /// Sinnvolle Obergrenze für ein UDP-Paket im LAN (unterhalb der MTU).
 pub const MAX_PACKET_LEN: usize = 1500;
@@ -95,6 +97,7 @@ pub const FRAME_SAMPLES: usize = 960;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioHeader {
     pub flags: u8,
+    pub stream_id: u32,
     pub token: u64,
     pub sequence: u32,
     /// Beliebiger, pro Sender monoton steigender Zeitstempel
@@ -106,7 +109,7 @@ pub struct AudioHeader {
 
 impl AudioHeader {
     pub fn new(token: u64, sequence: u32, timestamp: u32) -> Self {
-        Self { flags: 0, token, sequence, timestamp, counter: 0 }
+        Self { flags: 0, stream_id: 0, token, sequence, timestamp, counter: 0 }
     }
 }
 
@@ -141,6 +144,7 @@ pub fn encode(header: &AudioHeader, payload: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(&header.sequence.to_le_bytes());
     out.extend_from_slice(&header.timestamp.to_le_bytes());
     out.extend_from_slice(&header.counter.to_le_bytes());
+    out.extend_from_slice(&header.stream_id.to_le_bytes());
     out.extend_from_slice(payload);
 }
 
@@ -154,7 +158,7 @@ pub fn encode_to_vec(header: &AudioHeader, payload: &[u8]) -> Vec<u8> {
 /// Dekodiert ein Paket. Gibt `None` zurück bei falscher Magic/Version
 /// oder zu kurzem Puffer.
 pub fn decode(buf: &[u8]) -> Option<(AudioHeader, &[u8])> {
-    if buf.len() < HEADER_LEN {
+    if buf.len() < HEADER_LEN || buf.len() > MAX_PACKET_LEN {
         return None;
     }
     let magic = u16::from_le_bytes([buf[0], buf[1]]);
@@ -163,11 +167,13 @@ pub fn decode(buf: &[u8]) -> Option<(AudioHeader, &[u8])> {
     }
     let header = AudioHeader {
         flags: buf[3],
+        stream_id: u32::from_le_bytes(buf[28..32].try_into().ok()?),
         token: u64::from_le_bytes(buf[4..12].try_into().ok()?),
         sequence: u32::from_le_bytes(buf[12..16].try_into().ok()?),
         timestamp: u32::from_le_bytes(buf[16..20].try_into().ok()?),
         counter: u64::from_le_bytes(buf[20..28].try_into().ok()?),
     };
+    if !matches!(header.flags, 0 | FLAG_SCREEN_AUDIO | FLAG_CONTROL) || (header.flags != FLAG_SCREEN_AUDIO && header.stream_id != 0) { return None; }
     Some((header, &buf[HEADER_LEN..]))
 }
 
@@ -176,8 +182,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stream_id_is_authenticated_and_header_is_bounded() {
+        use crate::secure::{PacketCipher, DIR_TO_SERVER};
+        let cipher = PacketCipher::new(&[7; 32]).unwrap();
+        let mut header = AudioHeader::new(5, 1, 960);
+        header.flags = FLAG_SCREEN_AUDIO;
+        header.stream_id = 9;
+        let mut packet = seal_packet(&header, &cipher, DIR_TO_SERVER, b"opus");
+        let parsed = decode(&packet).unwrap().0;
+        assert_eq!(parsed.stream_id, 9);
+        assert_eq!(open_packet(&parsed, &packet, &cipher, DIR_TO_SERVER).unwrap(), b"opus");
+        packet[28] ^= 1;
+        assert!(open_packet(&decode(&packet).unwrap().0, &packet, &cipher, DIR_TO_SERVER).is_none());
+        for len in 0..HEADER_LEN { assert!(decode(&packet[..len]).is_none()); }
+        packet[3] = FLAG_CONTROL | FLAG_SCREEN_AUDIO;
+        assert!(decode(&packet).is_none());
+        packet[3] = 0;
+        assert!(decode(&packet).is_none());
+        assert!(decode(&vec![0; MAX_PACKET_LEN + 1]).is_none());
+    }
+
+    #[test]
     fn roundtrip() {
-        let header = AudioHeader { flags: 0, token: 0xDEAD_BEEF_CAFE, sequence: 42, timestamp: 960, counter: 7 };
+        let header = AudioHeader { stream_id: 0, flags: 0, token: 0xDEAD_BEEF_CAFE, sequence: 42, timestamp: 960, counter: 7 };
         let payload = [0xABu8; 137];
         let buf = encode_to_vec(&header, &payload);
         assert_eq!(buf.len(), HEADER_LEN + payload.len());

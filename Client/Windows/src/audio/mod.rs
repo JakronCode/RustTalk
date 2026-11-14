@@ -70,9 +70,10 @@ pub struct AudioControl {
     /// Ping and packet-loss stats for the connection panel.
     pub link: Arc<link::LinkStats>,
     /// Incoming streams seen by playback ([`mixer_key`] -> level), for the volume mixer.
-    pub stream_meters: Mutex<HashMap<u64, StreamMeter>>,
+    pub stream_meters: Mutex<HashMap<u128, StreamMeter>>,
     /// Single streams muted from the volume mixer ([`mixer_key`]s, session only).
-    pub muted_streams: Mutex<HashSet<u64>>,
+    pub muted_streams: Mutex<HashSet<u128>>,
+    pub shared_streams: Mutex<HashMap<u64, Vec<rusttalk_shared::protocol::AudioStreamInfo>>>,
 }
 
 /// Last playback level of one incoming stream.
@@ -90,13 +91,14 @@ pub enum StreamKind {
     Voice,
     /// Computer audio (screen share with sound, or "share audio" alone).
     Shared,
+    App(u32),
 }
 
 impl StreamKind {
     pub const ALL: [StreamKind; 2] = [StreamKind::Voice, StreamKind::Shared];
 
-    pub fn key(self, speaker: u64) -> u64 {
-        mixer_key(speaker, self == StreamKind::Shared)
+    pub fn key(self, speaker: u64) -> u128 {
+        match self { Self::Voice => mixer_key(speaker, false), Self::Shared => mixer_key(speaker, true), Self::App(id) => mixer_key(speaker, true) | ((id as u128) << 1) }
     }
 }
 
@@ -105,7 +107,7 @@ const METER_KEEP: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl AudioControl {
     /// Records the level of one mixed chunk; never blocks the audio thread.
-    pub(crate) fn note_stream_levels(&self, levels: &[(u64, f32, Instant)]) {
+    pub(crate) fn note_stream_levels(&self, levels: &[(u128, f32, Instant)]) {
         let Ok(mut meters) = self.stream_meters.try_lock() else { return };
         let now = Instant::now();
         for &(key, level, heard) in levels {
@@ -116,15 +118,16 @@ impl AudioControl {
 
     /// Forgets meters and stream mutes (new voice server: client ids name other people).
     pub fn clear_streams(&self) {
+        self.shared_streams.lock().unwrap().clear();
         self.stream_meters.lock().unwrap().clear();
         self.muted_streams.lock().unwrap().clear();
     }
 
     /// Forgets the streams of one speaker who left.
     pub fn forget_speaker(&self, speaker: u64) {
-        let keys = StreamKind::ALL.map(|k| k.key(speaker));
-        self.stream_meters.lock().unwrap().retain(|k, _| !keys.contains(k));
-        self.muted_streams.lock().unwrap().retain(|k| !keys.contains(k));
+        self.shared_streams.lock().unwrap().remove(&speaker);
+        self.stream_meters.lock().unwrap().retain(|k, _| mixer_speaker(*k) != speaker);
+        self.muted_streams.lock().unwrap().retain(|k| mixer_speaker(*k) != speaker);
     }
 }
 
@@ -146,6 +149,7 @@ impl AudioControl {
             link: Arc::new(link::LinkStats::default()),
             stream_meters: Mutex::new(HashMap::new()),
             muted_streams: Mutex::new(HashSet::new()),
+            shared_streams: Mutex::new(HashMap::new()),
         }
     }
 
@@ -193,24 +197,24 @@ impl AudioControl {
 pub type TalkingMap = Arc<Mutex<HashMap<u64, Instant>>>;
 
 /// Mixer key: one decoder per speaker and stream (voice / screen audio).
-pub fn mixer_key(speaker: u64, screen: bool) -> u64 {
-    (speaker << 1) | u64::from(screen)
+pub fn mixer_key(speaker: u64, screen: bool) -> u128 {
+    ((speaker as u128) << 33) | u128::from(screen)
 }
 
 /// Speaker of a mixer key.
-pub fn mixer_speaker(key: u64) -> u64 {
-    key >> 1
+pub fn mixer_speaker(key: u128) -> u64 {
+    (key >> 33) as u64
 }
 
 /// Mixer-State, geteilt zwischen UDP-Empfangsthread und Wiedergabe-Callback.
-pub type SharedMixer = Arc<Mutex<HashMap<u64, UserAudio>>>;
+pub type SharedMixer = Arc<Mutex<HashMap<u128, UserAudio>>>;
 
 /// Lokal stummgeschaltete Sprecher (nur clientseitig, kein Server-Eingriff).
 pub type LocalMuteSet = Arc<Mutex<HashSet<u64>>>;
 
 /// Per-stream playback volume ([`mixer_key`] -> gain, 1.0 = 100 %, max 2.0).
 /// Local only; missing entry = 100 %.
-pub type UserVolumeMap = Arc<Mutex<HashMap<u64, f32>>>;
+pub type UserVolumeMap = Arc<Mutex<HashMap<u128, f32>>>;
 
 /// Allowed range for per-user and input volume.
 pub const MAX_VOLUME: f32 = 2.0;
@@ -303,7 +307,8 @@ impl AudioEngine {
                 let stop = stop.clone();
                 let cipher = cipher.clone();
                 let link = control.link.clone();
-                move || recv_loop(recv_udp, token, mixer, talking, stop, cipher, link, session, voice_channel.is_some())
+                let receiver_control = control.clone();
+                move || recv_loop(recv_udp, token, mixer, talking, stop, cipher, link, session, voice_channel.is_some(), receiver_control)
             })
             .context("Empfangsthread starten")?);
 
@@ -458,8 +463,9 @@ fn recv_loop(
     link: Arc<link::LinkStats>,
     session: u64,
     in_voice: bool,
+    control: Arc<AudioControl>,
 ) {
-    let mut buf = [0u8; rusttalk_shared::audio_packet::MAX_PACKET_LEN];
+    let mut buf = [0u8; rusttalk_shared::audio_packet::MAX_PACKET_LEN + 1];
     let mut pinger = link::Pinger::default();
     // Drain on the receiver, not the UI thread. Under a flood stay fail-closed
     // until the socket is empty, yielding every bounded batch.
@@ -517,9 +523,11 @@ fn recv_loop(
                 link.audio_received.fetch_add(1, Ordering::Relaxed);
                 let speaker = header.token; // Relay: Token-Feld = client_id des Sprechers
                 let screen = header.flags & rusttalk_shared::audio_packet::FLAG_SCREEN_AUDIO != 0;
-                let key = mixer_key(speaker, screen);
+                let key = if header.stream_id == 0 { mixer_key(speaker, screen) } else { StreamKind::App(header.stream_id).key(speaker) };
+                if header.stream_id != 0 && !control.shared_streams.lock().unwrap().get(&speaker).is_some_and(|s| s.iter().any(|s| s.id == header.stream_id)) { continue; }
                 {
                     let mut map = mixer.lock().unwrap();
+                    if map.len() >= 512 && !map.contains_key(&key) { continue; }
                     if !map.contains_key(&key) {
                         match UserAudio::new() {
                             Some(u) => {
@@ -607,6 +615,7 @@ mod session_tests {
                 link,
                 session,
                 true,
+                Arc::new(AudioControl::new(false, 0.01)),
             )
         })
     }
@@ -646,7 +655,7 @@ mod session_tests {
             let stats = link.clone();
             let stopped = stop.clone();
             let worker = std::thread::spawn(move || recv_loop(
-                recv, 42, Arc::default(), Arc::default(), stopped, cipher, stats, session, true,
+                recv, 42, Arc::default(), Arc::default(), stopped, cipher, stats, session, true, Arc::new(AudioControl::new(false, 0.01)),
             ));
             let workers = AudioWorkers { stop, handles: vec![worker] };
             let mut buf = [0; 2048];
@@ -824,6 +833,7 @@ mod session_tests {
                 link,
                 session,
                 true,
+                Arc::new(AudioControl::new(false, 0.01)),
             )
         });
         std::thread::sleep(Duration::from_millis(1));

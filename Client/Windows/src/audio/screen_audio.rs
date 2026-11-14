@@ -34,6 +34,7 @@ const SILENCE_HANGOVER: u32 = 25; // 0.5 s
 
 /// One captured stream. Its `stop` is set by whoever ends it (capture failure or app exit).
 struct Source {
+    id: u32,
     cons: HeapCons<f32>,
     stop: Arc<AtomicBool>,
     buf: [f32; FRAME_SAMPLES],
@@ -51,7 +52,7 @@ const FRAME_PERIOD: Duration = Duration::from_millis(20);
 impl Source {
     fn channel() -> (HeapProd<f32>, Self) {
         let (prod, cons) = HeapRb::<f32>::new(SAMPLE_RATE as usize * 2).split();
-        (prod, Self { cons, stop: Arc::new(AtomicBool::new(false)), buf: [0.0; FRAME_SAMPLES], have: 0, primed: false, waited: 0 })
+        (prod, Self { id: 0, cons, stop: Arc::new(AtomicBool::new(false)), buf: [0.0; FRAME_SAMPLES], have: 0, primed: false, waited: 0 })
     }
 
     /// A stopped source with less than a frame left is done; its tail is dropped.
@@ -110,6 +111,8 @@ pub const SOUND_LIT_MS: u64 = 400;
 /// Running "share audio"; dropping it stops everything.
 pub struct ScreenAudio {
     activity: Activity,
+    source_ids: Vec<u32>,
+    registered: Arc<Mutex<Vec<u32>>>,
     _stream: Option<super::DeviceStream>,
     capture_workers: Vec<std::thread::JoinHandle<()>>,
     source_stops: Vec<Arc<AtomicBool>>,
@@ -135,6 +138,12 @@ impl ScreenAudio {
     }
 
     /// Sound is going out right now.
+    pub fn register(&self, ids: Vec<u32>) { *self.registered.lock().unwrap() = ids; }
+
+    pub fn active_ids(&self) -> Vec<u32> {
+        self.source_ids.iter().zip(&self.source_stops).filter(|(_, stop)| !stop.load(Ordering::Relaxed)).map(|(id, _)| *id).collect()
+    }
+
     pub fn sending(&self) -> bool {
         self.activity.recent()
     }
@@ -152,18 +161,22 @@ impl ScreenAudio {
         use super::share_source::{AudioShareSource, MAX_MIX};
         #[cfg(test)]
         if let Some(stream) = super::test_devices::open(super::test_devices::Kind::System, output_device) {
-            return Ok(Self { activity: Activity::new(), _stream: Some(stream?), capture_workers: vec![], source_stops: vec![], worker: None, stop: Arc::new(AtomicBool::new(false)), tap });
+            return Ok(Self { activity: Activity::new(), source_ids: vec![], registered: Arc::default(), _stream: Some(stream?), capture_workers: vec![], source_stops: vec![], worker: None, stop: Arc::new(AtomicBool::new(false)), tap });
         }
         #[cfg(not(windows))]
         let _ = output_device; // Linux captures the system default output, not a CPAL device.
         anyhow::ensure!(cfg!(any(windows, target_os = "linux")), "System audio capture is not supported on this platform");
+        let separate = if let AudioShareSource::Separate(apps) = source { Some(apps.clone()) } else { None };
+        let normalized = separate.as_ref().map(|apps| AudioShareSource::Applications(apps.iter().map(|(a, _)| a.clone()).collect()));
+        let source = normalized.as_ref().unwrap_or(source);
+        if let Some(apps) = &separate { anyhow::ensure!(rusttalk_shared::protocol::valid_audio_streams(&apps.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>()), "Invalid audio streams"); }
         if let AudioShareSource::Applications(apps) = source {
             anyhow::ensure!(!apps.is_empty() && apps.len() <= MAX_MIX, "Pick between 1 and {MAX_MIX} applications");
             anyhow::ensure!(apps.iter().enumerate().all(|(i, a)| !apps[..i].contains(a)), "Application selected twice");
         }
         let stop = Arc::new(AtomicBool::new(false));
         // Dropping `audio` on any early return stops the captures already running.
-        let mut audio = Self { activity: Activity::new(), _stream: None, capture_workers: vec![], source_stops: vec![], worker: None, stop: stop.clone(), tap: tap.clone() };
+        let mut audio = Self { activity: Activity::new(), source_ids: vec![], registered: Arc::default(), _stream: None, capture_workers: vec![], source_stops: vec![], worker: None, stop: stop.clone(), tap: tap.clone() };
         let mut sources = Vec::new();
         #[cfg(windows)]
         match source {
@@ -173,6 +186,7 @@ impl ScreenAudio {
                 audio.capture_workers.push(super::windows_audio::start(application.clone(), prod, src.stop.clone())?);
                 sources.push(src);
             },
+            AudioShareSource::Separate(_) => unreachable!("normalized above"),
             AudioShareSource::System => {
                 let (prod, src) = Source::channel();
                 audio.source_stops.push(src.stop.clone());
@@ -189,6 +203,7 @@ impl ScreenAudio {
         #[cfg(target_os = "linux")]
         {
             let targets: Vec<Option<super::share_source::ApplicationSource>> = match source {
+                AudioShareSource::Separate(_) => unreachable!("normalized above"),
                 AudioShareSource::System => vec![None],
                 AudioShareSource::Applications(apps) => apps.iter().cloned().map(Some).collect(),
             };
@@ -200,13 +215,16 @@ impl ScreenAudio {
             }
         }
 
+        audio.source_ids = separate.as_ref().map(|apps| apps.iter().map(|(_, s)| s.id).collect()).unwrap_or_default();
+        if let Some(apps) = &separate { for (source, (_, info)) in sources.iter_mut().zip(apps) { source.id = info.id; } }
         let (render_prod, render_cons) = HeapRb::<f32>::new(SAMPLE_RATE as usize).split();
         audio.worker = Some(std::thread::Builder::new()
             .name("screen-audio".into())
             .spawn({
                 let stop = stop.clone();
                 let activity = audio.activity.clone();
-                move || encode_loop(sources, render_cons, udp, token, cipher, link, stop, activity)
+                let registered = audio.registered.clone();
+                move || if separate.is_some() { encode_separate(sources, render_cons, udp, token, cipher, link, stop, activity, registered) } else { encode_loop(sources, render_cons, udp, token, cipher, link, stop, activity) }
             })
             .context("screen audio thread")?);
         *tap.lock().unwrap() = Some(render_prod);
@@ -302,6 +320,99 @@ fn encode_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn encode_separate(
+    mut sources: Vec<Source>,
+    mut render: HeapCons<f32>,
+    udp: UdpSocket,
+    token: u64,
+    cipher: Arc<PacketCipher>,
+    link: Arc<super::link::LinkStats>,
+    stop: Arc<AtomicBool>,
+    activity: Activity,
+    registered: Arc<Mutex<Vec<u32>>>,
+) {
+    let mut encoders = std::collections::HashMap::new();
+    for source in &sources {
+        let Ok(mut encoder) = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Audio)
+        else {
+            stop.store(true, Ordering::Relaxed);
+            return;
+        };
+        if encoder.set_bitrate(Bitrate::BitsPerSecond(64_000)).is_err() {
+            stop.store(true, Ordering::Relaxed);
+            return;
+        }
+        let _ = encoder.set_inband_fec(true);
+        let _ = encoder.set_packet_loss_perc(10);
+        encoders.insert(
+            source.id,
+            (encoder, EchoCanceller::new(), 1u32, 0u32, SILENCE_HANGOVER),
+        );
+    }
+    let mut next = Instant::now();
+    let mut opus = [0u8; 1400];
+    while !stop.load(Ordering::Relaxed) {
+        let now = Instant::now();
+        if now < next {
+            std::thread::sleep((next - now).min(Duration::from_millis(5)));
+            continue;
+        }
+        next = (next + FRAME_PERIOD).max(now);
+        sources.retain(|s| !s.finished());
+        if sources.is_empty() {
+            stop.store(true, Ordering::Relaxed);
+            break;
+        }
+        let backlog = render.occupied_len();
+        if backlog > AEC_FRAME * 30 {
+            render.skip(backlog - AEC_FRAME * 6);
+        }
+        let mut reference = [0.0; FRAME_SAMPLES];
+        render.pop_slice(&mut reference);
+        for source in &mut sources {
+            let Some((encoder, aec, seq, ts, quiet)) = encoders.get_mut(&source.id) else {
+                continue;
+            };
+            *ts = ts.wrapping_add(FRAME_SAMPLES as u32);
+            let mut frame = [0.0; FRAME_SAMPLES];
+            if source.next_frame() {
+                frame = source.buf;
+                source.have = 0;
+            }
+            if let Some(aec) = aec {
+                for (half, reference) in
+                    frame.chunks_mut(AEC_FRAME).zip(reference.chunks(AEC_FRAME))
+                {
+                    aec.process(half, reference);
+                }
+            }
+            if rms(&frame) < SILENCE_RMS {
+                *quiet = quiet.saturating_add(1);
+                if *quiet > SILENCE_HANGOVER {
+                    continue;
+                }
+            } else {
+                *quiet = 0;
+            }
+            if !registered.lock().unwrap().contains(&source.id) {
+                continue;
+            }
+            let Ok(len) = encoder.encode_float(&frame, &mut opus) else {
+                stop.store(true, Ordering::Relaxed);
+                return;
+            };
+            let mut header = AudioHeader::new(token, *seq, *ts);
+            header.flags = FLAG_SCREEN_AUDIO;
+            header.stream_id = source.id;
+            let _ = udp.send(&seal_packet(&header, &cipher, DIR_TO_SERVER, &opus[..len]));
+            *seq = seq.wrapping_add(1);
+            link.audio_sent.fetch_add(1, Ordering::Relaxed);
+            activity.note();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,7 +447,7 @@ mod tests {
             let stop = stop.clone();
             move || encode_loop(vec![source], render_cons, sender, 42, cipher, Arc::new(super::super::link::LinkStats::default()), stop, Activity::new())
         });
-        let audio = ScreenAudio { activity: Activity::new(), _stream: Some(stream), capture_workers: vec![], source_stops: vec![], worker: Some(worker), stop: stop.clone(), tap: tap.clone() };
+        let audio = ScreenAudio { activity: Activity::new(), source_ids: vec![], registered: Arc::default(), _stream: Some(stream), capture_workers: vec![], source_stops: vec![], worker: Some(worker), stop: stop.clone(), tap: tap.clone() };
         let mut buf = [0; 1500];
         let n = receiver.recv(&mut buf).unwrap();
         let (header, _) = decode(&buf[..n]).unwrap();
@@ -347,6 +458,38 @@ mod tests {
         assert!(stop.load(Ordering::Relaxed));
         assert!(tap.lock().unwrap().is_none());
         assert_eq!(devices.0.borrow().systems, 0);
+    }
+
+    #[test]
+    fn application_encoders_have_independent_sequences_and_shared_nonces() {
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender.connect(receiver.local_addr().unwrap()).unwrap();
+        let (mut pa, mut a) = Source::channel();
+        let (mut pb, mut b) = Source::channel();
+        a.id = 7; b.id = 8;
+        feed(&mut pa, 0.2, 5); feed(&mut pb, 0.4, 5);
+        let (_reference, render) = HeapRb::<f32>::new(FRAME_SAMPLES).split();
+        let cipher = Arc::new(PacketCipher::new(&[9; 32]).unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker = std::thread::spawn({
+            let stop = stop.clone(); let cipher = cipher.clone();
+            move || encode_separate(vec![a, b], render, sender, 5, cipher, Arc::default(), stop, Activity::new(), Arc::new(Mutex::new(vec![7, 8])))
+        });
+        let mut buf = [0; 1500];
+        let mut counters = std::collections::HashSet::new();
+        let mut sequences = std::collections::HashMap::new();
+        for _ in 0..4 {
+            let n = receiver.recv(&mut buf).unwrap();
+            let h = rusttalk_shared::audio_packet::decode(&buf[..n]).unwrap().0;
+            assert!(counters.insert(h.counter));
+            assert!(rusttalk_shared::audio_packet::open_packet(&h, &buf[..n], &cipher, DIR_TO_SERVER).is_some());
+            sequences.entry(h.stream_id).or_insert_with(Vec::new).push(h.sequence);
+        }
+        stop.store(true, Ordering::Relaxed); worker.join().unwrap();
+        assert_eq!(sequences[&7], vec![1, 2]);
+        assert_eq!(sequences[&8], vec![1, 2]);
     }
 
     fn feed(prod: &mut HeapProd<f32>, value: f32, frames: usize) {

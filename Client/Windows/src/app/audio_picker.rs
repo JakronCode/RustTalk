@@ -7,6 +7,8 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 pub(super) struct AudioPicker {
     selected: AudioShareSource,
+    separate: bool,
+    names: bool,
     /// A selected app stopped playing and left the selection.
     dropped: bool,
     applications: Vec<AudioApplication>,
@@ -24,7 +26,11 @@ impl Drop for AudioPicker {
 
 impl AudioPicker {
     fn new(selected: AudioShareSource) -> Self {
+        let separate = matches!(selected, AudioShareSource::Separate(_));
+        let selected = if let AudioShareSource::Separate(apps) = selected { AudioShareSource::Applications(apps.into_iter().map(|(a, _)| a).collect()) } else { selected };
         let mut picker = Self {
+            separate,
+            names: false,
             selected,
             dropped: false,
             applications: vec![],
@@ -113,7 +119,7 @@ impl AudioPicker {
     fn selected_apps(&self) -> &[share_source::ApplicationSource] {
         match &self.selected {
             AudioShareSource::Applications(list) => list,
-            AudioShareSource::System => &[],
+            AudioShareSource::System | AudioShareSource::Separate(_) => &[],
         }
     }
 
@@ -133,6 +139,7 @@ impl AudioPicker {
     fn selection_available(&self) -> bool {
         match &self.selected {
             AudioShareSource::System => true,
+            AudioShareSource::Separate(_) => false,
             AudioShareSource::Applications(list) => self.pending.is_none() && !list.is_empty(),
         }
     }
@@ -162,13 +169,20 @@ impl RustTalkApp {
         if !self.in_voice() {
             return;
         }
+        let had_separate = matches!(self.shared_audio_source, AudioShareSource::Separate(_));
         self.stop_shared_audio();
+        self.sync_audio_flag();
+        if let Some(tx) = self.voice_tx().filter(|_| had_separate || matches!(source, AudioShareSource::Separate(_))) {
+            let streams = match &source { AudioShareSource::Separate(apps) => apps.iter().map(|(_, s)| s.clone()).collect(), _ => vec![] };
+            if tx.send(Command::SetAudioStreams(streams)).is_err() { return; }
+        }
         self.shared_audio_source = source;
         self.audio_only = true;
         self.screen_audio_failed = false;
         self.sync_shared_audio();
     }
 
+    #[allow(deprecated)] // fetch_update also supports the project's older Rust toolchains.
     pub(super) fn ui_audio_picker(&mut self, ctx: &egui::Context) {
         let active = self.audio_sharing_active();
         let Some(picker) = self.audio_picker.as_mut() else {
@@ -266,6 +280,14 @@ impl RustTalkApp {
                         "Pick more apps to mix them. An app that closes leaves the mix."
                     });
                 }
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut picker.separate, false, "Mix into one");
+                    ui.selectable_value(&mut picker.separate, true, "Send separately");
+                });
+                if picker.separate {
+                    ui.checkbox(&mut picker.names, "Share app names with this voice channel");
+                    hint(ui, "Otherwise listeners see generic application names.");
+                }
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     if active
@@ -281,7 +303,20 @@ impl RustTalkApp {
                             })
                             .inner;
                         if go.clicked() {
-                            start = Some(picker.selected.clone());
+                            let selection = if picker.separate {
+                                if let AudioShareSource::Applications(apps) = &picker.selected {
+                                    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+                                    let mut selected = Vec::new();
+                                    for (i, app) in apps.iter().enumerate() {
+                                        let Ok(id) = NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1)) else { picker.error = Some("Audio stream IDs exhausted; restart RustTalk".into()); return; };
+                                        let label = if picker.names { picker.applications.iter().find(|a| &a.source == app).map(|a| a.label.clone()).unwrap_or_else(|| format!("Application {}", i + 1)) } else { format!("Application {}", i + 1) };
+                                        let label: String = label.chars().filter(|c| !c.is_control() && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')).scan(0, |len, c| { *len += c.len_utf8(); (*len <= 64).then_some(c) }).collect();
+                                        selected.push((app.clone(), rusttalk_shared::protocol::AudioStreamInfo { id, label }));
+                                    }
+                                    AudioShareSource::Separate(selected)
+                                } else { picker.selected.clone() }
+                            } else { picker.selected.clone() };
+                            start = Some(selection);
                         }
                         if theme::ghost_button(ui, "Cancel").clicked() {
                             close = true;
@@ -438,6 +473,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = RustTalkApp::with_config(ctx.clone(), ClientConfig::default(), false);
         app.audio_picker = Some(AudioPicker {
+            separate: false, names: false,
             selected: AudioShareSource::System,
             dropped: false,
             applications: ["Firefox", "Discord", "Limusic", "Scrcpy"]
@@ -501,6 +537,7 @@ mod tests {
     #[test]
     fn system_selection_needs_no_discovery_or_capture() {
         let picker = AudioPicker {
+            separate: false, names: false,
             selected: AudioShareSource::System,
             dropped: false,
             applications: vec![],

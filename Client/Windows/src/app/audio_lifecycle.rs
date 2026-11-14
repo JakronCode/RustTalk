@@ -134,6 +134,15 @@ impl RustTalkApp {
             self.set_error("Computer audio stopped: capture device or encoder failed. Start sharing again to retry.");
             return;
         }
+        if let (Some(audio), crate::audio::share_source::AudioShareSource::Separate(apps)) = (&self.screen_audio, &mut self.shared_audio_source) {
+            let ids = audio.active_ids();
+            let before = apps.len();
+            apps.retain(|(_, s)| ids.contains(&s.id));
+            if before != apps.len() {
+                let streams = apps.iter().map(|(_, s)| s.clone()).collect();
+                if let Some(tx) = self.voice_tx() { let _ = tx.send(Command::SetAudioStreams(streams)); }
+            }
+        }
         let wanted = wants_shared_audio(
             self.audio_only,
             self.screen
@@ -198,8 +207,7 @@ impl RustTalkApp {
             .stream_meters
             .lock()
             .unwrap()
-            .get(&StreamKind::Shared.key(user.id))
-            .is_some_and(|m| m.heard.elapsed() < Duration::from_millis(crate::audio::screen_audio::SOUND_LIT_MS))
+            .iter().any(|(k, m)| crate::audio::mixer_speaker(*k) == user.id && k & 1 == 1 && m.heard.elapsed() < Duration::from_millis(crate::audio::screen_audio::SOUND_LIT_MS))
     }
 
     pub(super) fn sync_mic_preview(&mut self) {

@@ -16,6 +16,7 @@ pub enum AudioShareSource {
     System,
     /// One app, or several mixed into one stream (at most `MAX_MIX`).
     Applications(Vec<ApplicationSource>),
+    Separate(Vec<(ApplicationSource, rusttalk_shared::protocol::AudioStreamInfo)>),
 }
 
 /// Most applications that can be mixed into one shared stream.

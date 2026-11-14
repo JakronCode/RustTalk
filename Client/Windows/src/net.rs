@@ -80,6 +80,7 @@ pub enum Command {
     },
     SetSharing(bool),
     SetAudioSharing(bool),
+    SetAudioStreams(Vec<rusttalk_shared::protocol::AudioStreamInfo>),
     VideoFrame(VideoKind, Vec<u8>),
     StopVideo(VideoKind),
 }
@@ -125,6 +126,7 @@ impl Command {
             Command::Raw(msg) => msg,
             Command::SetMute { muted, deafened } => ClientMessage::SetMuteState { muted, deafened },
             Command::SetSharing(sharing) => ClientMessage::SetSharing { sharing },
+            Command::SetAudioStreams(streams) => ClientMessage::SetAudioStreams { streams },
             Command::SetAudioSharing(sharing) => ClientMessage::SetAudioSharing { sharing },
             Command::VideoFrame(kind, data) => ClientMessage::VideoFrame { kind, data },
             Command::StopVideo(kind) => ClientMessage::StopVideo { kind },

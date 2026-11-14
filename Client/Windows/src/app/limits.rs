@@ -181,6 +181,10 @@ pub(super) fn welcome(
 /// One message against the state it would change.
 pub(super) fn message(s: &ServerSession, msg: &ServerMessage) -> Check {
     match msg {
+        ServerMessage::AudioStreamsChanged { streams, .. } => {
+            if !rusttalk_shared::protocol::valid_audio_streams(streams) { return fail("invalid audio streams"); }
+            Ok(())
+        }
         ServerMessage::UserJoined { user: u } => {
             user(u)?;
             if !s.users.contains_key(&u.id) && s.users.len() >= MAX_USERS {
