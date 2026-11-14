@@ -278,6 +278,9 @@ class BoundaryTests(unittest.TestCase):
         self.assertIn('component: ${{ needs.check-version.outputs.component }}', text)
         self.assertIn('needs: [check-version, reserve]', text)
         self.assertIn('needs: [check-version, reserve, image]', text)
+        image = text.split('\n  image:\n', 1)[1].split('\n  publish:\n', 1)[0]
+        self.assertIn('contents: write', image)
+        self.assertIn('packages: write', image)
         self.assertNotIn('softprops/', text)
         self.assertNotIn('${{ github.ref', text)
         for line in text.splitlines():
