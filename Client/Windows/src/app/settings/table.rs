@@ -46,26 +46,26 @@ pub(crate) enum SectionId {
     Feedback,
 }
 
-pub(crate) struct Section {
-    pub id: SectionId,
+pub(crate) struct Section<S: 'static = SectionId> {
+    pub id: S,
     pub title: &'static str,
     /// Lowercase search words, taken from the setting labels in the section.
     pub keywords: &'static [&'static str],
 }
 
-pub(crate) struct Page {
-    pub page: SettingsPage,
+pub(crate) struct Page<P: 'static = SettingsPage, S: 'static = SectionId> {
+    pub page: P,
     pub title: &'static str,
     pub icon: &'static str,
-    pub sections: &'static [Section],
+    pub sections: &'static [Section<S>],
 }
 
-pub(crate) struct Group {
+pub(crate) struct Group<P: 'static = SettingsPage, S: 'static = SectionId> {
     pub title: &'static str,
-    pub pages: &'static [Page],
+    pub pages: &'static [Page<P, S>],
 }
 
-const fn s(id: SectionId, title: &'static str, keywords: &'static [&'static str]) -> Section {
+pub(crate) const fn s<S>(id: S, title: &'static str, keywords: &'static [&'static str]) -> Section<S> {
     Section {
         id,
         title,
@@ -166,29 +166,34 @@ pub(crate) fn page(p: SettingsPage) -> &'static Page {
         .expect("every SettingsPage is in GROUPS")
 }
 
-pub(crate) struct PageHit {
-    pub page: &'static Page,
-    pub sections: Vec<&'static Section>,
+pub(crate) struct PageHit<P: 'static = SettingsPage, S: 'static = SectionId> {
+    pub page: &'static Page<P, S>,
+    pub sections: Vec<&'static Section<S>>,
 }
 
-pub(crate) struct GroupHit {
-    pub group: &'static Group,
-    pub pages: Vec<PageHit>,
+pub(crate) struct GroupHit<P: 'static = SettingsPage, S: 'static = SectionId> {
+    pub group: &'static Group<P, S>,
+    pub pages: Vec<PageHit<P, S>>,
 }
 
 /// Groups, pages and sections matching `query`. Every whitespace-separated
 /// term must appear (case-insensitive) in the section's title or keywords,
 /// or in its page or group title. An empty query returns everything.
+#[cfg(test)]
 pub(crate) fn search(query: &str) -> Vec<GroupHit> {
+    search_in(GROUPS, query)
+}
+
+pub(crate) fn search_in<P: 'static, S: 'static>(groups: &'static [Group<P, S>], query: &str) -> Vec<GroupHit<P, S>> {
     let terms: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
-    GROUPS
+    groups
         .iter()
         .filter_map(|group| {
-            let pages: Vec<PageHit> = group
+            let pages: Vec<PageHit<P, S>> = group
                 .pages
                 .iter()
                 .filter_map(|page| {
-                    let sections: Vec<&Section> = page
+                    let sections: Vec<&Section<S>> = page
                         .sections
                         .iter()
                         .filter(|sec| {

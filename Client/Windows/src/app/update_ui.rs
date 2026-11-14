@@ -49,7 +49,7 @@ impl RustTalkApp {
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(tip);
         if resp.clicked() {
-            self.update.open_dialog(false);
+            self.update.open_dialog();
         }
     }
 
@@ -68,21 +68,11 @@ impl RustTalkApp {
             });
     }
 
-    /// Confirmation + progress. Drawn once per viewport; `in_settings` picks
-    /// the settings window or the main window.
-    pub(super) fn ui_update_dialog(&mut self, ctx: &egui::Context, in_settings: bool) {
-        if !in_settings && !self.show_settings {
-            // Settings closed with the dialog open: keep it in the main window.
-            if let Some(d) = self.update.dialog.as_mut() {
-                d.in_settings = false;
-            }
-        }
+    /// Confirmation + progress, a modal over whatever page is showing.
+    pub(super) fn ui_update_dialog(&mut self, ctx: &egui::Context) {
         let Some(dialog) = self.update.dialog.clone() else {
             return;
         };
-        if dialog.in_settings != in_settings {
-            return;
-        }
         let Some(release) = self.update.dialog_release().cloned() else {
             // A newer check replaced the release: never install the old confirmation.
             self.update.dialog = None;
@@ -193,7 +183,7 @@ mod tests {
     fn no_update_no_banner_no_dialog() {
         let mut s = UpdateState::new();
         assert_eq!(s.banner(), Banner::Hidden);
-        assert!(!s.open_dialog(false));
+        assert!(!s.open_dialog());
         assert_eq!(s.dialog, None);
         assert_eq!(s.begin_install("1.0.0", true), None);
     }
@@ -202,7 +192,7 @@ mod tests {
     fn install_needs_confirmation_of_that_version() {
         let mut s = with_update("1.0.0");
         assert_eq!(s.begin_install("1.0.0", true), None, "dialog never opened");
-        assert!(s.open_dialog(false));
+        assert!(s.open_dialog());
         assert_eq!(s.begin_install("0.9.0", true), None, "other version");
         assert!(!s.installing);
         assert_eq!(
@@ -215,7 +205,7 @@ mod tests {
     #[test]
     fn repeated_confirm_starts_one_install() {
         let mut s = with_update("1.0.0");
-        s.open_dialog(true);
+        s.open_dialog();
         assert!(s.begin_install("1.0.0", true).is_some());
         assert_eq!(s.begin_install("1.0.0", true), None);
         assert_eq!(s.banner(), Banner::Installing(0));
@@ -226,7 +216,7 @@ mod tests {
     #[test]
     fn dev_build_never_installs() {
         let mut s = with_update("1.0.0");
-        s.open_dialog(false);
+        s.open_dialog();
         assert_eq!(s.begin_install("1.0.0", false), None);
         assert!(!s.installing);
         assert_eq!(s.banner(), Banner::Available("1.0.0".into()));
@@ -235,7 +225,7 @@ mod tests {
     #[test]
     fn no_install_while_a_check_runs() {
         let mut s = with_update("1.0.0");
-        s.open_dialog(false);
+        s.open_dialog();
         s.checking = true;
         assert_eq!(s.begin_install("1.0.0", true), None);
     }
@@ -243,7 +233,7 @@ mod tests {
     #[test]
     fn newer_check_result_invalidates_open_confirmation() {
         let mut s = with_update("1.0.0");
-        s.open_dialog(false);
+        s.open_dialog();
         s.apply_check(Ok(Some(release("1.1.0"))));
         assert_eq!(s.dialog, None);
         assert_eq!(s.begin_install("1.0.0", true), None);
@@ -260,7 +250,6 @@ mod tests {
         let mut s = with_update("1.1.0");
         s.dialog = Some(UpdateDialog {
             version: "1.0.0".into(),
-            in_settings: false,
         });
         assert_eq!(s.dialog_release(), None);
         assert_eq!(s.begin_install("1.0.0", true), None);
@@ -269,13 +258,12 @@ mod tests {
     #[test]
     fn same_version_check_keeps_dialog() {
         let mut s = with_update("1.0.0");
-        s.open_dialog(true);
+        s.open_dialog();
         s.apply_check(Ok(Some(release("1.0.0"))));
         assert_eq!(
             s.dialog,
             Some(UpdateDialog {
                 version: "1.0.0".into(),
-                in_settings: true
             })
         );
     }
@@ -283,7 +271,7 @@ mod tests {
     #[test]
     fn up_to_date_check_clears_update() {
         let mut s = with_update("1.0.0");
-        s.open_dialog(false);
+        s.open_dialog();
         assert!(s.apply_check(Ok(None)).is_none());
         assert_eq!(s.banner(), Banner::Hidden);
         assert_eq!(s.dialog, None);
@@ -307,7 +295,7 @@ mod tests {
     #[test]
     fn failed_install_can_be_retried() {
         let mut s = with_update("1.0.0");
-        s.open_dialog(false);
+        s.open_dialog();
         assert!(s.begin_install("1.0.0", true).is_some());
         // What poll_background does on UpdateMsg::Installed(Err(..)).
         s.installing = false;

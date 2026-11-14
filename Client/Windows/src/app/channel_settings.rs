@@ -55,14 +55,12 @@ impl RustTalkApp {
         let is_category = ch.kind == ChannelKind::Category;
         let title = if is_category { "Category Settings" } else { "Channel Settings" };
 
-        egui::Window::new(format!("{}  {}", icons::regular::GEAR_SIX, title))
-            .id(egui::Id::new("channel_settings_window"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
+        let size = theme::dialog_size(ctx, egui::vec2(720.0, 480.0));
+        theme::dialog_window("channel_settings_window")
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .fixed_size([720.0, 520.0])
+            .fixed_size(size)
             .show(ctx, |ui| {
+                theme::dialog_header(ui, &format!("{}  {}", icons::regular::GEAR_SIX, title), &mut open);
                 ui.horizontal_top(|ui| {
                     // Left: channel + tabs.
                     ui.vertical(|ui| {
@@ -114,7 +112,7 @@ impl RustTalkApp {
                     // Right: content.
                     ui.vertical(|ui| {
                         ui.set_width(ui.available_width());
-                        egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                        egui::ScrollArea::vertical().max_height((size.y - 120.0).max(80.0)).show(ui, |ui| {
                             ui.spacing_mut().item_spacing.y = 10.0;
                             theme::wip_banner(
                                 ui,
@@ -248,14 +246,11 @@ impl RustTalkApp {
         }
         let mut open = true;
         let is_cat = self.new_channel_kind == ChannelKind::Category;
-        egui::Window::new(if is_cat { "Create Category" } else { "Create Channel" })
-            .id(egui::Id::new("new_channel_window"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
+        theme::dialog_window("new_channel_window")
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .fixed_size([420.0, 0.0])
             .show(ctx, |ui| {
+                theme::dialog_header(ui, if is_cat { "Create Category" } else { "Create Channel" }, &mut open);
                 ui.spacing_mut().item_spacing.y = 8.0;
                 if !is_cat {
                     if let Some(p) = self.new_channel_parent {
@@ -328,14 +323,11 @@ impl RustTalkApp {
         let what = if ch.kind == ChannelKind::Category { "Category" } else { "Channel" };
         let mut open = true;
         let mut done = false;
-        egui::Window::new(format!("Delete {what}"))
-            .id(egui::Id::new("confirm_delete_window"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
+        theme::dialog_window("confirm_delete_window")
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .fixed_size([400.0, 0.0])
             .show(ctx, |ui| {
+                theme::dialog_header(ui, &format!("Delete {what}"), &mut open);
                 ui.label(
                     egui::RichText::new(format!("Are you sure you want to delete \"{}\"? This cannot be undone.", ch.name))
                         .color(theme::TEXT),

@@ -1,30 +1,60 @@
-//! App settings: separate window with a searchable sidebar of grouped pages.
-//! Each page is one scrolling column of titled sections; the structure lives
-//! in `table.rs`, the section contents in `pages.rs`.
+//! App settings: a full-window page (no separate OS window) with a searchable
+//! sidebar of grouped pages. Each page is one scrolling column of titled
+//! sections; the structure lives in `table.rs`, the section contents in
+//! `pages.rs`. The shell below (sidebar, close button, scrolling sections) is
+//! also used by the server settings page.
 
 mod pages;
 mod table;
 
 use super::theme::{self, dense};
 use super::*;
-pub(super) use table::SettingsPage;
+pub(super) use table::{s, search_in, Group, Page};
 use table::SectionId;
+pub(super) use table::SettingsPage;
 
 /// Widest the content column grows (Discord-like reading width).
 const CONTENT_MAX_WIDTH: f32 = 700.0;
 /// A section counts as "in view" once its heading is this close to the top.
 const IN_VIEW_SLACK: f32 = 40.0;
 
-/// Sidebar search and scroll state of the settings window.
-#[derive(Default)]
-pub(super) struct SettingsNav {
+/// Sidebar search and scroll state of a settings page.
+pub(super) struct Nav<S> {
     search: String,
     /// Section highlighted in the sidebar (the one in view).
-    active: Option<SectionId>,
+    active: Option<S>,
     /// Smooth-scroll to this section on the next frame.
-    scroll_to: Option<SectionId>,
+    scroll_to: Option<S>,
     /// Jump to the top (page switch).
     reset_scroll: bool,
+}
+
+impl<S> Default for Nav<S> {
+    fn default() -> Self {
+        Self { search: String::new(), active: None, scroll_to: None, reset_scroll: false }
+    }
+}
+
+pub(super) type SettingsNav = Nav<SectionId>;
+
+impl<S: Copy + PartialEq> Nav<S> {
+    /// State for a page that was just opened.
+    pub(super) fn fresh() -> Self {
+        Self { reset_scroll: true, ..Default::default() }
+    }
+
+    /// Show `section` (or the first one of the page) after a click in the sidebar.
+    pub(super) fn goto(&mut self, page_changed: bool, first: Option<S>, section: Option<S>) {
+        if page_changed {
+            self.reset_scroll = true;
+        }
+        self.scroll_to = section.or(first);
+    }
+
+    /// Escape: clears the search first, then asks to close the page.
+    pub(super) fn escape(&mut self, ctx: &egui::Context, blocked: bool) -> bool {
+        settings_escape(ctx, &mut self.search, blocked)
+    }
 }
 
 const SEARCH_ID: &str = "settings_search";
@@ -48,236 +78,257 @@ fn recorded_settings_binding(ctx: &egui::Context) -> Option<Option<String>> {
     ctx.input(|i| i.events.iter().find_map(hotkey::recorded_binding))
 }
 
+/// Left sidebar column of a settings page.
+pub(super) fn nav_panel(ctx: &egui::Context, id: &str, add: impl FnOnce(&mut egui::Ui)) {
+    egui::SidePanel::left(egui::Id::new(id))
+        .exact_width(240.0)
+        .resizable(false)
+        .frame(egui::Frame::default().fill(theme::SIDEBAR).inner_margin(egui::Margin { left: 12, right: 10, top: 16, bottom: 10 }))
+        .show(ctx, add);
+}
+
+/// Right column with the round close button. True when it was clicked.
+pub(super) fn close_panel(ctx: &egui::Context, id: &str) -> bool {
+    let mut clicked = false;
+    egui::SidePanel::right(egui::Id::new(id))
+        .exact_width(72.0)
+        .resizable(false)
+        .show_separator_line(false)
+        .frame(egui::Frame::default().fill(theme::BG).inner_margin(egui::Margin { left: 0, right: 16, top: 24, bottom: 0 }))
+        .show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                let close = ui
+                    .add(
+                        egui::Button::new(egui::RichText::new(icons::regular::X).size(18.0).color(theme::MUTED))
+                            .fill(egui::Color32::TRANSPARENT)
+                            .stroke(egui::Stroke::new(1.5_f32, theme::MUTED))
+                            .corner_radius(18.0)
+                            .min_size(egui::vec2(36.0, 36.0)),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Close (Esc)");
+                ui.label(egui::RichText::new("ESC").size(11.5).strong().color(theme::MUTED));
+                clicked = close.clicked();
+            });
+        });
+    clicked
+}
+
+/// The one `CentralPanel` of a settings page: a scrolling, width-limited column.
+pub(super) fn content_panel<S>(ctx: &egui::Context, id: &str, nav: &mut Nav<S>, add: impl FnOnce(&mut egui::Ui, &mut Nav<S>)) {
+    egui::CentralPanel::default()
+        .frame(egui::Frame::default().fill(theme::BG).inner_margin(egui::Margin { left: 40, right: 8, top: 0, bottom: 0 }))
+        .show(ctx, |ui| {
+            let mut area = egui::ScrollArea::vertical().id_salt(id.to_owned()).auto_shrink([false, false]);
+            if std::mem::take(&mut nav.reset_scroll) {
+                area = area.vertical_scroll_offset(0.0);
+            }
+            area.show(ui, |ui| {
+                ui.set_max_width((ui.available_width() - 16.0).clamp(0.0, CONTENT_MAX_WIDTH));
+                add(ui, nav);
+            });
+        });
+}
+
+/// Search box, then the grouped pages with the sections of the current one.
+/// Returns what was clicked: a page, and maybe one of its sections.
+pub(super) fn nav_sidebar<P: Copy + PartialEq + 'static, S: Copy + PartialEq + 'static>(
+    ui: &mut egui::Ui,
+    groups: &'static [Group<P, S>],
+    nav: &mut Nav<S>,
+    current: P,
+    footer: &str,
+) -> Option<(P, Option<S>)> {
+    let search = search_field(ui, &mut nav.search);
+    ui.add_space(dense(10.0, 6.0));
+    let results = search_in(groups, &nav.search);
+    let mut clicked = None;
+    if search.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        if let Some(hit) = results.first().and_then(|g| g.pages.first()) {
+            clicked = Some((hit.page.page, hit.sections.first().map(|s| s.id)));
+        }
+    }
+    let searching = !nav.search.trim().is_empty();
+    let footer_h = 22.0;
+    egui::ScrollArea::vertical()
+        .id_salt("settings_nav_scroll")
+        .auto_shrink([false, true])
+        .max_height((ui.available_height() - footer_h).max(0.0))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            if results.is_empty() {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(format!("No settings match \"{}\"", nav.search.trim())).color(theme::MUTED));
+            }
+            for (gi, hit) in results.iter().enumerate() {
+                if gi > 0 {
+                    ui.add_space(dense(10.0, 6.0));
+                }
+                ui.add_space(4.0);
+                nav_caption(ui, hit.group.title);
+                ui.add_space(2.0);
+                for ph in &hit.pages {
+                    let is_current = current == ph.page.page;
+                    if nav_page_row(ui, ph.page.icon, ph.page.title, is_current).clicked() {
+                        clicked = Some((ph.page.page, None));
+                    }
+                    // A page with a single section has nothing to jump to.
+                    if (is_current || searching) && ph.page.sections.len() > 1 {
+                        let active = if is_current { nav.active } else { None };
+                        if let Some(id) = nav_section_list(ui, &ph.sections, active) {
+                            clicked = Some((ph.page.page, Some(id)));
+                        }
+                    }
+                }
+            }
+        });
+    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+        ui.label(egui::RichText::new(footer).size(11.0).color(theme::DISABLED));
+    });
+    clicked
+}
+
+/// Search box with magnifier and clear button; Escape clears it.
+/// Its id is [`SEARCH_ID`]; focusing it cancels shortcut recording.
+fn search_field(ui: &mut egui::Ui, search: &mut String) -> egui::Response {
+    egui::Frame::default()
+        .fill(theme::DARK)
+        .corner_radius(6.0)
+        .inner_margin(egui::Margin::symmetric(8, dense(5.0, 3.0) as i8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(egui::RichText::new(icons::regular::MAGNIFYING_GLASS).color(theme::MUTED));
+                ui.spacing_mut().button_padding = egui::vec2(2.0, 0.0);
+                let clear_w = if search.is_empty() { 0.0 } else { 26.0 };
+                let edit = ui.add(
+                    egui::TextEdit::singleline(search)
+                        .id(egui::Id::new(SEARCH_ID))
+                        .hint_text("Search")
+                        .frame(false)
+                        .margin(egui::Margin::symmetric(0, 2))
+                        .desired_width((ui.available_width() - clear_w).max(0.0)),
+                );
+                if !search.is_empty() {
+                    let clear = ui
+                        .add(egui::Button::new(egui::RichText::new(icons::regular::X).color(theme::MUTED)).frame(false))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("Clear (Esc)");
+                    if clear.clicked() {
+                        search.clear();
+                        edit.request_focus();
+                    }
+                }
+                edit
+            })
+            .inner
+        })
+        .inner
+}
+
+/// Page title, then every section under its own heading. `section` draws one.
+pub(super) fn page_body<P: 'static, S: Copy + PartialEq + 'static>(
+    ui: &mut egui::Ui,
+    page: &Page<P, S>,
+    nav: &mut Nav<S>,
+    mut section: impl FnMut(&mut egui::Ui, S),
+) {
+    let view = ui.clip_rect();
+    let left = ui.max_rect().left();
+    let page_top = ui.cursor().top();
+    ui.spacing_mut().item_spacing.y = dense(8.0, 4.0);
+    ui.spacing_mut().interact_size.x = 64.0; // equal width for slider values
+    ui.spacing_mut().combo_width = 250.0;
+    ui.spacing_mut().slider_width = 180.0;
+    ui.visuals_mut().extreme_bg_color = theme::DARK; // text fields stand out on BG
+    ui.add_space(dense(28.0, 20.0));
+    ui.label(egui::RichText::new(page.title).size(26.0).strong().color(theme::HEADER));
+
+    let anim = egui::style::ScrollAnimation::new(2400.0, egui::Rangef::new(0.2, 0.45));
+    let mut active = page.sections.first().map(|s| s.id);
+    let mut last_anchor = page_top;
+    for (i, sec) in page.sections.iter().enumerate() {
+        if i > 0 {
+            ui.add_space(dense(24.0, 16.0));
+            divider(ui);
+        }
+        ui.add_space(dense(20.0, 12.0));
+        // Scroll anchor sits a little above the heading; the first section scrolls to the page top.
+        let anchor = if i == 0 { page_top } else { ui.cursor().top() - 16.0 };
+        if nav.scroll_to == Some(sec.id) {
+            nav.scroll_to = None;
+            ui.scroll_to_rect_animation(egui::Rect::from_min_size(egui::pos2(left, anchor), egui::vec2(1.0, 1.0)), Some(egui::Align::TOP), anim);
+        }
+        if anchor <= view.top() + IN_VIEW_SLACK {
+            active = Some(sec.id);
+        }
+        last_anchor = anchor;
+        // The page title already says it when there is only one section.
+        if page.sections.len() > 1 {
+            ui.label(egui::RichText::new(sec.title).size(20.0).strong().color(theme::HEADER));
+            ui.add_space(dense(6.0, 2.0));
+        }
+        section(ui, sec.id);
+    }
+    // Room below the last section so every section can scroll up to the top.
+    let used = ui.cursor().top() - last_anchor;
+    ui.add_space((view.height() - used).max(dense(40.0, 28.0)));
+    nav.active = active;
+}
+
 impl RustTalkApp {
     pub(super) fn open_settings(&mut self, page: SettingsPage) {
         self.input_devices = capture::input_device_names();
         self.output_devices = playback::output_device_names();
         self.cameras = None; // refresh lazily on the video page
         self.settings_page = page;
-        self.settings_nav = SettingsNav { reset_scroll: true, ..Default::default() };
+        self.settings_nav = Nav::fresh();
+        self.server_settings_dialog = None; // one settings page at a time
         self.show_settings = true;
+    }
+
+    pub(super) fn close_settings(&mut self) {
+        self.show_settings = false;
+        self.recording_key = None;
+        self.config.save();
     }
 
     /// Open `page`; with a section, smooth-scroll to it.
     fn goto_settings(&mut self, page: SettingsPage, section: Option<SectionId>) {
-        if page != self.settings_page {
+        let changed = page != self.settings_page;
+        if changed {
             self.settings_page = page;
             self.recording_key = None;
-            self.settings_nav.reset_scroll = true;
         }
-        self.settings_nav.scroll_to = section.or(table::page(page).sections.first().map(|s| s.id));
+        self.settings_nav.goto(changed, table::page(page).sections.first().map(|s| s.id), section);
     }
 
-    /// Settings as a separate OS window (own viewport).
+    /// Settings as the page of the main window, with the voice/network
+    /// state running underneath. Draws the window's `CentralPanel`.
     pub(super) fn ui_settings(&mut self, ctx: &egui::Context) {
-        if !self.show_settings {
-            return;
-        }
-        ctx.show_viewport_immediate(
-            egui::ViewportId::from_hash_of("settings_viewport"),
-            egui::ViewportBuilder::default()
-                .with_title("RustTalk - Settings")
-                .with_inner_size([1040.0, 720.0])
-                .with_min_inner_size([800.0, 540.0]),
-            |ctx, _class| {
-                if ctx.input(|i| i.viewport().close_requested()) {
-                    self.show_settings = false;
+        let mut nav = std::mem::take(&mut self.settings_nav);
+        let blocked = self.recording_key.is_some() || self.update.dialog.is_some();
+        let mut close = nav.escape(ctx, blocked);
+        nav_panel(ctx, "settings_nav", |ui| {
+            let footer = format!("RustTalk v{}  -  protocol v{}", env!("CARGO_PKG_VERSION"), rusttalk_shared::protocol::PROTOCOL_VERSION);
+            if let Some((page, section)) = nav_sidebar(ui, table::GROUPS, &mut nav, self.settings_page, &footer) {
+                let changed = page != self.settings_page;
+                if changed {
+                    self.settings_page = page;
                     self.recording_key = None;
-                    self.config.save();
                 }
-                let escape_blocked = self.recording_key.is_some()
-                    || self.update.dialog.as_ref().is_some_and(|d| d.in_settings);
-                if settings_escape(ctx, &mut self.settings_nav.search, escape_blocked) {
-                    self.show_settings = false;
-                    self.config.save();
-                }
-                egui::SidePanel::left("settings_nav")
-                    .exact_width(240.0)
-                    .resizable(false)
-                    .frame(egui::Frame::default().fill(theme::SIDEBAR).inner_margin(egui::Margin { left: 12, right: 10, top: 16, bottom: 10 }))
-                    .show(ctx, |ui| self.settings_nav(ui));
-                self.capture_keybind(ctx);
-                egui::SidePanel::right("settings_close")
-                    .exact_width(72.0)
-                    .resizable(false)
-                    .show_separator_line(false)
-                    .frame(egui::Frame::default().fill(theme::BG).inner_margin(egui::Margin { left: 0, right: 16, top: 24, bottom: 0 }))
-                    .show(ctx, |ui| self.settings_close_button(ui));
-                egui::CentralPanel::default()
-                    .frame(egui::Frame::default().fill(theme::BG).inner_margin(egui::Margin { left: 40, right: 8, top: 0, bottom: 0 }))
-                    .show(ctx, |ui| {
-                        let mut area = egui::ScrollArea::vertical().id_salt("settings_page").auto_shrink([false, false]);
-                        if std::mem::take(&mut self.settings_nav.reset_scroll) {
-                            area = area.vertical_scroll_offset(0.0);
-                        }
-                        area.show(ui, |ui| {
-                            ui.set_max_width((ui.available_width() - 16.0).clamp(0.0, CONTENT_MAX_WIDTH));
-                            self.settings_page_body(ui);
-                        });
-                    });
-                self.ui_update_dialog(ctx, true);
-            },
-        );
-    }
-
-    fn settings_close_button(&mut self, ui: &mut egui::Ui) {
-        ui.vertical_centered(|ui| {
-            let close = ui
-                .add(
-                    egui::Button::new(egui::RichText::new(icons::regular::X).size(18.0).color(theme::MUTED))
-                        .fill(egui::Color32::TRANSPARENT)
-                        .stroke(egui::Stroke::new(1.5_f32, theme::MUTED))
-                        .corner_radius(18.0)
-                        .min_size(egui::vec2(36.0, 36.0)),
-                )
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text("Close (Esc)");
-            ui.label(egui::RichText::new("ESC").size(11.5).strong().color(theme::MUTED));
-            if close.clicked() {
-                self.show_settings = false;
-                self.config.save();
+                nav.goto(changed, table::page(page).sections.first().map(|s| s.id), section);
             }
         });
-    }
-
-    // ----- sidebar ---------------------------------------------------------
-
-    fn settings_nav(&mut self, ui: &mut egui::Ui) {
-        let search = self.settings_search_field(ui);
-        ui.add_space(dense(10.0, 6.0));
-        let results = table::search(&self.settings_nav.search);
-        if search.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            if let Some(hit) = results.first().and_then(|g| g.pages.first()) {
-                self.goto_settings(hit.page.page, hit.sections.first().map(|s| s.id));
-            }
-        }
-        let searching = !self.settings_nav.search.trim().is_empty();
-        let footer = 22.0;
-        egui::ScrollArea::vertical()
-            .id_salt("settings_nav_scroll")
-            .auto_shrink([false, true])
-            .max_height((ui.available_height() - footer).max(0.0))
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                if results.is_empty() {
-                    ui.add_space(8.0);
-                    ui.label(egui::RichText::new(format!("No settings match \"{}\"", self.settings_nav.search.trim())).color(theme::MUTED));
-                }
-                let mut clicked = None;
-                for (gi, hit) in results.iter().enumerate() {
-                    if gi > 0 {
-                        ui.add_space(dense(10.0, 6.0));
-                    }
-                    ui.add_space(4.0);
-                    nav_caption(ui, hit.group.title);
-                    ui.add_space(2.0);
-                    for ph in &hit.pages {
-                        let current = self.settings_page == ph.page.page;
-                        if nav_page_row(ui, ph.page.icon, ph.page.title, current).clicked() {
-                            clicked = Some((ph.page.page, None));
-                        }
-                        if current || searching {
-                            let active = if current { self.settings_nav.active } else { None };
-                            if let Some(id) = nav_section_list(ui, &ph.sections, active) {
-                                clicked = Some((ph.page.page, Some(id)));
-                            }
-                        }
-                    }
-                }
-                if let Some((page, section)) = clicked {
-                    self.goto_settings(page, section);
-                }
-            });
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            ui.label(
-                egui::RichText::new(format!("RustTalk v{}  -  protocol v{}", env!("CARGO_PKG_VERSION"), rusttalk_shared::protocol::PROTOCOL_VERSION))
-                    .size(11.0)
-                    .color(theme::DISABLED),
-            );
+        self.capture_keybind(ctx);
+        close |= close_panel(ctx, "settings_close");
+        content_panel(ctx, "settings_page", &mut nav, |ui, nav| {
+            page_body(ui, table::page(self.settings_page), nav, |ui, id| self.settings_section(ui, id));
         });
-    }
-
-    /// Search box with magnifier and clear button; Escape clears it.
-    /// Its id is [`SEARCH_ID`]; focusing it cancels shortcut recording.
-    fn settings_search_field(&mut self, ui: &mut egui::Ui) -> egui::Response {
-        let nav = &mut self.settings_nav;
-        egui::Frame::default()
-            .fill(theme::DARK)
-            .corner_radius(6.0)
-            .inner_margin(egui::Margin::symmetric(8, dense(5.0, 3.0) as i8))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    ui.label(egui::RichText::new(icons::regular::MAGNIFYING_GLASS).color(theme::MUTED));
-                    ui.spacing_mut().button_padding = egui::vec2(2.0, 0.0);
-                    let clear_w = if nav.search.is_empty() { 0.0 } else { 26.0 };
-                    let edit = ui.add(
-                        egui::TextEdit::singleline(&mut nav.search)
-                            .id(egui::Id::new(SEARCH_ID))
-                            .hint_text("Search")
-                            .frame(false)
-                            .margin(egui::Margin::symmetric(0, 2))
-                            .desired_width((ui.available_width() - clear_w).max(0.0)),
-                    );
-                    if !nav.search.is_empty() {
-                        let clear = ui
-                            .add(egui::Button::new(egui::RichText::new(icons::regular::X).color(theme::MUTED)).frame(false))
-                            .on_hover_cursor(egui::CursorIcon::PointingHand)
-                            .on_hover_text("Clear (Esc)");
-                        if clear.clicked() {
-                            nav.search.clear();
-                            edit.request_focus();
-                        }
-                    }
-                    edit
-                })
-                .inner
-            })
-            .inner
-    }
-
-    // ----- page ------------------------------------------------------------
-
-    fn settings_page_body(&mut self, ui: &mut egui::Ui) {
-        let page = table::page(self.settings_page);
-        let view = ui.clip_rect();
-        let left = ui.max_rect().left();
-        let page_top = ui.cursor().top();
-        ui.spacing_mut().item_spacing.y = dense(8.0, 4.0);
-        ui.spacing_mut().interact_size.x = 64.0; // equal width for slider values
-        ui.spacing_mut().combo_width = 250.0;
-        ui.spacing_mut().slider_width = 180.0;
-        ui.visuals_mut().extreme_bg_color = theme::DARK; // text fields stand out on BG
-        ui.add_space(dense(28.0, 20.0));
-        ui.label(egui::RichText::new(page.title).size(26.0).strong().color(theme::HEADER));
-
-        let anim = egui::style::ScrollAnimation::new(2400.0, egui::Rangef::new(0.2, 0.45));
-        let mut active = page.sections.first().map(|s| s.id);
-        let mut last_anchor = page_top;
-        for (i, section) in page.sections.iter().enumerate() {
-            if i > 0 {
-                ui.add_space(dense(24.0, 16.0));
-                divider(ui);
-            }
-            ui.add_space(dense(20.0, 12.0));
-            // Scroll anchor sits a little above the heading; the first section scrolls to the page top.
-            let anchor = if i == 0 { page_top } else { ui.cursor().top() - 16.0 };
-            if self.settings_nav.scroll_to == Some(section.id) {
-                self.settings_nav.scroll_to = None;
-                ui.scroll_to_rect_animation(egui::Rect::from_min_size(egui::pos2(left, anchor), egui::vec2(1.0, 1.0)), Some(egui::Align::TOP), anim);
-            }
-            if anchor <= view.top() + IN_VIEW_SLACK {
-                active = Some(section.id);
-            }
-            last_anchor = anchor;
-            ui.label(egui::RichText::new(section.title).size(20.0).strong().color(theme::HEADER));
-            ui.add_space(dense(6.0, 2.0));
-            self.settings_section(ui, section.id);
+        self.settings_nav = nav;
+        if close {
+            self.close_settings();
         }
-        // Room below the last section so every section can scroll up to the top.
-        let used = ui.cursor().top() - last_anchor;
-        ui.add_space((view.height() - used).max(dense(40.0, 28.0)));
-        self.settings_nav.active = active;
     }
 
     // ----- keybind capture -------------------------------------------------
@@ -372,7 +423,7 @@ fn nav_page_row(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool) -> e
 
 /// Indented section list under a page, with a thin guide line and an accent
 /// marker on `active`. Returns the clicked section.
-fn nav_section_list(ui: &mut egui::Ui, sections: &[&table::Section], active: Option<SectionId>) -> Option<SectionId> {
+fn nav_section_list<S: Copy + PartialEq + 'static>(ui: &mut egui::Ui, sections: &[&table::Section<S>], active: Option<S>) -> Option<S> {
     let row_h = dense(26.0, 22.0);
     let line_x = ui.cursor().left() + 18.0;
     let top = ui.cursor().top();

@@ -33,6 +33,8 @@ mod mention;
 mod moderation_ui;
 mod poke;
 mod server_settings;
+#[cfg(test)]
+mod layout_tests;
 mod server_switcher;
 mod servers;
 mod session;
@@ -1399,32 +1401,7 @@ impl eframe::App for RustTalkApp {
             self.control.ptt_pressed.store(false, Ordering::Relaxed);
             while self.hotkey_events.try_recv().is_ok() {}
         }
-        if self.is_connected() {
-            self.ui_connected(ctx);
-        } else {
-            self.ui_connect(ctx);
-        }
-        if self.show_settings {
-            self.ui_settings(ctx);
-        }
-        self.ui_new_channel(ctx);
-        self.ui_channel_settings(ctx);
-        self.ui_server_settings(ctx);
-        self.ui_poke_dialog(ctx);
-        self.ui_poke_popup(ctx);
-        self.ui_connection_panel(ctx);
-        self.ui_confirm_delete(ctx);
-        self.ui_confirm_delete_message(ctx);
-        self.ui_mod_dialog(ctx);
-        self.ui_gif_picker(ctx);
-        self.ui_emoji_picker(ctx);
-        self.ui_camera_dialog(ctx);
-        self.ui_audio_picker(ctx);
-        self.ui_screen_picker(ctx);
-        self.ui_update_dialog(ctx, false);
-        self.ui_remember_prompt(ctx);
-        self.sample_bandwidth(Instant::now());
-        self.ui_links(ctx);
+        self.ui_frame(ctx);
 
         self.sync_mic_preview();
         if self.audio.is_none() {
@@ -1441,6 +1418,54 @@ impl eframe::App for RustTalkApp {
 }
 
 impl RustTalkApp {
+    /// One frame of UI: the page for the current state, then the dialogs.
+    fn ui_frame(&mut self, ctx: &egui::Context) {
+        // Exactly one page owns the window's CentralPanel: a settings page
+        // (client or server) replaces the main content, everything else
+        // (network, audio, dialogs) keeps running around it.
+        let server_page = match &self.server_settings_dialog {
+            Some(dlg) => dlg.is_for(self.srv.id) && self.is_connected(),
+            None => false,
+        };
+        if !server_page {
+            self.server_settings_dialog = None;
+        }
+        if self.show_settings {
+            self.ui_settings(ctx);
+            self.settings_toast(ctx);
+        } else if server_page {
+            self.ui_server_settings(ctx);
+            self.settings_toast(ctx);
+        } else if self.is_connected() {
+            self.ui_connected(ctx);
+        } else {
+            self.ui_connect(ctx);
+        }
+        self.ui_new_channel(ctx);
+        self.ui_channel_settings(ctx);
+        self.ui_poke_dialog(ctx);
+        self.ui_poke_popup(ctx);
+        self.ui_connection_panel(ctx);
+        self.ui_confirm_delete(ctx);
+        self.ui_confirm_delete_message(ctx);
+        self.ui_mod_dialog(ctx);
+        self.ui_gif_picker(ctx);
+        self.ui_emoji_picker(ctx);
+        self.ui_camera_dialog(ctx);
+        self.ui_audio_picker(ctx);
+        self.ui_screen_picker(ctx);
+        self.ui_update_dialog(ctx);
+        self.ui_remember_prompt(ctx);
+        self.sample_bandwidth(Instant::now());
+        self.ui_links(ctx);
+    }
+
+    fn settings_toast(&self, ctx: &egui::Context) {
+        if self.update.dialog.is_none() {
+            theme::toast(ctx, &self.status, self.status_at.elapsed().as_secs_f32(), self.status_is_error);
+        }
+    }
+
     /// Main view while connected: sidebar + content (or fullscreen stream).
     /// Every frame, whichever server is viewed: media follows the voice server.
     fn media_upkeep(&mut self) {
@@ -1486,7 +1511,6 @@ impl RustTalkApp {
         self.ui_main(ctx, &cmd_tx);
         // Toast only without an open dialog (it would cover dialog buttons).
         let dialog_open = self.channel_settings.is_some()
-            || self.server_settings_dialog.is_some()
             || self.poke_dialog.is_some()
             || !self.poke_inbox.is_empty()
             || self.show_new_channel

@@ -529,14 +529,11 @@ impl RustTalkApp {
         let mut open = true;
         let mut confirm = ctx.input(|i| i.key_pressed(egui::Key::Enter));
         let mut cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-        egui::Window::new("Delete Message")
-            .id(egui::Id::new("confirm_delete_message"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
+        theme::dialog_window("confirm_delete_message")
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .fixed_size([420.0, 0.0])
             .show(ctx, |ui| {
+                theme::dialog_header(ui, "Delete Message", &mut open);
                 ui.label(egui::RichText::new("Are you sure you want to delete this message? This cannot be undone.").color(theme::TEXT));
                 ui.add_space(6.0);
                 egui::Frame::default()

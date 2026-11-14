@@ -7,7 +7,10 @@ use super::theme;
 use super::*;
 use crate::audio::link::{Summary, HISTORY};
 
-const GRAPH_SIZE: egui::Vec2 = egui::vec2(340.0, 130.0);
+/// Preferred width of the popup; shrinks to fit a small window.
+const PANEL_WIDTH: f32 = 420.0;
+const PING_GRAPH_HEIGHT: f32 = 110.0;
+const BANDWIDTH_GRAPH_HEIGHT: f32 = 84.0;
 /// Above this, delay in a conversation is noticeable.
 const HIGH_PING_MS: f32 = 250.0;
 /// Above this, voices start to sound robotic.
@@ -56,42 +59,46 @@ impl RustTalkApp {
         }
         let (points, summary) = self.control.link.view(Instant::now());
         let mut open = true;
-        egui::Window::new(format!("{}  Voice Connection", icons::regular::CELL_SIGNAL_FULL))
-            .id(egui::Id::new("connection_panel"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .vscroll(true)
+        let size = theme::dialog_size(ctx, egui::vec2(PANEL_WIDTH, f32::MAX));
+        // Window chrome (margins + header) that the scroll area must leave free.
+        let body_max = (size.y - 64.0).max(120.0);
+        theme::dialog_window("connection_panel")
             .pivot(egui::Align2::LEFT_BOTTOM)
             .default_pos(at)
-            .fixed_size([GRAPH_SIZE.x, 0.0])
+            // Not `fixed_size([w, 0.0])`: that pins the height to 0 and left only a sliver.
+            .min_width(size.x)
+            .max_width(size.x)
             .show(ctx, |ui| {
-                ui.spacing_mut().item_spacing.y = 6.0;
-                ui.label(egui::RichText::new(&name).strong().color(theme::HEADER));
-                ui.label(egui::RichText::new(&address).size(12.0).color(theme::MUTED));
-                ping_graph(ui, &points);
-                if let Some(secs) = summary.stale_secs {
+                theme::dialog_header(ui, &format!("{}  Voice Connection", icons::regular::CELL_SIGNAL_FULL), &mut open);
+                // Height is left to the content (up to the window), only the body scrolls.
+                egui::ScrollArea::vertical().max_height(body_max).auto_shrink([false, true]).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    ui.label(egui::RichText::new(&name).strong().color(theme::HEADER));
+                    ui.label(egui::RichText::new(&address).size(12.0).color(theme::MUTED));
+                    ping_graph(ui, &points);
+                    if let Some(secs) = summary.stale_secs {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}  No answer from the server for {secs:.0} s - voice traffic may be blocked",
+                                icons::regular::WARNING
+                            ))
+                            .color(theme::YELLOW),
+                        );
+                    }
+                    stats_grid(ui, &summary);
                     ui.label(
                         egui::RichText::new(format!(
-                            "{}  No answer from the server for {secs:.0} s - voice traffic may be blocked",
-                            icons::regular::WARNING
+                            "A ping of {HIGH_PING_MS:.0} ms or more makes the delay noticeable. Packet loss above \
+                             {HIGH_LOSS_PCT:.0} % makes voices sound robotic. If this persists, try reconnecting."
                         ))
-                        .color(theme::YELLOW),
+                        .size(11.5)
+                        .color(theme::MUTED),
                     );
-                }
-                stats_grid(ui, &summary);
-                ui.label(
-                    egui::RichText::new(format!(
-                        "A ping of {HIGH_PING_MS:.0} ms or more makes the delay noticeable. Packet loss above \
-                         {HIGH_LOSS_PCT:.0} % makes voices sound robotic. If this persists, try reconnecting."
-                    ))
-                    .size(11.5)
-                    .color(theme::MUTED),
-                );
-                if let Some(call) = &self.bandwidth {
-                    bandwidth_ui(ui, call);
-                }
-                encryption_badge(ui);
+                    if let Some(call) = &self.bandwidth {
+                        bandwidth_ui(ui, call);
+                    }
+                    encryption_badge(ui);
+                });
             });
         if !open {
             self.connection_panel = None;
@@ -133,13 +140,15 @@ fn stats_grid(ui: &mut egui::Ui, s: &Summary) {
         ),
     ];
     egui::Grid::new("connection_stats")
-        .num_columns(2)
-        .spacing([24.0, 4.0])
+        .num_columns(4)
+        .spacing([16.0, 4.0])
         .show(ui, |ui| {
-            for (label, value, color) in rows {
+            for (i, (label, value, color)) in rows.into_iter().enumerate() {
                 ui.label(egui::RichText::new(label).color(theme::MUTED));
                 ui.label(egui::RichText::new(value).strong().color(color));
-                ui.end_row();
+                if i % 2 == 1 {
+                    ui.end_row();
+                }
             }
         });
 }
@@ -175,7 +184,7 @@ fn y_max(points: &[(f32, f32)]) -> f32 {
 
 /// Ping over [`HISTORY`]: x = seconds ago (right = now), y = ms.
 fn ping_graph(ui: &mut egui::Ui, points: &[(f32, f32)]) {
-    let (rect, _) = ui.allocate_exact_size(GRAPH_SIZE, egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), PING_GRAPH_HEIGHT), egui::Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 4.0, theme::DARK);
     let font = egui::FontId::proportional(10.0);
@@ -298,7 +307,7 @@ fn bandwidth_graph(
     direction: usize,
     now: Instant,
 ) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(GRAPH_SIZE.x, 90.), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), BANDWIDTH_GRAPH_HEIGHT), egui::Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 4., theme::DARK);
     let plot = egui::Rect::from_min_max(

@@ -164,14 +164,11 @@ impl RustTalkApp {
         let mut open = true;
         let mut done = false;
         let title = if d.ban { format!("Ban {}", d.name) } else { format!("Kick {}", d.name) };
-        egui::Window::new(title)
-            .id(egui::Id::new("mod_dialog"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
+        theme::dialog_window("mod_dialog")
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .fixed_size([400.0, 0.0])
             .show(ctx, |ui| {
+                theme::dialog_header(ui, &title, &mut open);
                 let text = if d.ban {
                     format!("{} is disconnected and cannot come back (same RustTalk or same IP) until the ban ends.", d.name)
                 } else {

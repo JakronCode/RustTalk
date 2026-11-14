@@ -41,8 +41,6 @@ pub(super) struct UpdateState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct UpdateDialog {
     pub(super) version: String,
-    /// Shown in the settings window instead of the main window.
-    pub(super) in_settings: bool,
 }
 
 /// What the top bar notice shows.
@@ -85,13 +83,12 @@ impl UpdateState {
     }
 
     /// Opens the confirmation for the available release. False if there is none.
-    pub(super) fn open_dialog(&mut self, in_settings: bool) -> bool {
+    pub(super) fn open_dialog(&mut self) -> bool {
         let Some(r) = &self.available else {
             return false;
         };
         self.dialog = Some(UpdateDialog {
             version: r.version.clone(),
-            in_settings,
         });
         true
     }
@@ -357,7 +354,7 @@ impl RustTalkApp {
                     ui.add(egui::ProgressBar::new(p as f32 / 100.0).desired_width(220.0).text(format!("Downloading... {p} %")));
                 } else if installed {
                     if theme::primary_button(ui, &format!("{}  Install update & restart", icons::regular::DOWNLOAD_SIMPLE)).clicked() {
-                        self.update.open_dialog(true);
+                        self.update.open_dialog();
                     }
                 } else {
                     ui.label(egui::RichText::new("Updates install automatically only in the installed version.").color(theme::MUTED));

@@ -572,13 +572,11 @@ impl RustTalkApp {
         let mut open = true;
         let mut action: Option<bool> = None; // Some(true) = teilen, Some(false) = abbrechen
         let mut switch_to: Option<u32> = None;
-        egui::Window::new(format!("{}  Camera", icons::regular::VIDEO_CAMERA))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
+        theme::dialog_window("camera_dialog")
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .fixed_size([480.0, 360.0])
             .show(ctx, |ui| {
+                theme::dialog_header(ui, &format!("{}  Camera", icons::regular::VIDEO_CAMERA), &mut open);
                 let Some(dialog) = self.cam_dialog.as_mut() else { return };
                 if !dialog.devices.is_empty() {
                     let current = dialog

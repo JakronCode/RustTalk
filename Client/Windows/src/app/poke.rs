@@ -69,14 +69,11 @@ impl RustTalkApp {
         let Some(mut dlg) = self.poke_dialog.take() else { return };
         let mut open = true;
         let mut done = false;
-        egui::Window::new(format!("{}  Poke {}", icons::regular::HAND_WAVING, dlg.name))
-            .id(egui::Id::new("poke_dialog"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
+        theme::dialog_window("poke_dialog")
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .fixed_size([380.0, 0.0])
             .show(ctx, |ui| {
+                theme::dialog_header(ui, &format!("{}  Poke {}", icons::regular::HAND_WAVING, dlg.name), &mut open);
                 ui.label(
                     egui::RichText::new(format!("{} hears a wake-up sound and gets a popup with your message.", dlg.name))
                         .color(theme::MUTED),
@@ -119,13 +116,13 @@ impl RustTalkApp {
         let waiting = self.poke_inbox.len() - 1;
         let mut close = false;
         let mut reply = false;
-        egui::Window::new(format!("{}  {from} poked you", icons::regular::HAND_WAVING))
-            .id(egui::Id::new("poke_popup"))
-            .collapsible(false)
-            .resizable(false)
+        theme::dialog_window("poke_popup")
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, -40.0))
             .fixed_size([380.0, 0.0])
             .show(ctx, |ui| {
+                let mut keep = true;
+                theme::dialog_header(ui, &format!("{}  {from} poked you", icons::regular::HAND_WAVING), &mut keep);
+                close |= !keep;
                 ui.horizontal(|ui| {
                     theme::draw_avatar(ui, &from, 40.0, false);
                     ui.vertical(|ui| {

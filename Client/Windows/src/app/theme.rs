@@ -286,6 +286,35 @@ pub fn menu_separator(ui: &mut egui::Ui) {
     );
 }
 
+/// Window without egui's own title bar (it is at least 54 px tall with the
+/// default window margin). Draw [`dialog_header`] as the first row instead.
+pub fn dialog_window(id: &'static str) -> egui::Window<'static> {
+    egui::Window::new(id).id(egui::Id::new(id)).title_bar(false).collapsible(false).resizable(false)
+}
+
+/// Compact title row with a close button, and a separator below it.
+pub fn dialog_header(ui: &mut egui::Ui, title: &str, open: &mut bool) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(title).size(15.0).strong().color(HEADER));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let close = ui
+                .add(egui::Button::new(egui::RichText::new(icons::regular::X).color(MUTED)).frame(false))
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("Close");
+            if close.clicked() {
+                *open = false;
+            }
+        });
+    });
+    ui.separator();
+}
+
+/// Size for a dialog that wants `want` but must stay inside the window.
+pub fn dialog_size(ctx: &egui::Context, want: egui::Vec2) -> egui::Vec2 {
+    let screen = ctx.screen_rect().size();
+    egui::vec2(want.x.min(screen.x - 32.0).max(240.0), want.y.min(screen.y - 32.0).max(160.0))
+}
+
 /// Text-only button (Cancel, Close, ...) with a subtle background on hover.
 pub fn ghost_button(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response {
     ghost_button_sized(ui, text, egui::Vec2::ZERO)
