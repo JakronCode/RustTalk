@@ -1281,6 +1281,7 @@ impl State {
     /// Computer audio sharing status. Err when sharing outside a voice channel.
     /// Ok(true) = the status changed (tell everyone).
     pub fn set_audio_sharing(&mut self, client_id: u64, sharing: bool) -> Result<bool, String> {
+        if !sharing { self.set_audio_streams(client_id, Vec::new())?; }
         let client = self.clients.get_mut(&client_id).ok_or("Client does not exist")?;
         let in_voice = self
             .channels
@@ -1316,10 +1317,15 @@ impl State {
             return Err("Invalid audio streams".into());
         }
         let c = self.clients.get_mut(&id).ok_or("Unknown client")?;
-        if !self
-            .channels
-            .get(&c.channel_id)
-            .is_some_and(|ch| ch.kind.has_voice())
+        if c.audio_streams == streams {
+            return Ok(());
+        }
+        let reducing = streams.iter().all(|s| c.audio_streams.contains(s));
+        if !reducing
+            && !self
+                .channels
+                .get(&c.channel_id)
+                .is_some_and(|ch| ch.kind.has_voice())
         {
             return Err("Join a voice channel first".into());
         }
@@ -1332,7 +1338,6 @@ impl State {
         let now = Instant::now();
         c.audio_changes
             .retain(|t| now.duration_since(*t) < AUDIO_CHANGE_WINDOW);
-        let reducing = streams.iter().all(|s| c.audio_streams.contains(s));
         if !reducing && c.audio_changes.len() >= MAX_AUDIO_CHANGES {
             return Err("Audio sharing changed too often".into());
         }
@@ -1543,6 +1548,28 @@ fn validate_name(name: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_start_can_clear_registrations_and_repeated_sets_do_not_broadcast() {
+        use rusttalk_shared::protocol::AudioStreamInfo;
+        let mut state = test_state();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (id, token) = state.add_client("sender".into(), tx);
+        state.move_client(id, 3).unwrap();
+        while rx.try_recv().is_ok() {}
+        let streams = vec![AudioStreamInfo { id: 1, label: "Application 1".into() }];
+        state.set_audio_streams(id, streams.clone()).unwrap();
+        assert!(matches!(rx.try_recv(), Ok(ServerMessage::AudioStreamsChanged { .. })));
+        for _ in 0..100 { state.set_audio_streams(id, streams.clone()).unwrap(); }
+        assert!(rx.try_recv().is_err(), "identical registrations do not flood listeners");
+        assert!(!state.set_audio_sharing(id, false).unwrap(), "capture never started");
+        assert!(matches!(rx.try_recv(), Ok(ServerMessage::AudioStreamsChanged { streams, .. }) if streams.is_empty()));
+        assert!(state.clients[&id].audio_streams.is_empty());
+        state.set_audio_sharing(id, true).unwrap();
+        assert!(state.allow_audio_packet(token, 0, true), "mixed audio works after failed Separate");
+        state.move_client(id, 1).unwrap();
+        assert!(state.set_audio_streams(id, vec![]).is_ok(), "late cleanup after leaving voice");
+    }
 
     #[test]
     fn separate_audio_registration_is_bounded_and_ids_cannot_be_reused() {

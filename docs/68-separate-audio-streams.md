@@ -23,7 +23,10 @@ of 600 audio packets/second bounds relay traffic to at most 900 KB/second per
 recipient at the 1500-byte packet limit. Registration changes are rate-limited;
 removals and stopping remain possible when the limit is reached.
 
-New encoders wait for registration acknowledgement. Receivers drop UDP that
+New encoders wait for registration acknowledgement. A refused registration stops
+the matching capture attempt; late rejections cannot stop a newer selection.
+Failed capture and explicit stop clear registrations even before sharing starts.
+Identical registration requests do not rebroadcast metadata. Receivers drop UDP that
 arrives before its metadata, without allocating decoder state. Metadata is
 validated again on receipt. Receiver registrations and decoder counts are
 bounded. Channel joins receive current registrations; leaving, stopping and
@@ -57,3 +60,6 @@ mismatch tests verify old clients are refused.
 
 Before readiness: independent protocol/security review, locked crate tests,
 clippy, and manual Windows/Linux audio checks where hardware is available.
+
+The version-refusal Error wire tag is pinned to its v16 value in a regression
+test. New variants are appended so older peers can read the refusal.

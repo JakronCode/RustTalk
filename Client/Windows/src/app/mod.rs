@@ -1139,6 +1139,11 @@ impl RustTalkApp {
                     self.clear_video_of(client_id, None);
                 }
             }
+            ServerMessage::AudioStreamsRejected { stream_id } => {
+                if voice && matches!(&self.shared_audio_source, crate::audio::share_source::AudioShareSource::Separate(apps) if apps.iter().any(|(_, s)| s.id == stream_id)) {
+                    self.stop_shared_audio();
+                }
+            }
             ServerMessage::AudioStreamsChanged { client_id, streams } => {
                 if voice && rusttalk_shared::protocol::valid_audio_streams(&streams) && s.users.get(&client_id).zip(s.users.get(&s.my_id)).is_some_and(|(u, me)| u.channel_id == me.channel_id) {
                     if client_id == s.my_id {

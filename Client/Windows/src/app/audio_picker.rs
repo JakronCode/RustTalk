@@ -169,10 +169,9 @@ impl RustTalkApp {
         if !self.in_voice() {
             return;
         }
-        let had_separate = matches!(self.shared_audio_source, AudioShareSource::Separate(_));
         self.stop_shared_audio();
         self.sync_audio_flag();
-        if let Some(tx) = self.voice_tx().filter(|_| had_separate || matches!(source, AudioShareSource::Separate(_))) {
+        if let Some(tx) = self.voice_tx() {
             let streams = match &source { AudioShareSource::Separate(apps) => apps.iter().map(|(_, s)| s.clone()).collect(), _ => vec![] };
             if tx.send(Command::SetAudioStreams(streams)).is_err() { return; }
         }
@@ -310,7 +309,8 @@ impl RustTalkApp {
                                     for (i, app) in apps.iter().enumerate() {
                                         let Ok(id) = NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1)) else { picker.error = Some("Audio stream IDs exhausted; restart RustTalk".into()); return; };
                                         let label = if picker.names { picker.applications.iter().find(|a| &a.source == app).map(|a| a.label.clone()).unwrap_or_else(|| format!("Application {}", i + 1)) } else { format!("Application {}", i + 1) };
-                                        let label: String = label.chars().filter(|c| !c.is_control() && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')).scan(0, |len, c| { *len += c.len_utf8(); (*len <= 64).then_some(c) }).collect();
+                                        let label: String = label.chars().filter(|c| rusttalk_shared::protocol::valid_audio_label_char(*c)).scan(0, |len, c| { *len += c.len_utf8(); (*len <= 64).then_some(c) }).collect();
+                                        let label = if label.trim().is_empty() { format!("Application {}", i + 1) } else { label };
                                         selected.push((app.clone(), rusttalk_shared::protocol::AudioStreamInfo { id, label }));
                                     }
                                     AudioShareSource::Separate(selected)

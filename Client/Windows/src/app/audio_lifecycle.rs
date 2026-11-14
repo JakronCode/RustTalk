@@ -102,6 +102,9 @@ impl RustTalkApp {
     }
 
     pub(super) fn stop_shared_audio(&mut self) {
+        if matches!(self.shared_audio_source, crate::audio::share_source::AudioShareSource::Separate(_)) {
+            if let Some(tx) = self.voice_tx() { let _ = tx.send(Command::SetAudioStreams(Vec::new())); }
+        }
         self.screen_audio = None;
         self.audio_only = false;
         self.audio_picker = None;
@@ -338,6 +341,42 @@ mod tests {
     }
 
     #[test]
+    fn failed_separate_start_clears_registration_before_mixed_retry() {
+        use crate::audio::share_source::{ApplicationSource, AudioShareSource};
+        use rusttalk_shared::protocol::AudioStreamInfo;
+        let devices = Devices::new();
+        let mut app = app();
+        let mut commands = connect(&mut app);
+        join(&mut app, 2);
+        while commands.try_recv().is_some() {}
+        devices.0.borrow_mut().fail_system = true;
+        let stream = AudioStreamInfo { id: 9, label: "Application 1".into() };
+        app.start_audio_selection(AudioShareSource::Separate(vec![(ApplicationSource::for_test(1), stream.clone())]));
+        assert!(matches!(commands.try_recv(), Some(Command::SetAudioStreams(streams)) if streams == vec![stream]));
+        assert!(matches!(commands.try_recv(), Some(Command::SetAudioStreams(streams)) if streams.is_empty()));
+        assert!(!app.audio_sharing_active());
+        devices.0.borrow_mut().fail_system = false;
+        app.start_audio_selection(AudioShareSource::System);
+        assert!(matches!(commands.try_recv(), Some(Command::SetAudioStreams(streams)) if streams.is_empty()));
+        assert!(app.audio_sharing_active());
+    }
+
+    #[test]
+    fn rejected_registration_stops_only_the_matching_share() {
+        use crate::audio::share_source::{ApplicationSource, AudioShareSource};
+        use rusttalk_shared::protocol::AudioStreamInfo;
+        let _devices = Devices::new();
+        let mut app = app();
+        let _commands = connect(&mut app);
+        join(&mut app, 2);
+        app.start_audio_selection(AudioShareSource::Separate(vec![(ApplicationSource::for_test(1), AudioStreamInfo { id: 9, label: "Application 1".into() })]));
+        event(&mut app, NetEvent::Message(ServerMessage::AudioStreamsRejected { stream_id: 8 }));
+        assert!(app.audio_sharing_active(), "late failure of an earlier selection");
+        event(&mut app, NetEvent::Message(ServerMessage::AudioStreamsRejected { stream_id: 9 }));
+        assert!(!app.audio_sharing_active());
+    }
+
+    #[test]
     fn audio_picker_needs_voice_and_explicit_share_action() {
         use crate::audio::share_source::AudioShareSource;
         let devices = Devices::new();
@@ -398,6 +437,7 @@ mod tests {
         app.sync_audio_flag();
         assert!(commands.try_recv().is_none(), "nothing shared, nothing sent");
         app.start_audio_selection(AudioShareSource::System);
+        assert!(matches!(commands.try_recv(), Some(Command::SetAudioStreams(streams)) if streams.is_empty()));
         for _ in 0..3 {
             app.sync_audio_flag();
         }
@@ -422,6 +462,7 @@ mod tests {
         join(&mut app, 2);
         while commands.try_recv().is_some() {}
         app.start_audio_selection(AudioShareSource::System);
+        assert!(matches!(commands.try_recv(), Some(Command::SetAudioStreams(streams)) if streams.is_empty()));
         app.sync_audio_flag();
         assert!(matches!(commands.try_recv(), Some(Command::SetAudioSharing(true))));
         app.stop_shared_audio(); // before the server answered
@@ -441,6 +482,7 @@ mod tests {
         join(&mut app, 2);
         while commands.try_recv().is_some() {}
         app.start_audio_selection(AudioShareSource::System);
+        assert!(matches!(commands.try_recv(), Some(Command::SetAudioStreams(streams)) if streams.is_empty()));
         app.sync_audio_flag();
         assert!(matches!(commands.try_recv(), Some(Command::SetAudioSharing(true))));
         // The server refused (rate limit): no echo. Not asked again straight away ...

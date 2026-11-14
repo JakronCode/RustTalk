@@ -1131,7 +1131,8 @@ async fn audio_sharing_status_follows_voice_membership() {
     }
     let msgs = drain(&mut b, 1000).await;
     let changes = msgs.iter().filter(|m| matches!(m, ServerMessage::AudioSharingChanged { .. })).count();
-    assert!(changes <= 10, "bounded broadcasts, got {changes}");
+    assert!(changes <= 20, "at most ten starts plus their stops, got {changes}");
+    assert!(msgs.iter().rev().find(|m| matches!(m, ServerMessage::AudioSharingChanged { .. })).is_some_and(|m| matches!(m, ServerMessage::AudioSharingChanged { sharing: false, .. })), "stopping must remain possible after rate limiting");
     let errors = drain(&mut a, 300).await;
     assert!(errors.iter().any(|m| matches!(m, ServerMessage::Error { .. })), "the flood is refused with an error");
 }
