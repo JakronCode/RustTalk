@@ -5,6 +5,7 @@ Static project website (English/German, no build step, no cookies, no tracking).
 | File | Purpose |
 |---|---|
 | `index.html` | Home page: features, screenshots, downloads, server setup |
+| `install.html` | Step-by-step install guides for Windows, Linux and the Steam Deck (keep in step with the README's client sections) |
 | `roadmap.html` | Planned, maybe-later and shipped features (update it when a release ships something new) |
 | `impressum.html`, `datenschutz.html` | Legal notice and privacy policy (required in Germany) |
 | `legal.css`, `lang.js` | Shared style and DE/EN switch for the legal pages |

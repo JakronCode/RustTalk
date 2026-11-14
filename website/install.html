@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install guide – RustTalk</title>
+<meta name="description" content="Step-by-step: install RustTalk on Windows, Linux and the Steam Deck.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="img/apple-touch-icon.png">
+<link rel="stylesheet" href="legal.css">
+<style>
+.lead{font-size:18px;color:var(--muted);max-width:680px;margin:0 0 22px}
+.jump{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 8px}
+.jump a{display:inline-flex;align-items:center;gap:8px;padding:9px 16px;border-radius:10px;border:1px solid var(--line);background:var(--bg2);color:var(--text);text-decoration:none;font-weight:600}
+.jump a:hover{border-color:var(--accent)}
+section{margin-top:52px;scroll-margin-top:16px}
+section>h2{font-size:26px;margin:0 0 6px}
+h3{font-size:17px;margin:26px 0 8px;color:var(--text)}
+ol.steps{margin:0;padding-left:22px;color:var(--muted)}
+ol.steps>li{margin:0 0 12px;padding-left:4px}
+ol.steps>li b{color:var(--text)}
+ul{color:var(--muted);padding-left:20px}
+li{margin:4px 0}
+pre{background:#111214;border:1px solid var(--line);border-radius:10px;padding:12px 14px;overflow-x:auto;margin:8px 0;font:14px/1.5 ui-monospace,"Cascadia Code",Consolas,monospace;color:var(--text)}
+pre code{background:none;padding:0;font-size:inherit}
+.tip,.warn{border-radius:12px;padding:12px 16px;margin:14px 0;font-size:15px;color:var(--text)}
+.tip{background:rgba(88,101,242,.12);border:1px solid rgba(88,101,242,.35)}
+.warn{background:rgba(240,178,50,.10);border:1px solid rgba(240,178,50,.35)}
+.tip p,.warn p{color:var(--text);margin:0}
+.req{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin:10px 0 4px}
+.req div{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:10px 14px;font-size:14px;color:var(--muted)}
+.req b{display:block;color:var(--text);font-size:14px}
+kbd{font:13px ui-monospace,Consolas,monospace;background:#111214;border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:1px 6px;color:var(--text)}
+.back{margin-top:44px}
+@media(max-width:560px){section>h2{font-size:22px}}
+</style>
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="brand" href="./"><img src="favicon.svg" alt="" width="30" height="30">RustTalk</a>
+  <div class="lang" role="group" aria-label="Language"><button type="button" data-set="en">EN</button><button type="button" data-set="de">DE</button></div>
+</div></nav>
+
+<main class="wrap">
+  <h1 data-l="en">Install guide</h1>
+  <h1 data-l="de">Installationsanleitung</h1>
+  <p class="lead" data-l="en">RustTalk is a single download. Pick your system; every file comes from the official GitHub releases.</p>
+  <p class="lead" data-l="de">RustTalk ist ein einzelner Download. Wähle dein System; alle Dateien kommen aus den offiziellen GitHub-Releases.</p>
+  <div class="jump">
+    <a href="#windows">🪟 Windows</a>
+    <a href="#linux">🐧 Linux</a>
+    <a href="#steamdeck">🎮 Steam Deck</a>
+  </div>
+
+  <!-- ===================== Windows ===================== -->
+  <section id="windows">
+    <h2>🪟 Windows</h2>
+    <p data-l="en">Windows 10 or 11, x64 or ARM64. No admin rights needed.</p>
+    <p data-l="de">Windows 10 oder 11, x64 oder ARM64. Keine Adminrechte nötig.</p>
+
+    <ol class="steps" data-l="en">
+      <li><b>Download</b> <code>rusttalk-windows.exe</code> from the <a href="./#download">download section</a> (on an ARM PC: <code>rusttalk-windows-arm64.exe</code>).</li>
+      <li><b>Run it.</b> It installs itself for your user into <code>%LOCALAPPDATA%\Programs\RustTalk</code> and adds a Start menu entry; a desktop shortcut is optional. Settings are kept in <code>%APPDATA%\RustTalk</code>.</li>
+      <li>If Windows SmartScreen says <i>"Windows protected your PC"</i>, check the file first (next step), then choose <b>More info → Run anyway</b>. Only do this for the file from the official releases.</li>
+      <li><b>Optional: verify the download.</b> Next to every file in the release there is a <code>.sha256</code> file. In PowerShell, in your Downloads folder:
+<pre><code>(Get-FileHash .\rusttalk-windows.exe).Hash</code></pre>
+      The output must match the long number in <code>rusttalk-windows.exe.sha256</code> (upper/lower case does not matter).</li>
+      <li><b>Start RustTalk</b> from the Start menu, enter the server address and your name and connect. On the first connection RustTalk shows the server's fingerprint; confirm it only if it matches what the server owner gave you.</li>
+    </ol>
+    <ol class="steps" data-l="de">
+      <li><b>Lade</b> <code>rusttalk-windows.exe</code> im <a href="./#download">Download-Bereich</a> herunter (auf einem ARM-PC: <code>rusttalk-windows-arm64.exe</code>).</li>
+      <li><b>Starte die Datei.</b> Sie installiert sich für deinen Benutzer nach <code>%LOCALAPPDATA%\Programs\RustTalk</code> und legt einen Eintrag im Startmenü an; eine Desktop-Verknüpfung ist optional. Die Einstellungen liegen in <code>%APPDATA%\RustTalk</code>.</li>
+      <li>Meldet Windows SmartScreen <i>„Der Computer wurde durch Windows geschützt“</i>, prüfe zuerst die Datei (nächster Schritt) und wähle dann <b>Weitere Informationen → Trotzdem ausführen</b>. Mach das nur mit der Datei aus den offiziellen Releases.</li>
+      <li><b>Optional: Download prüfen.</b> Neben jeder Datei im Release liegt eine <code>.sha256</code>-Datei. In der PowerShell, im Download-Ordner:
+<pre><code>(Get-FileHash .\rusttalk-windows.exe).Hash</code></pre>
+      Die Ausgabe muss mit der langen Zahl in <code>rusttalk-windows.exe.sha256</code> übereinstimmen (Groß-/Kleinschreibung egal).</li>
+      <li><b>Starte RustTalk</b> über das Startmenü, gib Serveradresse und deinen Namen ein und verbinde dich. Bei der ersten Verbindung zeigt RustTalk den Fingerabdruck des Servers; bestätige ihn nur, wenn er mit dem übereinstimmt, den dir der Server-Betreiber gegeben hat.</li>
+    </ol>
+
+    <h3 data-l="en">Updates and uninstall</h3>
+    <h3 data-l="de">Updates und Deinstallation</h3>
+    <p data-l="en">RustTalk looks for a new version on start and shows an <b>Update</b> notice; it checks the download's checksum before installing. Uninstall it like any app in <b>Settings → Apps → Installed apps</b>.</p>
+    <p data-l="de">RustTalk sucht beim Start nach einer neuen Version und zeigt dann einen <b>Update</b>-Hinweis; vor der Installation prüft es die Prüfsumme des Downloads. Deinstallieren kannst du es wie jede App unter <b>Einstellungen → Apps → Installierte Apps</b>.</p>
+    <div class="tip" data-l="en"><p><b>Error about the desktop shortcut?</b> If your desktop folder is moved (for example by OneDrive), creating the desktop shortcut can fail. RustTalk is still installed: start it from the Start menu, or install again without the desktop shortcut.</p></div>
+    <div class="tip" data-l="de"><p><b>Fehler bei der Desktop-Verknüpfung?</b> Ist dein Desktop-Ordner verschoben (zum Beispiel durch OneDrive), kann das Anlegen der Verknüpfung fehlschlagen. RustTalk ist trotzdem installiert: Starte es über das Startmenü oder installiere es erneut ohne Desktop-Verknüpfung.</p></div>
+  </section>
+
+  <!-- ===================== Linux ===================== -->
+  <section id="linux">
+    <h2>🐧 Linux</h2>
+    <p data-l="en">RustTalk for Linux is an AppImage: one file, nothing to install system-wide.</p>
+    <p data-l="de">RustTalk für Linux ist ein AppImage: eine Datei, nichts wird systemweit installiert.</p>
+
+    <h3 data-l="en">What your system needs</h3>
+    <h3 data-l="de">Was dein System braucht</h3>
+    <div class="req" data-l="en">
+      <div><b>glibc 2.39 or newer</b>Check with <code>ldd --version</code> (e.g. Ubuntu 24.04+, Fedora 40+, current Arch)</div>
+      <div><b>Wayland session</b>X11 is not supported</div>
+      <div><b>PipeWire</b>with <code>pipewire-pulse</code> and the ALSA bridge (<code>pipewire-alsa</code>)</div>
+      <div><b>Desktop portal</b>an <code>xdg-desktop-portal</code> backend for your desktop (KDE, GNOME, Hyprland …), for screen sharing and shortcuts</div>
+    </div>
+    <div class="req" data-l="de">
+      <div><b>glibc 2.39 oder neuer</b>Prüfen mit <code>ldd --version</code> (z. B. Ubuntu 24.04+, Fedora 40+, aktuelles Arch)</div>
+      <div><b>Wayland-Sitzung</b>X11 wird nicht unterstützt</div>
+      <div><b>PipeWire</b>mit <code>pipewire-pulse</code> und der ALSA-Brücke (<code>pipewire-alsa</code>)</div>
+      <div><b>Desktop-Portal</b>ein <code>xdg-desktop-portal</code>-Backend für deinen Desktop (KDE, GNOME, Hyprland …), für Bildschirm teilen und Tastenkürzel</div>
+    </div>
+
+    <h3 data-l="en">Install</h3>
+    <h3 data-l="de">Installieren</h3>
+    <ol class="steps" data-l="en">
+      <li><b>Download</b> <code>rusttalk-linux-x86_64.AppImage</code> from the <a href="./#download">download section</a> (ARM computers: <code>rusttalk-linux-aarch64.AppImage</code>) and, for checking, the matching <code>.sha256</code> file from the same release.</li>
+      <li><b>Put it in a folder of your own</b>, for example <code>~/Applications</code>. It must stay writable for you: that is where in-app updates replace it.</li>
+      <li><b>Check, make it executable and start it:</b>
+<pre><code>cd ~/Applications
+sha256sum -c rusttalk-linux-x86_64.AppImage.sha256
+chmod +x rusttalk-linux-x86_64.AppImage
+./rusttalk-linux-x86_64.AppImage</code></pre>
+      <code>sha256sum</code> must answer <code>OK</code>. In a file manager you can instead tick <b>Allow executing as program</b> in the file's properties and double-click it.</li>
+      <li><b>Done.</b> On start RustTalk adds itself to your app menu (with icon), so you can launch it from there next time. If you move the file later, start it once from the new place to update the entry.</li>
+    </ol>
+    <ol class="steps" data-l="de">
+      <li><b>Lade</b> <code>rusttalk-linux-x86_64.AppImage</code> im <a href="./#download">Download-Bereich</a> herunter (ARM-Rechner: <code>rusttalk-linux-aarch64.AppImage</code>) und zum Prüfen die passende <code>.sha256</code>-Datei aus demselben Release.</li>
+      <li><b>Lege die Datei in einen eigenen Ordner</b>, zum Beispiel <code>~/Applications</code>. Sie muss für dich beschreibbar bleiben: Dort ersetzt sie das In-App-Update.</li>
+      <li><b>Prüfen, ausführbar machen und starten:</b>
+<pre><code>cd ~/Applications
+sha256sum -c rusttalk-linux-x86_64.AppImage.sha256
+chmod +x rusttalk-linux-x86_64.AppImage
+./rusttalk-linux-x86_64.AppImage</code></pre>
+      <code>sha256sum</code> muss <code>OK</code> melden. Im Dateimanager kannst du stattdessen in den Eigenschaften der Datei <b>Als Programm ausführen erlauben</b> anhaken und sie doppelklicken.</li>
+      <li><b>Fertig.</b> Beim Start trägt sich RustTalk ins App-Menü ein (mit Symbol), danach startest du es einfach von dort. Verschiebst du die Datei später, starte sie einmal vom neuen Ort, damit der Eintrag stimmt.</li>
+    </ol>
+
+    <h3 data-l="en">Good to know</h3>
+    <h3 data-l="de">Gut zu wissen</h3>
+    <ul data-l="en">
+      <li><b>Push to talk in the background:</b> pick a key in <b>Settings → Keybinds</b> (default <kbd>F8</kbd>). Your desktop asks once to allow the shortcut.</li>
+      <li><b>Updates:</b> <b>Settings → About RustTalk → Updates</b> (<b>Install update &amp; restart</b>). The new file is checked (SHA-256) before it replaces the old one.</li>
+      <li><b>Settings</b> are stored in <code>~/.config/RustTalk/</code>, not inside the AppImage.</li>
+      <li><b>No sound or no microphone?</b> Make sure <code>pipewire-pulse</code> and <code>pipewire-alsa</code> (or your distribution's equivalent) are installed, then pick the devices in <b>Settings → Voice &amp; Audio</b>.</li>
+      <li><b>"FUSE" error on start?</b> Install your distribution's FUSE 2 package (e.g. <code>libfuse2t64</code> on Ubuntu, <code>fuse2</code> on Arch), or start it with <code>--appimage-extract-and-run</code>.</li>
+    </ul>
+    <ul data-l="de">
+      <li><b>Push-to-Talk im Hintergrund:</b> wähle eine Taste unter <b>Settings → Keybinds</b> (Standard <kbd>F8</kbd>). Dein Desktop fragt einmal, ob das Kürzel erlaubt ist.</li>
+      <li><b>Updates:</b> <b>Settings → About RustTalk → Updates</b> (<b>Install update &amp; restart</b>). Die neue Datei wird geprüft (SHA-256), bevor sie die alte ersetzt.</li>
+      <li><b>Einstellungen</b> liegen in <code>~/.config/RustTalk/</code>, nicht im AppImage.</li>
+      <li><b>Kein Ton oder kein Mikrofon?</b> Prüfe, dass <code>pipewire-pulse</code> und <code>pipewire-alsa</code> (oder das Gegenstück deiner Distribution) installiert sind, und wähle die Geräte unter <b>Settings → Voice &amp; Audio</b>.</li>
+      <li><b>„FUSE“-Fehler beim Start?</b> Installiere das FUSE-2-Paket deiner Distribution (z. B. <code>libfuse2t64</code> unter Ubuntu, <code>fuse2</code> unter Arch) oder starte mit <code>--appimage-extract-and-run</code>.</li>
+    </ul>
+  </section>
+
+  <!-- ===================== Steam Deck ===================== -->
+  <section id="steamdeck">
+    <h2>🎮 Steam Deck</h2>
+    <p data-l="en">The Steam Deck runs SteamOS, a Linux system, so it uses the Linux AppImage. You set it up once in Desktop Mode; afterwards you can also start it from Gaming Mode.</p>
+    <p data-l="de">Das Steam Deck läuft mit SteamOS, einem Linux-System, und nutzt deshalb das Linux-AppImage. Eingerichtet wird es einmal im Desktop-Modus; danach kannst du es auch aus dem Spielmodus starten.</p>
+
+    <h3 data-l="en">1. Switch to Desktop Mode and check your SteamOS</h3>
+    <h3 data-l="de">1. In den Desktop-Modus wechseln und SteamOS prüfen</h3>
+    <ol class="steps" data-l="en">
+      <li>Press the <b>Steam</b> button → <b>Power</b> → <b>Switch to Desktop</b>.</li>
+      <li>Open <b>Konsole</b> (app menu → System → Konsole) and run:
+<pre><code>ldd --version | head -n1
+echo $XDG_SESSION_TYPE</code></pre>
+      The first line must show <b>2.39 or higher</b>, the second <code>wayland</code>.</li>
+    </ol>
+    <ol class="steps" data-l="de">
+      <li>Drücke die <b>Steam</b>-Taste → <b>Ein/Aus</b> → <b>Zum Desktop wechseln</b>.</li>
+      <li>Öffne <b>Konsole</b> (App-Menü → System → Konsole) und gib ein:
+<pre><code>ldd --version | head -n1
+echo $XDG_SESSION_TYPE</code></pre>
+      Die erste Zeile muss <b>2.39 oder höher</b> zeigen, die zweite <code>wayland</code>.</li>
+    </ol>
+    <div class="warn" data-l="en"><p><b>Older version or <code>x11</code>?</b> Update SteamOS first (Gaming Mode: <b>Settings → System → Software Updates</b>). Newer SteamOS releases start Desktop Mode with Wayland; on some versions the desktop session can also be switched in Steam's developer settings. RustTalk's Linux app does not run on an X11 desktop.</p></div>
+    <div class="warn" data-l="de"><p><b>Ältere Version oder <code>x11</code>?</b> Aktualisiere zuerst SteamOS (Spielmodus: <b>Einstellungen → System → Software-Updates</b>). Neuere SteamOS-Versionen starten den Desktop-Modus mit Wayland; bei manchen Versionen lässt sich die Desktop-Sitzung auch in den Entwickler-Einstellungen von Steam umstellen. Auf einem X11-Desktop läuft die Linux-App von RustTalk nicht.</p></div>
+
+    <h3 data-l="en">2. Download and start RustTalk</h3>
+    <h3 data-l="de">2. RustTalk herunterladen und starten</h3>
+    <ol class="steps" data-l="en">
+      <li>Open a browser in Desktop Mode (for example Firefox from <b>Discover</b>) and download <code>rusttalk-linux-x86_64.AppImage</code> from the <a href="./#download">download section</a>. The Steam Deck is x86_64.</li>
+      <li>In the file manager <b>Dolphin</b>, create the folder <code>Applications</code> in your home folder (<code>/home/deck</code>) and move the file there. Your home folder survives SteamOS updates; nothing needs to be installed into the system (which is read-only).</li>
+      <li>Right-click the file → <b>Properties</b> → <b>Permissions</b> → tick <b>Allow executing file as program</b> → OK. (In Konsole: <code>chmod +x ~/Applications/rusttalk-linux-x86_64.AppImage</code>.)</li>
+      <li>Double-click the file to start RustTalk. It adds itself to the app menu (under <b>Internet</b>), so next time you can start it from there.</li>
+      <li>Connect to your server and pick the Deck's built-in microphone (or your headset) in <b>Settings → Voice &amp; Audio</b>.</li>
+    </ol>
+    <ol class="steps" data-l="de">
+      <li>Öffne im Desktop-Modus einen Browser (zum Beispiel Firefox aus <b>Discover</b>) und lade <code>rusttalk-linux-x86_64.AppImage</code> im <a href="./#download">Download-Bereich</a> herunter. Das Steam Deck ist x86_64.</li>
+      <li>Lege im Dateimanager <b>Dolphin</b> in deinem Home-Ordner (<code>/home/deck</code>) den Ordner <code>Applications</code> an und verschiebe die Datei dorthin. Der Home-Ordner übersteht SteamOS-Updates; ins System (das schreibgeschützt ist) muss nichts installiert werden.</li>
+      <li>Rechtsklick auf die Datei → <b>Eigenschaften</b> → <b>Berechtigungen</b> → <b>Datei als Programm ausführen</b> anhaken → OK. (In der Konsole: <code>chmod +x ~/Applications/rusttalk-linux-x86_64.AppImage</code>.)</li>
+      <li>Doppelklick auf die Datei startet RustTalk. Es trägt sich ins App-Menü ein (unter <b>Internet</b>), danach startest du es von dort.</li>
+      <li>Verbinde dich mit deinem Server und wähle unter <b>Settings → Voice &amp; Audio</b> das eingebaute Mikrofon des Decks (oder dein Headset).</li>
+    </ol>
+    <div class="tip" data-l="en"><p><b>Typing:</b> press <kbd>Steam</kbd> + <kbd>X</kbd> for the on-screen keyboard.</p></div>
+    <div class="tip" data-l="de"><p><b>Tippen:</b> <kbd>Steam</kbd> + <kbd>X</kbd> öffnet die Bildschirmtastatur.</p></div>
+
+    <h3 data-l="en">3. Optional: start it from Gaming Mode</h3>
+    <h3 data-l="de">3. Optional: aus dem Spielmodus starten</h3>
+    <ol class="steps" data-l="en">
+      <li>Still in Desktop Mode, open <b>Steam</b> → <b>Games</b> → <b>Add a Non-Steam Game to My Library…</b></li>
+      <li>Click <b>Browse…</b>, set the file type to <b>All Files</b>, choose <code>/home/deck/Applications/rusttalk-linux-x86_64.AppImage</code> and click <b>Add Selected Programs</b>.</li>
+      <li>Go back with the <b>Return to Gaming Mode</b> icon on the desktop. RustTalk now appears in your library under <b>Non-Steam</b>.</li>
+    </ol>
+    <ol class="steps" data-l="de">
+      <li>Öffne noch im Desktop-Modus <b>Steam</b> → <b>Spiele</b> → <b>Ein Nicht-Steam-Spiel zu meiner Bibliothek hinzufügen…</b></li>
+      <li>Klicke auf <b>Durchsuchen…</b>, stelle den Dateityp auf <b>Alle Dateien</b>, wähle <code>/home/deck/Applications/rusttalk-linux-x86_64.AppImage</code> und klicke auf <b>Ausgewählte Programme hinzufügen</b>.</li>
+      <li>Zurück geht es über das Symbol <b>Zurück zum Spielmodus</b> auf dem Desktop. RustTalk steht jetzt in deiner Bibliothek unter <b>Nicht-Steam</b>.</li>
+    </ol>
+    <div class="warn" data-l="en"><p><b>In Gaming Mode</b> voice and chat work, but screen sharing and background push to talk rely on Desktop Mode's system dialogs and may not be available there. Use <b>voice activity</b> (Settings → Voice &amp; Audio → Input mode) instead of push to talk, or use Desktop Mode for screen sharing.</p></div>
+    <div class="warn" data-l="de"><p><b>Im Spielmodus</b> funktionieren Sprache und Chat, aber Bildschirm teilen und Push-to-Talk im Hintergrund brauchen die Systemdialoge des Desktop-Modus und sind dort eventuell nicht verfügbar. Nutze stattdessen <b>Sprachaktivierung</b> (Settings → Voice &amp; Audio → Input mode) oder teile deinen Bildschirm im Desktop-Modus.</p></div>
+    <p data-l="en"><b>Updates</b> work like on any Linux PC: <b>Settings → About RustTalk → Updates</b> (<b>Install update &amp; restart</b>). The Non-Steam shortcut keeps working because the file stays in the same place.</p>
+    <p data-l="de"><b>Updates</b> funktionieren wie auf jedem Linux-PC: <b>Settings → About RustTalk → Updates</b> (<b>Install update &amp; restart</b>). Die Nicht-Steam-Verknüpfung funktioniert weiter, weil die Datei am selben Ort bleibt.</p>
+  </section>
+
+  <div class="note back" data-l="en">Stuck? <a href="https://github.com/rusttalkcrew/RustTalk/issues" rel="noopener">Open an issue on GitHub</a> with your system and what you saw. Want to run your own server? See <a href="./#server">Host a server</a>.</div>
+  <div class="note back" data-l="de">Kommst du nicht weiter? <a href="https://github.com/rusttalkcrew/RustTalk/issues" rel="noopener">Eröffne ein Issue auf GitHub</a> mit deinem System und dem, was du gesehen hast. Eigenen Server betreiben? Siehe <a href="./#server">Server hosten</a>.</div>
+</main>
+
+<footer><div class="wrap">
+  <a href="./">RustTalk</a>
+  <span><a href="roadmap.html">Roadmap</a> · <a href="impressum.html">Impressum</a> · <a href="datenschutz.html"><span data-l="de">Datenschutz</span><span data-l="en">Privacy</span></a></span>
+</div></footer>
+<script src="lang.js"></script>
+</body>
+</html>
