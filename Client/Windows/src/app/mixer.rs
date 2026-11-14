@@ -208,22 +208,16 @@ impl RustTalkApp {
     }
 
     pub(super) fn shared_audio_popup(&mut self, ui: &mut egui::Ui, user: &UserInfo, response: &egui::Response) {
-        let available = self.viewing_voice() && self.voice_channel() == Some(user.channel_id);
         let me = user.id == self.srv.my_id;
-        response.clone().on_hover_text(if !available {
+        let available = !me && self.viewing_voice() && self.voice_channel() == Some(user.channel_id);
+        response.clone().on_hover_text(if me {
+            "You are sharing audio. Use Audio to change what you share."
+        } else if !available {
             "Sharing audio — join their voice channel to adjust volume"
-        } else if me {
-            "Sharing audio — change what you share"
         } else {
             "Sharing audio — click for volume and mute (only for you)"
         }).on_hover_cursor(if available { egui::CursorIcon::PointingHand } else { egui::CursorIcon::Default });
         if !available {
-            return;
-        }
-        if me {
-            if response.clicked() {
-                self.toggle_audio_sharing();
-            }
             return;
         }
         let popup_id = response.id.with(("shared_audio_mixer", self.srv.id, self.srv.generation, user.id));
@@ -440,6 +434,9 @@ pub(super) mod tests {
         }
         assert_eq!(*app.control.muted_streams.lock().unwrap(), HashSet::from([StreamKind::App(10).key(2)]));
         assert!(app.local_muted.lock().unwrap().is_empty(), "voice and other people remain audible");
+        assert!(app.audio_picker.is_none(), "receiving mixer never opens source settings");
+        let other_listener = voice_app(&egui::Context::default());
+        assert!(other_listener.control.muted_streams.lock().unwrap().is_empty(), "listener settings remain independent");
         app.control.shared_streams.lock().unwrap().clear();
         let out = popup_frame(&ctx, &mut app, &target, vec![]);
         assert!(text_pos(&out, &format!("{} Shared audio", icons::regular::MONITOR_PLAY)).is_some(), "silent mixed share still adjustable");

@@ -92,9 +92,10 @@ impl RustTalkApp {
                                             );
                                         }
                                         if user.audio_sharing {
-                                            let lit = self.shared_audio_lit(user);
-                                            let response = ui.small_button(egui::RichText::new(icons::regular::MUSIC_NOTES)
-                                                .color(if lit { theme::GREEN } else { theme::MUTED }));
+                                            let me = user.id == self.srv.my_id;
+                                            let lit = !me && self.shared_audio_lit(user);
+                                            let response = ui.add_enabled(!me, egui::Button::new(egui::RichText::new(icons::regular::MUSIC_NOTES)
+                                                .color(if lit { theme::GREEN } else { theme::MUTED })).small());
                                             self.shared_audio_popup(ui, user, &response);
                                         }
                                         // Streams dieses Users: Klick wechselt die Ansicht.

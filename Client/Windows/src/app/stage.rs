@@ -848,7 +848,8 @@ impl RustTalkApp {
 
     fn stage_audio_badge(&mut self, ui: &mut egui::Ui, rect: egui::Rect, user: &UserInfo, kind: Option<VideoKind>) {
         if user.audio_sharing {
-            let lit = self.shared_audio_lit(user);
+            let me = user.id == self.srv.my_id;
+            let lit = !me && self.shared_audio_lit(user);
             let badge = egui::Rect::from_center_size(rect.left_top() + egui::vec2(24.0, 24.0), egui::vec2(28.0, 28.0));
             let p = ui.painter();
             p.circle_filled(badge.center(), 14.0, if lit { theme::GREEN } else { egui::Color32::from_black_alpha(160) });
@@ -1139,6 +1140,22 @@ mod tests {
         let (_, out) = run_stage_out(ctx, app, tiles, *t, vec![]);
         let icon = [StageMode::Grid.icon(), StageMode::Focus.icon(), icons::regular::DOTS_THREE][n];
         text_pos(&out, icon).expect("stage button")
+    }
+
+    #[test]
+    fn own_audio_badge_does_not_open_picker_or_fullscreen() {
+        let ctx = egui::Context::default();
+        let mut app = super::super::mixer::tests::voice_app(&ctx);
+        let mut me = app.srv.users[&1].clone();
+        me.audio_sharing = true;
+        let tiles = [(me, Some(VideoKind::Screen))];
+        let mut t = 0.0;
+        run_stage(&ctx, &mut app, &tiles, t, vec![]);
+        t += 0.1;
+        let (_, out) = run_stage_out(&ctx, &mut app, &tiles, t, vec![]);
+        let note = text_pos(&out, icons::regular::MUSIC_NOTES).unwrap();
+        click_at(&ctx, &mut app, &tiles, note, &mut t);
+        assert!(app.audio_picker.is_none() && app.fullscreen.is_none());
     }
 
     #[test]

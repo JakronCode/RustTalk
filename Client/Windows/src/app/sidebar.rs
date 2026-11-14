@@ -670,7 +670,7 @@ impl RustTalkApp {
         );
         // Status icons right-aligned.
         let mut x = rect.right() - 8.0;
-        let sound = !in_lobby && self.shared_audio_lit(user);
+        let sound = !me && !in_lobby && self.shared_audio_lit(user);
         let mut audio_badge = None;
         let mut icon_at = |icon: &str, color: egui::Color32, tip: &str| {
             let r = egui::Rect::from_center_size(egui::pos2(x - 8.0, rect.center().y), egui::vec2(16.0, 16.0));
@@ -679,7 +679,7 @@ impl RustTalkApp {
             }
             ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(14.0), color);
             let music = icon == icons::regular::MUSIC_NOTES;
-            let response = ui.interact(r, ui.id().with(("ustat", user.id, icon)), if music { egui::Sense::click() } else { egui::Sense::hover() });
+            let response = ui.interact(r, ui.id().with(("ustat", user.id, icon)), if music && !me { egui::Sense::click() } else { egui::Sense::hover() });
             if music {
                 audio_badge = Some(response);
             } else {
@@ -1161,6 +1161,25 @@ mod tests {
                 app.user_row(ui, user, &HashMap::new(), &HashSet::new(), false);
             });
         })
+    }
+
+    #[test]
+    fn own_audio_badge_is_gray_and_does_not_open_source_settings() {
+        let ctx = egui::Context::default();
+        let mut app = voice_app(&ctx);
+        let mut me = app.srv.users[&1].clone();
+        me.audio_sharing = true;
+        row_frame(&ctx, &mut app, &me, vec![]);
+        let out = row_frame(&ctx, &mut app, &me, vec![]);
+        let note = text_pos(&out, icons::regular::MUSIC_NOTES).unwrap();
+        assert!(out.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::epaint::Shape::Text(t) if t.galley.job.text == icons::regular::MUSIC_NOTES && t.fallback_color == theme::MUTED)));
+        for pressed in [true, false] {
+            row_frame(&ctx, &mut app, &me, vec![egui::Event::PointerMoved(note), egui::Event::PointerButton {
+                pos: note, button: egui::PointerButton::Primary, pressed, modifiers: Default::default(),
+            }]);
+        }
+        assert!(app.audio_picker.is_none());
     }
 
     #[test]
