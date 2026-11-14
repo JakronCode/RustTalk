@@ -11,6 +11,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 
 pub use rusttalk_shared::release::{is_newer, parse_sha_file, sha256_hex, REPO};
+#[path = "../../../shared/update_discovery.rs"]
+mod discovery;
+
 pub const ASSET: &str = if cfg!(target_os = "linux") {
     if cfg!(target_arch = "aarch64") {
         "rusttalk-linux-aarch64.AppImage"
@@ -35,24 +38,23 @@ pub struct Release {
     pub sha_url: Option<String>,
 }
 
-/// Reads a `releases/latest` response. `None` if there is no exe asset.
+/// Reads one stable release with the exact platform asset.
+#[cfg(test)]
 pub fn parse_release(json: &serde_json::Value) -> Option<Release> {
-    let tag = json["tag_name"].as_str()?;
-    let assets = json["assets"].as_array()?;
-    let url_of = |name: &str| {
-        assets
-            .iter()
-            .find(|a| a["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(name)))
-            .and_then(|a| a["browser_download_url"].as_str())
-            .map(str::to_string)
-    };
-    Some(Release {
-        version: tag.trim_start_matches(['v', 'V']).to_string(),
-        notes: json["body"].as_str().unwrap_or_default().to_string(),
-        page_url: json["html_url"].as_str().unwrap_or_default().to_string(),
-        exe_url: url_of(ASSET)?,
-        sha_url: url_of(&format!("{ASSET}.sha256")),
-    })
+    discovery::parse_release(json, rusttalk_shared::release::Component::Client, ASSET)
+        .ok()
+        .flatten()
+        .map(from_discovery)
+}
+
+fn from_discovery(release: discovery::Release) -> Release {
+    Release {
+        version: release.version,
+        notes: release.notes,
+        page_url: release.page_url,
+        exe_url: release.asset_url,
+        sha_url: release.sha_url,
+    }
 }
 
 /// API base (tests can point it at a local fake).
@@ -67,22 +69,17 @@ fn agent() -> ureq::Agent {
         .build()
 }
 
-/// Asks GitHub for the latest release. `Ok(None)` = up to date.
+/// Checks the complete bounded release list. Errors never mean up to date.
 pub fn check() -> Result<Option<Release>> {
-    let url = format!("{}/repos/{REPO}/releases/latest", api_base());
-    let resp = agent()
-        .get(&url)
-        // GitHub requires a User-Agent; a generic one, nothing about the user.
-        .set("User-Agent", "RustTalk-Updater")
-        .set("Accept", "application/vnd.github+json")
-        .call();
-    let json: serde_json::Value = match resp {
-        Ok(r) => r.into_json().context("Invalid answer from GitHub")?,
-        Err(ureq::Error::Status(404, _)) => return Ok(None), // no release yet
-        Err(ureq::Error::Status(code, _)) => bail!("GitHub returned HTTP {code}"),
-        Err(e) => bail!("GitHub not reachable: {e}"),
-    };
-    Ok(parse_release(&json).filter(|r| is_newer(&r.version, env!("CARGO_PKG_VERSION"))))
+    Ok(discovery::discover(
+        &agent(),
+        &api_base(),
+        "RustTalk-Updater",
+        rusttalk_shared::release::Component::Client,
+        ASSET,
+    )?
+    .map(from_discovery)
+    .filter(|r| is_newer(&r.version, env!("CARGO_PKG_VERSION"))))
 }
 
 fn download(url: &str, progress: Option<&AtomicU32>) -> Result<Vec<u8>> {
@@ -102,7 +99,10 @@ fn download(url: &str, progress: Option<&AtomicU32>) -> Result<Vec<u8>> {
         }
         buf.extend_from_slice(&chunk[..n]);
         if let (Some(p), Some(t)) = (progress, total) {
-            p.store(((buf.len() as u64 * 100) / t.max(1)).min(100) as u32, Ordering::Relaxed);
+            p.store(
+                ((buf.len() as u64 * 100) / t.max(1)).min(100) as u32,
+                Ordering::Relaxed,
+            );
         }
     }
     if buf.len() as u64 > MAX_DOWNLOAD {
@@ -128,7 +128,8 @@ pub fn download_and_install(release: &Release, progress: &AtomicU32) -> Result<P
     }
     #[cfg(target_os = "linux")]
     let target = {
-        let target = crate::install::appimage_path().context("Run the AppImage to install updates")?;
+        let target =
+            crate::install::appimage_path().context("Run the AppImage to install updates")?;
         replace_appimage(&target, &exe)?;
         target
     };
@@ -158,7 +159,11 @@ fn validate_program(bytes: &[u8]) -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        let machine = if cfg!(target_arch = "aarch64") { 183u16 } else { 62u16 };
+        let machine = if cfg!(target_arch = "aarch64") {
+            183u16
+        } else {
+            62u16
+        };
         if bytes.len() < 64
             || &bytes[..4] != b"\x7fELF"
             || bytes[4] != 2
@@ -185,10 +190,14 @@ fn replace_appimage(target: &std::path::Path, bytes: &[u8]) -> Result<()> {
     staged.write_all(bytes)?;
     staged
         .as_file()
-        .set_permissions(std::fs::Permissions::from_mode(metadata.permissions().mode() & 0o777 | 0o100))?;
+        .set_permissions(std::fs::Permissions::from_mode(
+            metadata.permissions().mode() & 0o777 | 0o100,
+        ))?;
     staged.as_file().sync_all()?;
     // POSIX rename atomically replaces the file; the running mount keeps its old inode.
-    staged.persist(target).context("Could not replace AppImage; the original is unchanged")?;
+    staged
+        .persist(target)
+        .context("Could not replace AppImage; the original is unchanged")?;
     std::fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
@@ -235,7 +244,11 @@ mod tests {
         bytes[4] = 2;
         bytes[5] = 1;
         bytes[8..11].copy_from_slice(b"AI\x02");
-        let machine = if cfg!(target_arch = "aarch64") { 183u16 } else { 62u16 };
+        let machine = if cfg!(target_arch = "aarch64") {
+            183u16
+        } else {
+            62u16
+        };
         bytes[18..20].copy_from_slice(&machine.to_le_bytes());
         assert!(validate_program(&bytes).is_ok());
         bytes[18] ^= 1;
@@ -252,13 +265,16 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"old version");
         replace_appimage(&target, &bytes).unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), bytes);
-        assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o750);
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
     }
 
     #[test]
     fn release_parsing_needs_the_exe() {
         let json = serde_json::json!({
-            "tag_name": "v0.4.0",
+            "tag_name": "v0.4.0", "draft": false, "prerelease": false,
             "html_url": "https://github.com/x/releases/v0.4.0",
             "body": "Changes",
             "assets": [
@@ -272,7 +288,7 @@ mod tests {
         assert_eq!(r.exe_url, "https://dl/exe");
         assert_eq!(r.sha_url.as_deref(), Some("https://dl/sha"));
         // Old releases (zip only) cannot be installed automatically.
-        let old = serde_json::json!({ "tag_name": "v0.3.0", "assets": [{ "name": "rusttalk-v0.3.0.zip", "browser_download_url": "x" }] });
+        let old = serde_json::json!({ "tag_name": "v0.3.0", "draft": false, "prerelease": false, "body": null, "html_url": "https://example.invalid", "assets": [{ "name": "rusttalk-v0.3.0.zip", "browser_download_url": "x" }] });
         assert!(parse_release(&old).is_none());
     }
 }

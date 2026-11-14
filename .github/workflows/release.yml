@@ -4,33 +4,63 @@ on:
     tags: ["v*"]
 permissions:
   contents: read
+# All component/core claims and Docker aliases share this lock, including reruns.
+concurrency:
+  group: component-release-publication
+  cancel-in-progress: false
 jobs:
   check-version:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      component: ${{ steps.validate.outputs.component }}
+      core: ${{ steps.validate.outputs.core }}
+      commit: ${{ steps.validate.outputs.commit }}
+      docker_tags: ${{ steps.validate.outputs.docker_tags }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Tag must match every workspace package and the compose example
-        run: |
-          python3 - <<'PY'
-          import os, pathlib, re, tomllib
-          tag = os.environ['GITHUB_REF_NAME'].removeprefix('v')
-          for name in ['Client/Windows', 'Server', 'shared']:
-              path = pathlib.Path(name) / 'Cargo.toml'
-              version = tomllib.loads(path.read_text())['package']['version']
-              assert version == tag, f'{path}: {version} does not match tag {tag}'
-          if '-' not in tag:
-              compose = pathlib.Path('Server/deploy/docker-compose.yml')
-              found = re.search(r'ghcr\.io/rusttalkcrew/rusttalk-server:([^\s@]+)', compose.read_text())
-              minor = '.'.join(tag.split('.')[:2])
-              assert found and found.group(1) == minor, f'{compose}: image tag should be {minor}'
-          PY
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch complete main and tag history
+        run: git fetch --no-recurse-submodules origin '+refs/heads/main:refs/remotes/origin/main' '+refs/tags/*:refs/tags/*'
+      - name: Validate tag, peeled commit, main ancestry and selected versions
+        id: validate
+        run: python3 scripts/component-release.py validate
+      - name: Release boundary regression tests
+        run: make test-release
   build:
     needs: check-version
     uses: ./.github/workflows/build.yml
-  # Server image on ghcr.io: upstream only, after the version check and all builds and tests passed.
-  image:
-    needs: build
+    with:
+      component: ${{ needs.check-version.outputs.component }}
+  reserve:
+    needs: [check-version, build]
     if: github.repository == 'rusttalkcrew/RustTalk'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.reserve.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.check-version.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: rusttalk-*
+          path: dist
+      - name: Verify selected artifacts, reserve fresh draft and upload without replacement
+        id: reserve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/component-release.py reserve
+  image:
+    needs: [check-version, reserve]
+    if: needs.check-version.outputs.component != 'client'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -39,6 +69,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ needs.check-version.outputs.commit }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Build linux/amd64 for the smoke test
@@ -51,21 +83,16 @@ jobs:
           tags: rusttalk-server:release-test
       - name: Smoke test
         run: bash Server/Test_Scripts/docker_smoke.sh rusttalk-server:release-test
-      - id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ghcr.io/rusttalkcrew/rusttalk-server
-          # vX.Y.Z, X.Y.Z, X.Y and latest; pre-releases only get version aliases.
-          tags: |
-            type=semver,pattern=v{{version}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-          flavor: latest=auto
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Require owned draft and absent immutable Docker aliases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.reserve.outputs.release_id }}
+        run: python3 scripts/component-release.py registry-check --release-id "$RELEASE_ID"
       - id: push
         name: Build and push linux/amd64 + linux/arm64
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -74,9 +101,7 @@ jobs:
           file: Server/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          annotations: ${{ steps.meta.outputs.annotations }}
+          tags: ${{ needs.check-version.outputs.docker_tags }}
           provenance: mode=max
           sbom: true
       - name: Image digest
@@ -85,18 +110,27 @@ jobs:
         run: |
           echo "Server image: ghcr.io/rusttalkcrew/rusttalk-server@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
   publish:
-    needs: build
+    needs: [check-version, reserve, image]
+    if: >-
+      always() && needs.reserve.result == 'success' &&
+      (needs.image.result == 'success' ||
+      (needs.check-version.outputs.component == 'client' && needs.image.result == 'skipped'))
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.check-version.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: rusttalk-*
           path: dist
-          merge-multiple: true
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          files: dist/*
-          fail_on_unmatched_files: true
-          generate_release_notes: true
+      - name: Recheck ownership and exact assets, publish after all required checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.reserve.outputs.release_id }}
+        run: python3 scripts/component-release.py publish --release-id "$RELEASE_ID"
