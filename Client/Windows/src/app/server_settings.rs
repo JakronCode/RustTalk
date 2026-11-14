@@ -143,7 +143,7 @@ impl RustTalkApp {
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
                 paint_server_icon(ui, r, &dlg.draft, &mut self.textures);
-                ui.label(egui::RichText::new(super::sidebar::elide(ui, &dlg.draft.name, &egui::FontId::proportional(14.0), 150.0)).strong().color(theme::HEADER));
+                ui.label(egui::RichText::new(super::sidebar::elide(ui, &dlg.draft.name, &egui::FontId::proportional(14.0), 150.0)).strong().color(theme::HEADER()));
             });
             ui.add_space(10.0);
             if let Some((tab, section)) = nav_sidebar(ui, GROUPS, &mut nav, dlg.tab, "Server settings") {
@@ -157,7 +157,7 @@ impl RustTalkApp {
         });
         close |= close_panel(ctx, "server_settings_close");
         egui::TopBottomPanel::bottom("server_settings_bar")
-            .frame(egui::Frame::default().fill(theme::BG).stroke(egui::Stroke::new(1.0_f32, theme::BORDER)).inner_margin(egui::Margin::symmetric(40, 8)))
+            .frame(egui::Frame::default().fill(theme::BG()).stroke(egui::Stroke::new(1.0_f32, theme::BORDER())).inner_margin(egui::Margin::symmetric(40, 8)))
             .show(ctx, |ui| close |= self.server_settings_bar(ui, &mut dlg));
         content_panel(ctx, "server_settings_page", &mut nav, |ui, nav| {
             page_body(ui, page(dlg.tab), nav, |ui, id| self.server_section(ui, &mut dlg, id));
@@ -195,7 +195,7 @@ impl RustTalkApp {
             if changed {
                 ui.label(egui::RichText::new("Unsaved changes").color(theme::YELLOW));
             } else if !admin {
-                ui.label(egui::RichText::new(format!("{}  Only admins can change server settings.", icons::regular::LOCK)).color(theme::MUTED));
+                ui.label(egui::RichText::new(format!("{}  Only admins can change server settings.", icons::regular::LOCK)).color(theme::MUTED()));
             }
         });
         close
@@ -228,7 +228,7 @@ impl RustTalkApp {
                 paint_server_icon(ui, r, &dlg.draft, &mut self.textures);
                 ui.add_space(8.0);
                 ui.vertical(|ui| {
-                    ui.label(egui::RichText::new("Shown in the sidebar for everyone. PNG or JPEG, it is cropped to a square and scaled to 128 px.").color(theme::MUTED));
+                    ui.label(egui::RichText::new("Shown in the sidebar for everyone. PNG or JPEG, it is cropped to a square and scaled to 128 px.").color(theme::MUTED()));
                     ui.horizontal(|ui| {
                         if ui.button(format!("{}  Upload Image", icons::regular::UPLOAD_SIMPLE)).clicked() {
                             match pick_icon() {
@@ -287,7 +287,7 @@ impl RustTalkApp {
                     icons::regular::INFO
                 ))
                 .size(12.0)
-                .color(theme::MUTED),
+                .color(theme::MUTED()),
             );
         });
     }
@@ -296,7 +296,7 @@ impl RustTalkApp {
 fn server_name(ui: &mut egui::Ui, dlg: &mut ServerSettingsDialog) {
     card(ui, |ui| {
         ui.add(egui::TextEdit::singleline(&mut dlg.draft.name).char_limit(rusttalk_shared::protocol::MAX_NAME_LEN).desired_width(f32::INFINITY));
-        ui.label(egui::RichText::new("Shown at the top of the sidebar and when people connect.").size(12.0).color(theme::MUTED));
+        ui.label(egui::RichText::new("Shown at the top of the sidebar and when people connect.").size(12.0).color(theme::MUTED()));
     });
 }
 
@@ -333,10 +333,10 @@ impl RustTalkApp {
                 let (icon, text, color) = if self.srv.gif_available {
                     (icons::regular::CHECK_CIRCLE, "GIF search is active for everyone on this server", theme::GREEN)
                 } else {
-                    (icons::regular::X_CIRCLE, "GIF search is off - no API key set", theme::MUTED)
+                    (icons::regular::X_CIRCLE, "GIF search is off - no API key set", theme::MUTED())
                 };
                 ui.label(egui::RichText::new(icon).size(18.0).color(color));
-                ui.label(egui::RichText::new(text).color(theme::HEADER));
+                ui.label(egui::RichText::new(text).color(theme::HEADER()));
             });
             ui.label(
                 egui::RichText::new(
@@ -344,7 +344,7 @@ impl RustTalkApp {
                      The server searches GIPHY for everyone and caches results.",
                 )
                 .size(12.0)
-                .color(theme::MUTED),
+                .color(theme::MUTED()),
             );
             ui.separator();
             let label = if self.srv.gif_available { "Replace API key" } else { "GIPHY API key" };
@@ -441,13 +441,13 @@ fn server_notices(ui: &mut egui::Ui, dlg: &mut ServerSettingsDialog) {
 
 /// "12 / 300" counter below a text field.
 fn char_count(ui: &mut egui::Ui, text: &str, max: usize) {
-    ui.label(egui::RichText::new(format!("{} / {max}", text.chars().count())).size(11.5).color(theme::MUTED));
+    ui.label(egui::RichText::new(format!("{} / {max}", text.chars().count())).size(11.5).color(theme::MUTED()));
 }
 
 /// Label, description and single-line input for a short server message.
 fn message_field(ui: &mut egui::Ui, label: &str, desc: &str, hint: &str, value: &mut String, max: usize) {
-    ui.label(egui::RichText::new(label).color(theme::HEADER));
-    ui.label(egui::RichText::new(desc).size(12.0).color(theme::MUTED));
+    ui.label(egui::RichText::new(label).color(theme::HEADER()));
+    ui.label(egui::RichText::new(desc).size(12.0).color(theme::MUTED()));
     ui.add(egui::TextEdit::singleline(value).hint_text(hint).char_limit(max).desired_width(f32::INFINITY));
 }
 

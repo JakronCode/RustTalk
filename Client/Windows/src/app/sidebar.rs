@@ -58,25 +58,26 @@ impl RustTalkApp {
             .default_width(width)
             .width_range(SIDEBAR_MIN..=SIDEBAR_MAX)
             .resizable(true)
-            .frame(egui::Frame::default().fill(theme::SIDEBAR))
+            .frame(egui::Frame::default().fill(theme::SIDEBAR()))
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 egui::TopBottomPanel::top("server_header")
                     .exact_height(48.0)
                     .frame(
                         egui::Frame::default()
-                            .fill(theme::SIDEBAR)
+                            .fill(theme::SIDEBAR())
                             .inner_margin(egui::Margin::symmetric(12, 0))
-                            .stroke(egui::Stroke::new(1.0_f32, theme::BORDER)),
+                            .stroke(egui::Stroke::new(1.0_f32, theme::BORDER())),
                     )
                     .show_inside(ui, |ui| switch = self.ui_server_header(ui));
 
                 egui::TopBottomPanel::bottom("user_panel")
-                    .frame(egui::Frame::default().fill(theme::SIDEBAR).inner_margin(egui::Margin::same(8)))
+                    .frame(egui::Frame::default().fill(theme::SIDEBAR()).inner_margin(egui::Margin::same(8)))
                     .show_separator_line(false)
                     .show_inside(ui, |ui| {
                         let user_panel = egui::Frame::default()
-                            .fill(theme::PANEL)
+                            .fill(theme::PANEL())
+                            .stroke(theme::outline())
                             .corner_radius(8.0)
                             .inner_margin(egui::Margin::symmetric(8, 6))
                             .show(ui, |ui| {
@@ -126,7 +127,7 @@ impl RustTalkApp {
         let connected = self.is_connected();
         let resp = ui.interact(rect, ui.id().with("server_menu_btn"), egui::Sense::click());
         if resp.hovered() {
-            ui.painter().rect_filled(rect, 0.0, theme::HOVER);
+            ui.painter().rect_filled(rect, 0.0, theme::HOVER());
         }
         let popup_id = ui.make_persistent_id("server_menu");
         let open = ui.memory(|m| m.is_popup_open(popup_id));
@@ -146,14 +147,14 @@ impl RustTalkApp {
             egui::Align2::LEFT_CENTER,
             name,
             font,
-            theme::HEADER,
+            theme::HEADER(),
         );
         ui.painter().text(
             rect.right_center() - egui::vec2(12.0, 0.0),
             egui::Align2::RIGHT_CENTER,
             if open { icons::regular::X } else { icons::regular::CARET_DOWN },
             egui::FontId::proportional(16.0),
-            theme::HEADER,
+            theme::HEADER(),
         );
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Servers and menu, viewing {title}")));
         if resp.clicked() {
@@ -214,8 +215,8 @@ impl RustTalkApp {
     /// Sidebar body while the viewed server is not connected.
     fn ui_not_connected(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
-        ui.add(egui::Label::new(egui::RichText::new("Not connected to this server.").color(theme::MUTED)).wrap());
-        ui.add(egui::Label::new(egui::RichText::new("Pick another server in the menu above, or connect this one.").size(12.0).color(theme::MUTED)).wrap());
+        ui.add(egui::Label::new(egui::RichText::new("Not connected to this server.").color(theme::MUTED())).wrap());
+        ui.add(egui::Label::new(egui::RichText::new("Pick another server in the menu above, or connect this one.").size(12.0).color(theme::MUTED())).wrap());
     }
 
     /// Channel tree: lobby pinned on top, then top-level channels and
@@ -345,11 +346,11 @@ impl RustTalkApp {
             .interactable(false)
             .show(ctx, |ui| {
                 egui::Frame::default()
-                    .fill(theme::DARK)
+                    .fill(theme::DARK())
                     .corner_radius(6.0)
                     .inner_margin(egui::Margin::symmetric(10, 5))
                     .show(ui, |ui| {
-                        ui.label(egui::RichText::new(format!("{icon}  {name}")).color(theme::HEADER));
+                        ui.label(egui::RichText::new(format!("{icon}  {name}")).color(theme::HEADER()));
                     });
             });
 
@@ -413,11 +414,11 @@ impl RustTalkApp {
             .values()
             .any(|c| c.parent == Some(cat.id) && self.srv.unread.contains(&c.id));
         let color = if is_dragged {
-            theme::DISABLED
+            theme::DISABLED()
         } else if hovered || has_unread {
-            theme::HEADER
+            theme::HEADER()
         } else {
-            theme::MUTED
+            theme::MUTED()
         };
         let p = ui.painter();
         p.text(
@@ -501,9 +502,9 @@ impl RustTalkApp {
         );
         let hovered = resp.hovered() && !is_dragged;
         let bg = if selected {
-            theme::SELECTED
+            theme::SELECTED()
         } else if hovered {
-            theme::HOVER
+            theme::HOVER()
         } else {
             egui::Color32::TRANSPARENT
         };
@@ -515,14 +516,14 @@ impl RustTalkApp {
                 egui::pos2(rect.left() - 6.0, rect.center().y),
                 egui::vec2(4.0, 8.0),
             );
-            p.rect_filled(pill, 2.0, theme::HEADER);
+            p.rect_filled(pill, 2.0, theme::HEADER());
         }
         let fg = if is_dragged {
-            theme::DISABLED
+            theme::DISABLED()
         } else if selected || has_unread || hovered {
-            theme::HEADER
+            theme::HEADER()
         } else {
-            theme::MUTED
+            theme::MUTED()
         };
         let x = rect.left() + 8.0 + indent;
         p.text(
@@ -541,7 +542,7 @@ impl RustTalkApp {
             egui::Align2::LEFT_CENTER,
             name,
             name_font,
-            if has_unread { theme::HEADER } else { fg },
+            if has_unread { theme::HEADER() } else { fg },
         );
 
         // Hover: gear (channel settings) - by pointer position, see the category row.
@@ -652,17 +653,17 @@ impl RustTalkApp {
         let (rect, resp) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), theme::dense(34.0, 22.0)), egui::Sense::click());
         if resp.hovered() {
-            ui.painter().rect_filled(rect, 6.0, theme::HOVER);
+            ui.painter().rect_filled(rect, 6.0, theme::HOVER());
         }
         let d = theme::dense(24.0, 18.0);
         let av = egui::Rect::from_center_size(rect.left_center() + egui::vec2(40.0, 0.0), egui::vec2(d, d));
         theme::paint_avatar(ui.painter(), av, &user.name, talking_now);
         let name_color = if locally_muted {
-            theme::DISABLED
+            theme::DISABLED()
         } else if talking_now || me {
-            theme::HEADER
+            theme::HEADER()
         } else {
-            theme::MUTED
+            theme::MUTED()
         };
         ui.painter().text(
             egui::pos2(av.right() + 8.0, rect.center().y),
@@ -693,7 +694,7 @@ impl RustTalkApp {
         if user.audio_sharing && !in_lobby {
             icon_at(
                 icons::regular::MUSIC_NOTES,
-                if sound { theme::GREEN } else { theme::MUTED },
+                if sound { theme::GREEN } else { theme::MUTED() },
                 if sound { "Sharing audio (sound playing)" } else { "Sharing audio" },
             );
         }
@@ -726,7 +727,7 @@ impl RustTalkApp {
     pub(super) fn user_menu(&mut self, ui: &mut egui::Ui, user: &UserInfo) {
         ui.set_width(MENU_W);
         ui.spacing_mut().item_spacing.y = 2.0;
-        ui.label(egui::RichText::new(&user.name).strong().color(theme::HEADER));
+        ui.label(egui::RichText::new(&user.name).strong().color(theme::HEADER()));
         theme::menu_separator(ui);
         if theme::menu_item(ui, icons::regular::HAND_WAVING, "Poke...", false)
             .on_hover_text("Plays a wake-up sound for them and shows your message in a popup")
@@ -791,7 +792,7 @@ impl RustTalkApp {
                 if r.clicked() {
                     self.toggle_connection_panel(r.rect.left_top() - egui::vec2(0.0, 8.0));
                 }
-                ui.add(egui::Label::new(egui::RichText::new(format!("{channel} on {server}")).size(12.0).color(theme::MUTED)).truncate());
+                ui.add(egui::Label::new(egui::RichText::new(format!("{channel} on {server}")).size(12.0).color(theme::MUTED())).truncate());
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::icon_button(ui, icons::regular::PHONE_DISCONNECT, IconState::Danger, "Leave voice (back to the lobby)").clicked() {
@@ -805,7 +806,7 @@ impl RustTalkApp {
         let labels = ["Camera", "Screen", "Audio"];
         let required = labels.iter().map(|label| ui.painter().layout_no_wrap(
             format!("{}  {label}", icons::regular::MUSIC_NOTES),
-            egui::TextStyle::Button.resolve(ui.style()), theme::TEXT).size().x + ui.spacing().button_padding.x * 2.0)
+            egui::TextStyle::Button.resolve(ui.style()), theme::TEXT()).size().x + ui.spacing().button_padding.x * 2.0)
             .fold(0.0_f32, f32::max) * 3.0 + ui.spacing().item_spacing.x * 2.0;
         let compact = ui.available_width() < required;
         let active = self.audio_sharing_active();
@@ -858,8 +859,8 @@ impl RustTalkApp {
                 // Leave room for the two split buttons and the gear on the right.
                 let max_w = (ui.available_width() - 136.0).max(36.0);
                 let name = elide(ui, &self.config.username, &egui::FontId::proportional(14.0), max_w);
-                ui.label(egui::RichText::new(name).strong().color(theme::HEADER));
-                ui.label(egui::RichText::new(if self.is_connected() { "Online" } else { "Not connected" }).size(11.5).color(theme::MUTED));
+                ui.label(egui::RichText::new(name).strong().color(theme::HEADER()));
+                ui.label(egui::RichText::new(if self.is_connected() { "Online" } else { "Not connected" }).size(11.5).color(theme::MUTED()));
             })
             .response
             .on_hover_text(mode);
@@ -1028,7 +1029,7 @@ fn disconnect_icon(ui: &mut egui::Ui, rect: egui::Rect, tip: &str) -> egui::Resp
 /// Small borderless icon button placed at a fixed rect (row hover actions).
 fn small_icon(ui: &mut egui::Ui, rect: egui::Rect, icon: &str, tip: &str) -> egui::Response {
     let resp = ui.interact(rect, ui.id().with(("small_icon", rect.min.x as i32, rect.min.y as i32, icon)), egui::Sense::click());
-    let color = if resp.hovered() { theme::HEADER } else { theme::MUTED };
+    let color = if resp.hovered() { theme::HEADER() } else { theme::MUTED() };
     ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(15.0), color);
     resp.on_hover_text(tip)
 }
@@ -1037,8 +1038,8 @@ fn small_icon(ui: &mut egui::Ui, rect: egui::Rect, icon: &str, tip: &str) -> egu
 fn wide_toggle(ui: &mut egui::Ui, icon: &str, label: &str, state: IconState, tip: &str, stoppable: bool) -> (egui::Response, bool) {
     let (fg, bg) = match state {
         IconState::Active => (egui::Color32::WHITE, theme::GREEN),
-        IconState::Disabled => (theme::DISABLED, theme::SIDEBAR),
-        _ => (theme::HEADER, theme::INPUT),
+        IconState::Disabled => (theme::DISABLED(), theme::SIDEBAR()),
+        _ => (theme::HEADER(), theme::INPUT()),
     };
     let text = if label.is_empty() { icon.to_string() } else { format!("{icon}  {label}") };
     let btn = egui::Button::new(egui::RichText::new(text).color(fg))
@@ -1071,7 +1072,7 @@ fn wide_toggle(ui: &mut egui::Ui, icon: &str, label: &str, state: IconState, tip
 fn status_dot(ui: &egui::Ui, avatar: egui::Rect) {
     let r = 5.0;
     let c = avatar.right_bottom() - egui::vec2(r * 0.7, r * 0.7);
-    ui.painter().circle_filled(c, r + 2.5, theme::PANEL);
+    ui.painter().circle_filled(c, r + 2.5, theme::PANEL());
     ui.painter().circle_filled(c, r, theme::GREEN);
 }
 
@@ -1091,22 +1092,22 @@ fn split_button(
     let caret = ui.interact(caret_r, ui.id().with(("split_caret", caret_tip)), egui::Sense::click());
     let p = ui.painter();
     let fg = match state {
-        IconState::Normal => theme::TEXT,
+        IconState::Normal => theme::TEXT(),
         IconState::Active => theme::GREEN,
         IconState::Danger => theme::RED,
-        IconState::Disabled => theme::DISABLED,
+        IconState::Disabled => theme::DISABLED(),
     };
     if state == IconState::Danger {
         p.rect_filled(rect, 6.0, theme::RED.gamma_multiply(0.15));
     }
     if main.hovered() && enabled {
-        p.rect_filled(main_r, egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 }, egui::Color32::from_white_alpha(14));
+        p.rect_filled(main_r, egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 }, theme::overlay(14));
     }
     if caret.hovered() {
-        p.rect_filled(caret_r, egui::CornerRadius { nw: 0, sw: 0, ne: 6, se: 6 }, egui::Color32::from_white_alpha(14));
+        p.rect_filled(caret_r, egui::CornerRadius { nw: 0, sw: 0, ne: 6, se: 6 }, theme::overlay(14));
     }
     p.text(main_r.center(), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(18.0), fg);
-    p.text(caret_r.center(), egui::Align2::CENTER_CENTER, icons::regular::CARET_DOWN, egui::FontId::proportional(12.0), theme::MUTED);
+    p.text(caret_r.center(), egui::Align2::CENTER_CENTER, icons::regular::CARET_DOWN, egui::FontId::proportional(12.0), theme::MUTED());
     (main.on_hover_text(tip), caret.on_hover_text(caret_tip))
 }
 
@@ -1176,7 +1177,7 @@ mod tests {
         let out = row_frame(&ctx, &mut app, &me, vec![]);
         let note = text_pos(&out, icons::regular::MUSIC_NOTES).unwrap();
         assert!(out.shapes.iter().any(|shape| matches!(&shape.shape,
-            egui::epaint::Shape::Text(t) if t.galley.job.text == icons::regular::MUSIC_NOTES && t.fallback_color == theme::MUTED)));
+            egui::epaint::Shape::Text(t) if t.galley.job.text == icons::regular::MUSIC_NOTES && t.fallback_color == theme::MUTED())));
         for pressed in [true, false] {
             row_frame(&ctx, &mut app, &me, vec![egui::Event::PointerMoved(note), egui::Event::PointerButton {
                 pos: note, button: egui::PointerButton::Primary, pressed, modifiers: Default::default(),

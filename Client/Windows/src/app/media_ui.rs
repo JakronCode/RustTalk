@@ -43,7 +43,7 @@ impl RustTalkApp {
         // --- Unten: User-Leiste ---
         egui::TopBottomPanel::bottom("fs_users")
             .frame(
-                egui::Frame::default().fill(theme::DARK).inner_margin(egui::Margin::symmetric(12, 8)),
+                egui::Frame::default().fill(theme::DARK()).inner_margin(egui::Margin::symmetric(12, 8)),
             )
             .show(ctx, |ui| {
                 if self.screen_audio.is_some() {
@@ -73,7 +73,7 @@ impl RustTalkApp {
                                     }
                                     let mut name = egui::RichText::new(&user.name)
                                         .size(12.0)
-                                        .color(theme::TEXT);
+                                        .color(theme::TEXT());
                                     if user.id == uid {
                                         name = name.strong();
                                     }
@@ -95,7 +95,7 @@ impl RustTalkApp {
                                             let me = user.id == self.srv.my_id;
                                             let lit = !me && self.shared_audio_lit(user);
                                             let response = ui.add_enabled(!me, egui::Button::new(egui::RichText::new(icons::regular::MUSIC_NOTES)
-                                                .color(if lit { theme::GREEN } else { theme::MUTED })).small());
+                                                .color(if lit { theme::GREEN } else { theme::MUTED() })).small());
                                             self.shared_audio_popup(ui, user, &response);
                                         }
                                         // Streams dieses Users: Klick wechselt die Ansicht.
@@ -107,11 +107,11 @@ impl RustTalkApp {
                                             let active = (user.id, k) == key;
                                             let btn = egui::Button::new(
                                                 egui::RichText::new(kind_icon(k)).color(
-                                                    if active { theme::on_accent() } else { theme::MUTED },
+                                                    if active { theme::on_accent() } else { theme::MUTED() },
                                                 ),
                                             )
                                             .small()
-                                            .fill(if active { theme::accent() } else { theme::HOVER });
+                                            .fill(if active { theme::accent() } else { theme::HOVER() });
                                             if ui
                                                 .add(btn)
                                                 .on_hover_text(format!(
@@ -604,7 +604,7 @@ impl RustTalkApp {
                 ui.add_space(8.0);
                 let size = egui::vec2(480.0, 270.0);
                 let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-                ui.painter().rect_filled(rect, 8.0, theme::DARK);
+                ui.painter().rect_filled(rect, 8.0, theme::DARK());
                 if let Some(tex) = &preview {
                     let fit = theme::fit_size(tex.size_vec2(), size);
                     let img_rect = egui::Rect::from_center_size(rect.center(), fit);
@@ -619,7 +619,7 @@ impl RustTalkApp {
                         egui::Align2::CENTER_CENTER,
                         text,
                         egui::FontId::proportional(14.0),
-                        theme::MUTED,
+                        theme::MUTED(),
                     );
                 }
                 ui.add_space(10.0);
@@ -736,9 +736,9 @@ impl RustTalkApp {
                         let btn = egui::Button::new(
                             egui::RichText::new(format!("{icon}  {label}"))
                                 .size(15.0)
-                                .color(if active { egui::Color32::WHITE } else { theme::MUTED }),
+                                .color(if active { theme::HEADER() } else { theme::MUTED() }),
                         )
-                        .fill(if active { theme::HOVER } else { theme::DARK })
+                        .fill(if active { theme::HOVER() } else { theme::DARK() })
                         .min_size(egui::vec2(tab_w, 34.0));
                         if ui.add(btn).clicked() && !active {
                             picker.tab = tab;
@@ -958,9 +958,9 @@ impl RustTalkApp {
             .fixed_pos(pos)
             .show(ctx, |ui| {
                 egui::Frame::default()
-                    .fill(theme::SIDEBAR)
+                    .fill(theme::SIDEBAR())
                     .corner_radius(10.0)
-                    .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
+                    .stroke(egui::Stroke::new(1.0_f32, theme::BORDER()))
                     .shadow(egui::epaint::Shadow { offset: [0, 8], blur: 24, spread: 0, color: egui::Color32::from_black_alpha(120) })
                     .inner_margin(egui::Margin::same(10))
                     .show(ui, |ui| {
@@ -969,11 +969,11 @@ impl RustTalkApp {
                         if !self.srv.gif_available {
                             ui.vertical_centered(|ui| {
                                 ui.add_space(110.0);
-                                ui.label(egui::RichText::new(icons::regular::GIF).size(46.0).color(theme::MUTED));
-                                ui.label(egui::RichText::new("GIFs are not set up on this server").size(16.0).strong().color(theme::HEADER));
+                                ui.label(egui::RichText::new(icons::regular::GIF).size(46.0).color(theme::MUTED()));
+                                ui.label(egui::RichText::new("GIFs are not set up on this server").size(16.0).strong().color(theme::HEADER()));
                                 ui.label(
                                     egui::RichText::new("Someone has to add a GIPHY API key once under\nServer Settings > Integrations - then everyone can use GIFs.")
-                                        .color(theme::MUTED),
+                                        .color(theme::MUTED()),
                                 );
                                 ui.add_space(8.0);
                                 if theme::primary_button(ui, &format!("{}  Open Server Settings", icons::regular::GEAR_SIX)).clicked() {
@@ -999,12 +999,12 @@ impl RustTalkApp {
                                 Some("") | None => "Trending".to_string(),
                                 Some(q) => format!("Results for \"{q}\""),
                             };
-                            ui.label(egui::RichText::new(title).strong().color(theme::HEADER));
+                            ui.label(egui::RichText::new(title).strong().color(theme::HEADER()));
                             if self.giphy.loading || self.giphy.sending {
                                 ui.spinner();
                             }
                             if self.giphy.sending {
-                                ui.label(egui::RichText::new("Sending...").color(theme::MUTED));
+                                ui.label(egui::RichText::new("Sending...").color(theme::MUTED()));
                             }
                         });
                         if let Some(e) = &self.giphy.error {
@@ -1035,7 +1035,7 @@ impl RustTalkApp {
                                         egui::Image::new(&tex).corner_radius(6.0).paint_at(ui, rect);
                                     }
                                     None => {
-                                        ui.painter().rect_filled(rect, 6.0, theme::HOVER);
+                                        ui.painter().rect_filled(rect, 6.0, theme::HOVER());
                                         if self.giphy.requested.insert(g.preview_url.clone()) {
                                             let tx = self.giphy_tx.clone();
                                             let url = g.preview_url.clone();
@@ -1059,7 +1059,7 @@ impl RustTalkApp {
                                 }
                             }
                             if self.giphy.results.is_empty() && !self.giphy.loading && self.giphy.error.is_none() {
-                                ui.label(egui::RichText::new("No GIFs found.").color(theme::MUTED));
+                                ui.label(egui::RichText::new("No GIFs found.").color(theme::MUTED()));
                             }
                         });
                         // Near the end: load the next page.
@@ -1068,7 +1068,7 @@ impl RustTalkApp {
                             want_more = true;
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(egui::RichText::new("Powered by GIPHY").size(11.0).color(theme::DISABLED));
+                            ui.label(egui::RichText::new("Powered by GIPHY").size(11.0).color(theme::DISABLED()));
                         });
                     });
             });
@@ -1218,7 +1218,7 @@ fn share_card(
     let (rect, resp) =
         ui.allocate_exact_size(egui::vec2(width, thumb_h + 44.0), egui::Sense::click());
     let painter = ui.painter_at(rect);
-    let bg = if selected || resp.hovered() { theme::HOVER } else { theme::DARK };
+    let bg = if selected || resp.hovered() { theme::HOVER() } else { theme::DARK() };
     painter.rect_filled(rect, 8.0, bg);
     let thumb_rect = egui::Rect::from_min_size(rect.min, egui::vec2(width, thumb_h)).shrink(6.0);
     painter.rect_filled(thumb_rect, 6.0, egui::Color32::BLACK);
@@ -1239,7 +1239,7 @@ fn share_card(
                 egui::Align2::CENTER_CENTER,
                 "No preview",
                 egui::FontId::proportional(13.0),
-                theme::MUTED,
+                theme::MUTED(),
             );
         }
     }
@@ -1267,7 +1267,7 @@ fn share_card(
             egui::Align2::LEFT_TOP,
             shorten(&entry.subtitle),
             egui::FontId::proportional(12.0),
-            theme::MUTED,
+            theme::MUTED(),
         );
     }
     if selected {

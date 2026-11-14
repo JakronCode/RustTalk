@@ -222,7 +222,7 @@ impl RustTalkApp {
             if hovered_area || emotion == Emotion::Hungry {
                 let btn = egui::Rect::from_min_size(pos2(snack_rect.left(), snack_rect.bottom() - SNACK.y - 4.0), SNACK);
                 let r = ui.interact(btn, ui.id().with("snack"), egui::Sense::click());
-                let fill = if r.hovered() { theme::SELECTED } else { theme::INPUT };
+                let fill = if r.hovered() { theme::SELECTED() } else { theme::INPUT() };
                 ui.painter().circle_filled(btn.center(), SNACK.x / 2.0, fill);
                 if emotion == Emotion::Hungry {
                     let pulse = ((now * 4.0).sin() * 0.5 + 0.5) as f32;
@@ -276,7 +276,7 @@ impl RustTalkApp {
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
                     let heading = if a.found.is_none() { "Who is hiding in the alley?" } else { "A new friend appeared!" };
-                    ui.label(egui::RichText::new(heading).size(18.0).strong().color(theme::HEADER));
+                    ui.label(egui::RichText::new(heading).size(18.0).strong().color(theme::HEADER()));
                 });
                 let (stage, _) = ui.allocate_exact_size(vec2(ui.available_width(), 200.0), egui::Sense::hover());
                 // Look into the bins: the right one needs a few tries.
@@ -304,11 +304,11 @@ impl RustTalkApp {
                 ui.multiply_opacity(alpha);
                 ui.add_enabled_ui(alpha > 0.5, |ui| {
                     ui.vertical_centered(|ui| {
-                        ui.label(egui::RichText::new(format!("A {} - what's their name?", look_name(&preview).to_lowercase())).color(theme::MUTED));
+                        ui.label(egui::RichText::new(format!("A {} - what's their name?", look_name(&preview).to_lowercase())).color(theme::MUTED()));
                     });
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Name").color(theme::HEADER));
+                        ui.label(egui::RichText::new("Name").color(theme::HEADER()));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button(super::icons::regular::DICE_FIVE).on_hover_text("Another name").clicked() {
                                 let current = a.name.clone();
@@ -325,7 +325,7 @@ impl RustTalkApp {
                     });
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Collar").color(theme::HEADER));
+                        ui.label(egui::RichText::new("Collar").color(theme::HEADER()));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button(super::icons::regular::DICE_FIVE).on_hover_text("Surprise me").clicked() {
                                 let current = a.collar;
@@ -379,7 +379,7 @@ fn swatch(ui: &mut egui::Ui, c: [u8; 3], selected: bool) -> egui::Response {
     if selected {
         p.circle_stroke(rect.center(), 9.0, Stroke::new(2.0_f32, theme::accent()));
     } else if resp.hovered() {
-        p.circle_stroke(rect.center(), 9.0, Stroke::new(1.0_f32, theme::MUTED));
+        p.circle_stroke(rect.center(), 9.0, Stroke::new(1.0_f32, theme::MUTED()));
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -893,7 +893,7 @@ fn paint_dog(p: &egui::Painter, rect: egui::Rect, coat: &Coat, collar: Color32, 
                 let phase = ((t * 0.5 + i as f32 / 3.0) % 1.0).clamp(0.0, 1.0);
                 let pos = h.p(20.0 + phase * 9.0, -14.0 - phase * 14.0);
                 let alpha = (1.0 - phase) * (phase * 4.0).min(1.0);
-                p.text(pos, egui::Align2::CENTER_CENTER, "z", egui::FontId::proportional(h.r(8.0 + phase * 6.0)), theme::MUTED.gamma_multiply(alpha));
+                p.text(pos, egui::Align2::CENTER_CENTER, "z", egui::FontId::proportional(h.r(8.0 + phase * 6.0)), theme::MUTED().gamma_multiply(alpha));
             }
         }
         Emotion::Angry => {
@@ -906,7 +906,7 @@ fn paint_dog(p: &egui::Painter, rect: egui::Rect, coat: &Coat, collar: Color32, 
         }
         Emotion::Hungry => {
             let c = h.p(-30.0, -14.0);
-            let bubble = theme::HEADER.gamma_multiply(0.94);
+            let bubble = theme::HEADER().gamma_multiply(0.94);
             p.circle_filled(h.p(-19.0, -6.0), h.r(1.6), bubble);
             p.circle_filled(h.p(-22.5, -9.5), h.r(2.3), bubble);
             p.add(Shape::ellipse_filled(c, h.v(11.0, 7.5), bubble));
@@ -1002,7 +1002,7 @@ fn paint_alley(p: &egui::Painter, stage: egui::Rect, a: &Adoption, c: &Companion
                 for (k, y) in [-58.0f32, -40.0, -22.0].into_iter().enumerate() {
                     let wob = (t * 30.0 + k as f32).sin() * 2.0;
                     let from = origin + vec2(side * (34.0 + wob), y);
-                    p.line_segment([from, from + vec2(side * 7.0, -2.0 + k as f32 * 2.0)], Stroke::new(1.5_f32, theme::MUTED.gamma_multiply(0.8)));
+                    p.line_segment([from, from + vec2(side * 7.0, -2.0 + k as f32 * 2.0)], Stroke::new(1.5_f32, theme::MUTED().gamma_multiply(0.8)));
                 }
             }
         }
@@ -1030,7 +1030,7 @@ fn paint_alley(p: &egui::Painter, stage: egui::Rect, a: &Adoption, c: &Companion
             (0, _) => "Only rubbish in there. Listen... where does it rustle?",
             _ => "Something moved! Look again...",
         };
-        p.text(pos2(stage.center().x, stage.bottom() - 11.0), egui::Align2::CENTER_CENTER, hint, egui::FontId::proportional(12.0), theme::MUTED);
+        p.text(pos2(stage.center().x, stage.bottom() - 11.0), egui::Align2::CENTER_CENTER, hint, egui::FontId::proportional(12.0), theme::MUTED());
         return;
     }
 
@@ -1227,10 +1227,10 @@ impl RustTalkApp {
             card(ui, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new("No companion yet").size(18.0).strong().color(theme::HEADER));
+                    ui.label(egui::RichText::new("No companion yet").size(18.0).strong().color(theme::HEADER()));
                     ui.label(
                         egui::RichText::new("A little friend who sits above your user panel while you're connected and comes along to every server you visit.")
-                            .color(theme::MUTED),
+                            .color(theme::MUTED()),
                     );
                     ui.add_space(10.0);
                     if theme::primary_button(ui, &meet_label).clicked() {
@@ -1247,7 +1247,7 @@ impl RustTalkApp {
             ui.label(
                 egui::RichText::new("Drag across your companion to pet it, click to boop it, and use the bone button for snacks. It gets hungry over time and sleepy when ignored. Attention keeps it happy, and a happy companion bonds with you faster. All of that only counts while you're connected.")
                     .size(12.5)
-                    .color(theme::MUTED),
+                    .color(theme::MUTED()),
             );
         });
 
@@ -1261,18 +1261,18 @@ impl RustTalkApp {
             card(ui, |ui| {
                 ui.horizontal(|ui| {
                     let (rect, _) = ui.allocate_exact_size(vec2(96.0, 96.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 10.0, theme::DARK);
+                    ui.painter().rect_filled(rect, 10.0, theme::DARK());
                     let look = Look { emotion: if active { Emotion::Happy } else { Emotion::Content }, blink: false, hovered: false, now, eating: None };
                     paint_companion(ui.painter(), rect.shrink(4.0), &c, &look);
                     ui.vertical(|ui| {
                         let entry = self.companion.store.get_mut(id).expect("listed");
                         let r = ui.add(egui::TextEdit::singleline(&mut entry.name).char_limit(companion::MAX_NAME).desired_width(180.0).font(egui::TextStyle::Heading));
                         name_done = r.lost_focus();
-                        ui.label(egui::RichText::new(look_name(&c)).color(theme::MUTED));
+                        ui.label(egui::RichText::new(look_name(&c)).color(theme::MUTED()));
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 3.0;
-                            ui.label(egui::RichText::new("Collar").size(12.0).color(theme::MUTED));
+                            ui.label(egui::RichText::new("Collar").size(12.0).color(theme::MUTED()));
                             for col in companion::COLLARS {
                                 if swatch(ui, col, c.collar == col).clicked() {
                                     recolor = Some(col);
@@ -1295,7 +1295,7 @@ impl RustTalkApp {
                 ui.separator();
                 let (level, level_name, progress) = c.bond_level();
                 let hearts = super::icons::regular::HEART.repeat(level + 1);
-                meter(ui, "Happiness", None, c.happiness, if c.happiness < companion::SAD_BELOW { theme::MUTED } else { theme::GREEN })
+                meter(ui, "Happiness", None, c.happiness, if c.happiness < companion::SAD_BELOW { theme::MUTED() } else { theme::GREEN })
                     .on_hover_text("Petting and snacks make it happy. It sinks slowly when your companion gets no attention, faster when it's hungry.");
                 meter(ui, "Bond", Some(&format!("{hearts}  {level_name}")), progress, theme::accent())
                     .on_hover_text("Grows with the time you spend together - faster when your companion is happy - and with snacks. It never shrinks.");
@@ -1303,7 +1303,7 @@ impl RustTalkApp {
                 stat(ui, "Pets", &c.pets.to_string());
                 stat(ui, "Snacks", &c.snacks.to_string());
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Hunger").color(theme::HEADER));
+                    ui.label(egui::RichText::new("Hunger").color(theme::HEADER()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let fill = if c.hunger >= companion::HUNGRY_AT { theme::accent() } else { theme::GREEN };
                         ui.add(egui::ProgressBar::new(c.hunger).desired_width(160.0).fill(fill));
@@ -1344,7 +1344,7 @@ impl RustTalkApp {
         card(ui, |ui| {
             if self.companion.store.can_adopt() {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("There's room for another friend!").color(theme::HEADER));
+                    ui.label(egui::RichText::new("There's room for another friend!").color(theme::HEADER()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if theme::primary_button(ui, &meet_label).clicked() {
                             self.companion.start_adoption(Kind::Dog);
@@ -1353,7 +1353,7 @@ impl RustTalkApp {
                 });
             } else {
                 let left = companion::format_duration(self.companion.store.hours_to_next_slot() * 3600.0);
-                ui.label(egui::RichText::new(format!("{}  A new companion can join after {left} more together.", super::icons::regular::LOCK_SIMPLE)).color(theme::MUTED));
+                ui.label(egui::RichText::new(format!("{}  A new companion can join after {left} more together.", super::icons::regular::LOCK_SIMPLE)).color(theme::MUTED()));
             }
         });
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
@@ -1363,11 +1363,11 @@ impl RustTalkApp {
 /// A labeled bar (0..1), optionally with a note left of it.
 fn meter(ui: &mut egui::Ui, label: &str, note: Option<&str>, value: f32, fill: Color32) -> egui::Response {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(label).color(theme::HEADER));
+        ui.label(egui::RichText::new(label).color(theme::HEADER()));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add(egui::ProgressBar::new(value).desired_width(160.0).fill(fill));
             if let Some(note) = note {
-                ui.label(egui::RichText::new(note).color(theme::MUTED));
+                ui.label(egui::RichText::new(note).color(theme::MUTED()));
             }
         });
     })
@@ -1376,9 +1376,9 @@ fn meter(ui: &mut egui::Ui, label: &str, note: Option<&str>, value: f32, fill: C
 
 fn stat(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(label).color(theme::HEADER));
+        ui.label(egui::RichText::new(label).color(theme::HEADER()));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(egui::RichText::new(value).color(theme::MUTED));
+            ui.label(egui::RichText::new(value).color(theme::MUTED()));
         });
     });
 }

@@ -1,31 +1,171 @@
 //! Look & feel: colors, egui style and small shared widgets.
 //!
-//! Dark only (by design). Palette follows the familiar Discord-style
-//! layering: darkest = server/user bars, mid = sidebar, lightest = content.
+//! Three themes ([`UiTheme`]): Dark (default), Light and Obsidian (black
+//! for OLED screens: surfaces are pure black, layers are told apart by
+//! outlines). Layering follows the familiar Discord style: darkest =
+//! server/user bars, mid = sidebar, lightest = content (Light inverts the
+//! brightness, not the order). Surface and text colors are functions that
+//! read the current theme; status colors and the accent are the same in all.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use eframe::egui;
 
 use super::icons;
+pub use crate::config::UiTheme;
 
-pub const BG: egui::Color32 = egui::Color32::from_rgb(0x31, 0x33, 0x38);
-pub const SIDEBAR: egui::Color32 = egui::Color32::from_rgb(0x2B, 0x2D, 0x31);
-pub const DARK: egui::Color32 = egui::Color32::from_rgb(0x1E, 0x1F, 0x22);
-pub const PANEL: egui::Color32 = egui::Color32::from_rgb(0x23, 0x24, 0x28);
-pub const INPUT: egui::Color32 = egui::Color32::from_rgb(0x38, 0x3A, 0x40);
-pub const HOVER: egui::Color32 = egui::Color32::from_rgb(0x35, 0x37, 0x3C);
-pub const SELECTED: egui::Color32 = egui::Color32::from_rgb(0x40, 0x42, 0x49);
-pub const BORDER: egui::Color32 = egui::Color32::from_rgb(0x1F, 0x20, 0x23);
+/// Surface and text colors of one theme.
+pub struct Palette {
+    pub bg: egui::Color32,
+    pub sidebar: egui::Color32,
+    pub dark: egui::Color32,
+    pub panel: egui::Color32,
+    pub input: egui::Color32,
+    pub hover: egui::Color32,
+    pub selected: egui::Color32,
+    pub border: egui::Color32,
+    pub text: egui::Color32,
+    pub header: egui::Color32,
+    pub muted: egui::Color32,
+    pub disabled: egui::Color32,
+    /// Light theme: egui's light base style, darker overlays, softer shadows.
+    pub light: bool,
+    /// Surfaces all look the same (Obsidian): cards and frames get an outline.
+    pub outlined: bool,
+}
+
+const fn rgb(v: u32) -> egui::Color32 {
+    egui::Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
+}
+
+pub const DARK_PALETTE: Palette = Palette {
+    bg: rgb(0x313338),
+    sidebar: rgb(0x2B2D31),
+    dark: rgb(0x1E1F22),
+    panel: rgb(0x232428),
+    input: rgb(0x383A40),
+    hover: rgb(0x35373C),
+    selected: rgb(0x404249),
+    border: rgb(0x1F2023),
+    text: rgb(0xDBDEE1),
+    header: rgb(0xF2F3F5),
+    muted: rgb(0x949BA4),
+    disabled: rgb(0x5C6068),
+    light: false,
+    outlined: false,
+};
+
+pub const LIGHT_PALETTE: Palette = Palette {
+    bg: rgb(0xFFFFFF),
+    sidebar: rgb(0xF2F3F5),
+    dark: rgb(0xE3E5E8),
+    panel: rgb(0xEBEDEF),
+    input: rgb(0xE6E8EB),
+    hover: rgb(0xE3E5E8),
+    selected: rgb(0xD5D8DD),
+    border: rgb(0xD3D6DB),
+    text: rgb(0x2E3338),
+    header: rgb(0x060607),
+    muted: rgb(0x5C6470),
+    disabled: rgb(0xA3A9B1),
+    light: true,
+    outlined: false,
+};
+
+pub const OBSIDIAN_PALETTE: Palette = Palette {
+    bg: rgb(0x000000),
+    sidebar: rgb(0x000000),
+    dark: rgb(0x000000),
+    panel: rgb(0x000000),
+    input: rgb(0x111214),
+    hover: rgb(0x16171A),
+    selected: rgb(0x212226),
+    border: rgb(0x2E3036),
+    text: rgb(0xD6D9DD),
+    header: rgb(0xF2F3F5),
+    muted: rgb(0x8A9099),
+    disabled: rgb(0x50545B),
+    light: false,
+    outlined: true,
+};
+
+static THEME: AtomicU8 = AtomicU8::new(0);
+
+/// The theme in use.
+pub fn current() -> UiTheme {
+    match THEME.load(Ordering::Relaxed) {
+        1 => UiTheme::Light,
+        2 => UiTheme::Obsidian,
+        _ => UiTheme::Dark,
+    }
+}
+
+pub fn palette_of(theme: UiTheme) -> &'static Palette {
+    match theme {
+        UiTheme::Dark => &DARK_PALETTE,
+        UiTheme::Light => &LIGHT_PALETTE,
+        UiTheme::Obsidian => &OBSIDIAN_PALETTE,
+    }
+}
+
+/// Colors of the theme in use.
+pub fn palette() -> &'static Palette {
+    palette_of(current())
+}
+
+macro_rules! colors {
+    ($($name:ident => $field:ident),* $(,)?) => {
+        $(
+            #[allow(non_snake_case)]
+            #[inline]
+            pub fn $name() -> egui::Color32 {
+                palette().$field
+            }
+        )*
+    };
+}
+
+colors! {
+    BG => bg,
+    SIDEBAR => sidebar,
+    DARK => dark,
+    PANEL => panel,
+    INPUT => input,
+    HOVER => hover,
+    SELECTED => selected,
+    BORDER => border,
+    TEXT => text,
+    HEADER => header,
+    MUTED => muted,
+    DISABLED => disabled,
+}
+
+/// A soft highlight that shows on every surface of the theme (hover backgrounds).
+pub fn overlay(alpha: u8) -> egui::Color32 {
+    if palette().light {
+        egui::Color32::from_black_alpha(alpha)
+    } else {
+        egui::Color32::from_white_alpha(alpha)
+    }
+}
+
+/// Outline for cards and frames: only themes whose surfaces look alike need one.
+pub fn outline() -> egui::Stroke {
+    if palette().outlined {
+        egui::Stroke::new(1.0_f32, BORDER())
+    } else {
+        egui::Stroke::NONE
+    }
+}
+
+/// Near-black text on light fills (same in every theme).
+const INK: egui::Color32 = rgb(0x1E1F22);
+
 /// Fixed blurple, for things that must not follow the user's primary color (role badges).
 pub const BLURPLE: egui::Color32 = egui::Color32::from_rgb(0x58, 0x65, 0xF2);
 pub const GREEN: egui::Color32 = egui::Color32::from_rgb(0x23, 0xA5, 0x5A);
 pub const RED: egui::Color32 = egui::Color32::from_rgb(0xF2, 0x3F, 0x43);
 pub const YELLOW: egui::Color32 = egui::Color32::from_rgb(0xF0, 0xB2, 0x32);
-pub const TEXT: egui::Color32 = egui::Color32::from_rgb(0xDB, 0xDE, 0xE1);
-pub const HEADER: egui::Color32 = egui::Color32::from_rgb(0xF2, 0xF3, 0xF5);
-pub const MUTED: egui::Color32 = egui::Color32::from_rgb(0x94, 0x9B, 0xA4);
-pub const DISABLED: egui::Color32 = egui::Color32::from_rgb(0x5C, 0x60, 0x68);
 
 /// Avatar palette (name -> deterministic color).
 pub const AVATAR_PALETTE: [egui::Color32; 8] = [
@@ -41,6 +181,7 @@ pub const AVATAR_PALETTE: [egui::Color32; 8] = [
 
 /// Preset primary colors for the appearance settings.
 pub const ACCENT_PRESETS: [(&str, [u8; 3]); 8] = [
+    ("Rust", [0xB7, 0x41, 0x0E]),
     ("Blurple", [0x58, 0x65, 0xF2]),
     ("Green", [0x23, 0xA5, 0x5A]),
     ("Teal", [0x1F, 0xA0, 0x92]),
@@ -48,10 +189,9 @@ pub const ACCENT_PRESETS: [(&str, [u8; 3]); 8] = [
     ("Purple", [0x9B, 0x59, 0xD9]),
     ("Pink", [0xEB, 0x45, 0x95]),
     ("Red", [0xE0, 0x3E, 0x3E]),
-    ("Orange", [0xE0, 0x6C, 0x18]),
 ];
 
-static ACCENT: AtomicU32 = AtomicU32::new(0x5865F2);
+static ACCENT: AtomicU32 = AtomicU32::new(0xB7410E);
 static COMPACT: AtomicBool = AtomicBool::new(false);
 
 /// The user's primary color.
@@ -68,7 +208,7 @@ pub fn on_accent() -> egui::Color32 {
 fn on_color(c: egui::Color32) -> egui::Color32 {
     let lum = 0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32;
     if lum > 165.0 {
-        DARK
+        INK
     } else {
         egui::Color32::WHITE
     }
@@ -88,8 +228,9 @@ pub fn dense(cozy: f32, compact: f32) -> f32 {
     }
 }
 
-/// Set primary color and density, then restyle egui.
-pub fn set_appearance(ctx: &egui::Context, accent: [u8; 3], compact: bool) {
+/// Set theme, primary color and density, then restyle egui.
+pub fn set_appearance(ctx: &egui::Context, theme: UiTheme, accent: [u8; 3], compact: bool) {
+    THEME.store(theme as u8, Ordering::Relaxed);
     let [r, g, b] = accent;
     ACCENT.store(u32::from_be_bytes([0, r, g, b]), Ordering::Relaxed);
     COMPACT.store(compact, Ordering::Relaxed);
@@ -99,54 +240,56 @@ pub fn set_appearance(ctx: &egui::Context, accent: [u8; 3], compact: bool) {
 /// Global egui style from the current appearance.
 pub fn apply(ctx: &egui::Context) {
     let accent = accent();
-    let mut v = egui::Visuals::dark();
-    v.panel_fill = BG;
-    v.window_fill = BG;
-    v.extreme_bg_color = INPUT;
-    v.faint_bg_color = SIDEBAR;
-    v.code_bg_color = DARK;
+    let pal = palette();
+    let mut v = if pal.light { egui::Visuals::light() } else { egui::Visuals::dark() };
+    let shadow = if pal.light { 0.35 } else { 1.0 };
+    v.panel_fill = BG();
+    v.window_fill = BG();
+    v.extreme_bg_color = INPUT();
+    v.faint_bg_color = SIDEBAR();
+    v.code_bg_color = DARK();
     v.hyperlink_color = accent;
     v.selection.bg_fill = accent.linear_multiply(0.6);
-    v.selection.stroke = egui::Stroke::new(1.0_f32, HEADER);
+    v.selection.stroke = egui::Stroke::new(1.0_f32, HEADER());
     v.window_corner_radius = egui::CornerRadius::same(10);
     v.menu_corner_radius = egui::CornerRadius::same(8);
-    v.window_stroke = egui::Stroke::new(1.0_f32, BORDER);
+    v.window_stroke = egui::Stroke::new(1.0_f32, BORDER());
     v.window_shadow = egui::epaint::Shadow {
         offset: [0, 6],
         blur: 24,
         spread: 0,
-        color: egui::Color32::from_black_alpha(140),
+        color: egui::Color32::from_black_alpha((140.0 * shadow) as u8),
     };
     v.popup_shadow = egui::epaint::Shadow {
         offset: [0, 4],
         blur: 14,
         spread: 0,
-        color: egui::Color32::from_black_alpha(120),
+        color: egui::Color32::from_black_alpha((120.0 * shadow) as u8),
     };
 
     let w = &mut v.widgets;
     let r = egui::CornerRadius::same(6);
-    w.noninteractive.bg_fill = SIDEBAR;
-    w.noninteractive.weak_bg_fill = SIDEBAR;
-    w.noninteractive.fg_stroke.color = TEXT;
-    w.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, BORDER);
+    w.noninteractive.bg_fill = SIDEBAR();
+    w.noninteractive.weak_bg_fill = SIDEBAR();
+    w.noninteractive.fg_stroke.color = TEXT();
+    w.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, BORDER());
     w.noninteractive.corner_radius = r;
-    w.inactive.bg_fill = INPUT;
-    w.inactive.weak_bg_fill = INPUT;
-    w.inactive.fg_stroke.color = TEXT;
+    w.inactive.bg_fill = INPUT();
+    w.inactive.weak_bg_fill = INPUT();
+    w.inactive.fg_stroke.color = TEXT();
     w.inactive.bg_stroke = egui::Stroke::NONE;
     w.inactive.corner_radius = r;
-    w.hovered.bg_fill = SELECTED;
-    w.hovered.weak_bg_fill = SELECTED;
-    w.hovered.fg_stroke.color = HEADER;
+    w.hovered.bg_fill = SELECTED();
+    w.hovered.weak_bg_fill = SELECTED();
+    w.hovered.fg_stroke.color = HEADER();
     w.hovered.bg_stroke = egui::Stroke::NONE;
     w.hovered.corner_radius = r;
     w.active.bg_fill = accent;
     w.active.weak_bg_fill = accent;
     w.active.fg_stroke.color = on_color(accent);
     w.active.corner_radius = r;
-    w.open.bg_fill = SELECTED;
-    w.open.weak_bg_fill = SELECTED;
+    w.open.bg_fill = SELECTED();
+    w.open.weak_bg_fill = SELECTED();
     w.open.corner_radius = r;
     ctx.set_visuals(v);
 
@@ -207,7 +350,7 @@ pub fn paint_avatar(painter: &egui::Painter, rect: egui::Rect, name: &str, talki
 pub fn draw_talk_dot(ui: &egui::Ui, avatar: egui::Rect) {
     let r = (avatar.width() * 0.16).max(4.0);
     let c = avatar.right_bottom() - egui::vec2(r * 0.6, r * 0.6);
-    ui.painter().circle_filled(c, r + 2.0, DARK);
+    ui.painter().circle_filled(c, r + 2.0, DARK());
     ui.painter().circle_filled(c, r, GREEN);
 }
 
@@ -223,10 +366,10 @@ pub enum IconState {
 
 pub fn icon_button(ui: &mut egui::Ui, icon: &str, state: IconState, tooltip: &str) -> egui::Response {
     let (fg, bg) = match state {
-        IconState::Normal => (TEXT, egui::Color32::TRANSPARENT),
+        IconState::Normal => (TEXT(), egui::Color32::TRANSPARENT),
         IconState::Active => (egui::Color32::WHITE, GREEN),
         IconState::Danger => (RED, egui::Color32::TRANSPARENT),
-        IconState::Disabled => (DISABLED, egui::Color32::TRANSPARENT),
+        IconState::Disabled => (DISABLED(), egui::Color32::TRANSPARENT),
     };
     let hover_bg = ui.painter().add(egui::Shape::Noop);
     let btn = egui::Button::new(egui::RichText::new(icon).size(18.0).color(fg))
@@ -235,7 +378,7 @@ pub fn icon_button(ui: &mut egui::Ui, icon: &str, state: IconState, tooltip: &st
     let resp = ui.add_enabled(state != IconState::Disabled, btn);
     // Transparent buttons get no hover fill from egui; paint one (red tint for Danger).
     if resp.hovered() && matches!(state, IconState::Normal | IconState::Danger) {
-        let fill = if state == IconState::Danger { RED.gamma_multiply(0.18) } else { egui::Color32::from_white_alpha(14) };
+        let fill = if state == IconState::Danger { RED.gamma_multiply(0.18) } else { overlay(14) };
         ui.painter().set(hover_bg, egui::Shape::rect_filled(resp.rect, 6.0, fill));
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tooltip).on_disabled_hover_text(tooltip)
@@ -259,13 +402,13 @@ pub fn menu_item(ui: &mut egui::Ui, icon: &str, label: &str, danger: bool) -> eg
     let hovered = enabled && resp.hovered();
     let (fill, hover_fg) = if danger { (RED, egui::Color32::WHITE) } else { (accent(), on_accent()) };
     let fg = if !enabled {
-        DISABLED
+        DISABLED()
     } else if hovered {
         hover_fg
     } else if danger {
         RED
     } else {
-        TEXT
+        TEXT()
     };
     let p = ui.painter();
     if hovered {
@@ -282,7 +425,7 @@ pub fn menu_separator(ui: &mut egui::Ui) {
     ui.painter().hline(
         (rect.left() + 6.0)..=(rect.right() - 6.0),
         rect.center().y,
-        egui::Stroke::new(1.0_f32, SELECTED),
+        egui::Stroke::new(1.0_f32, SELECTED()),
     );
 }
 
@@ -295,10 +438,10 @@ pub fn dialog_window(id: &'static str) -> egui::Window<'static> {
 /// Compact title row with a close button, and a separator below it.
 pub fn dialog_header(ui: &mut egui::Ui, title: &str, open: &mut bool) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(title).size(15.0).strong().color(HEADER));
+        ui.label(egui::RichText::new(title).size(15.0).strong().color(HEADER()));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let close = ui
-                .add(egui::Button::new(egui::RichText::new(icons::regular::X).color(MUTED)).frame(false))
+                .add(egui::Button::new(egui::RichText::new(icons::regular::X).color(MUTED())).frame(false))
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text("Close");
             if close.clicked() {
@@ -325,8 +468,8 @@ pub fn ghost_button_sized(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>, 
     let bg = ui.painter().add(egui::Shape::Noop);
     let resp = ui.add(egui::Button::new(text).frame(false).min_size(min));
     if resp.hovered() && ui.is_enabled() {
-        // Light overlay: visible on every panel shade (a fixed HOVER vanishes on INPUT).
-        ui.painter().set(bg, egui::Shape::rect_filled(resp.rect.expand(2.0), 6.0, egui::Color32::from_white_alpha(14)));
+        // Overlay: visible on every panel shade (a fixed HOVER vanishes on INPUT).
+        ui.painter().set(bg, egui::Shape::rect_filled(resp.rect.expand(2.0), 6.0, overlay(14)));
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -365,21 +508,22 @@ pub fn wip_banner(ui: &mut egui::Ui, text: &str) {
             ui.set_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
                 ui.label(egui::RichText::new(icons::regular::WRENCH).color(YELLOW));
-                ui.label(egui::RichText::new(text).color(HEADER));
+                ui.label(egui::RichText::new(text).color(HEADER()));
             });
         });
 }
 
 /// Uppercase small caption (section label).
 pub fn caption(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text.to_uppercase()).size(11.5).strong().color(MUTED));
+    ui.label(egui::RichText::new(text.to_uppercase()).size(11.5).strong().color(MUTED()));
 }
 
 /// Card container for settings sections.
 pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::Frame::default()
-        .fill(SIDEBAR)
+        .fill(SIDEBAR())
         .corner_radius(8.0)
+        .stroke(outline())
         .inner_margin(egui::Margin::same(14))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -432,7 +576,7 @@ pub fn setting_row(
     text.spacing_mut().item_spacing.y = 2.0;
     let line_h = text.text_style_height(&egui::TextStyle::Body);
     text.add_space(((row_h - line_h) / 2.0).max(0.0));
-    let title = egui::RichText::new(label).size(14.5).color(if enabled { HEADER } else { MUTED });
+    let title = egui::RichText::new(label).size(14.5).color(if enabled { HEADER() } else { MUTED() });
     if wip {
         text.horizontal(|ui| {
             ui.label(title);
@@ -442,7 +586,7 @@ pub fn setting_row(
         text.label(title);
     }
     if let Some(d) = desc {
-        text.label(egui::RichText::new(d).size(12.5).color(if enabled { MUTED } else { DISABLED }));
+        text.label(egui::RichText::new(d).size(12.5).color(if enabled { MUTED() } else { DISABLED() }));
     }
 
     let bottom = text.min_rect().bottom().max(ctrl_rect.bottom()).max(top.y + row_h);
@@ -461,7 +605,7 @@ pub fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     let t = ui.ctx().animate_bool_responsive(resp.id, *on);
     let enabled = ui.is_enabled();
     let bg = if !enabled {
-        DISABLED
+        DISABLED()
     } else if *on {
         accent()
     } else {
@@ -481,7 +625,7 @@ pub fn mic_meter(ui: &mut egui::Ui, level: f32, threshold: f32) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 12.0), egui::Sense::hover());
     let p = ui.painter();
-    p.rect_filled(rect, 6.0, DARK);
+    p.rect_filled(rect, 6.0, DARK());
     let lw = rect.width() * scale(level);
     if lw >= 6.0 {
         let fill = egui::Rect::from_min_size(rect.min, egui::vec2(lw, rect.height()));
@@ -517,8 +661,8 @@ pub fn toast(ctx: &egui::Context, text: &str, age_secs: f32, is_error: bool) {
         .interactable(false)
         .show(ctx, |ui| {
             egui::Frame::default()
-                .fill(DARK.linear_multiply(alpha))
-                .stroke(egui::Stroke::new(1.0_f32, if is_error { RED } else { BORDER }.linear_multiply(alpha)))
+                .fill(DARK().linear_multiply(alpha))
+                .stroke(egui::Stroke::new(1.0_f32, if is_error { RED } else { BORDER() }.linear_multiply(alpha)))
                 .corner_radius(8.0)
                 .inner_margin(egui::Margin::symmetric(12, 8))
                 .show(ui, |ui| {
@@ -527,7 +671,7 @@ pub fn toast(ctx: &egui::Context, text: &str, age_secs: f32, is_error: bool) {
                     let color = if is_error { RED } else { accent() };
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(icon).color(color.linear_multiply(alpha)));
-                        ui.label(egui::RichText::new(text).color(HEADER.linear_multiply(alpha)));
+                        ui.label(egui::RichText::new(text).color(HEADER().linear_multiply(alpha)));
                     });
                 });
         });
@@ -567,7 +711,7 @@ mod tests {
     #[test]
     fn text_on_accent_is_readable() {
         assert_eq!(on_color(BLURPLE), egui::Color32::WHITE);
-        assert_eq!(on_color(egui::Color32::from_rgb(0xF0, 0xE0, 0x40)), DARK);
+        assert_eq!(on_color(egui::Color32::from_rgb(0xF0, 0xE0, 0x40)), INK);
     }
 
     #[test]
@@ -598,7 +742,7 @@ pub(super) fn share_popup(
                 ui.set_width(width.min((ctx.screen_rect().width() - 32.0).max(160.0)));
                 ui.spacing_mut().item_spacing.y = 4.0;
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(title).strong().color(HEADER));
+                    ui.label(egui::RichText::new(title).strong().color(HEADER()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         close = ui.small_button(icons::regular::X).on_hover_text("Close").clicked();
                     });

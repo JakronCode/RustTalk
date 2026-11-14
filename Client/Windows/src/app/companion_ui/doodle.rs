@@ -367,7 +367,7 @@ pub fn paint(p: &egui::Painter, rect: egui::Rect, coat: u8, collar: Color32, gen
                 let phase = ((t * 0.5 + i as f32 / 3.0) % 1.0).clamp(0.0, 1.0);
                 let pos = g.p(26.0 + phase * 9.0, -22.0 - phase * 14.0);
                 let alpha = (1.0 - phase) * (phase * 4.0).min(1.0);
-                p.text(pos, egui::Align2::CENTER_CENTER, "z", egui::FontId::proportional(g.r(9.0 + phase * 6.0)), super::theme::MUTED.gamma_multiply(alpha));
+                p.text(pos, egui::Align2::CENTER_CENTER, "z", egui::FontId::proportional(g.r(9.0 + phase * 6.0)), super::theme::MUTED().gamma_multiply(alpha));
             }
         }
         Emotion::Angry => {
@@ -380,7 +380,7 @@ pub fn paint(p: &egui::Painter, rect: egui::Rect, coat: u8, collar: Color32, gen
         }
         Emotion::Hungry => {
             let c = g.p(-33.0, -30.0);
-            let bubble = super::theme::HEADER.gamma_multiply(0.94);
+            let bubble = super::theme::HEADER().gamma_multiply(0.94);
             p.circle_filled(g.p(-22.0, -19.0), g.r(1.8), bubble);
             p.circle_filled(g.p(-26.0, -23.5), g.r(2.6), bubble);
             p.add(Shape::ellipse_filled(c, g.v(12.0, 8.5), bubble));
@@ -427,5 +427,5 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
 
 /// Color of the drawn edge where there is no panel to lean on.
 fn theme_edge() -> Color32 {
-    super::theme::MUTED.gamma_multiply(0.6)
+    super::theme::MUTED().gamma_multiply(0.6)
 }

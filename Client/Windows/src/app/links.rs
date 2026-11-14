@@ -684,18 +684,18 @@ pub(super) fn prompt_ui(
     let mut choice = None;
     let width = (ctx.screen_rect().width() - 48.0).clamp(200.0, 520.0);
     let modal = egui::Modal::new(egui::Id::new("link_prompt"))
-        .frame(egui::Frame::default().fill(theme::BG).corner_radius(10.0).inner_margin(egui::Margin::same(20)))
+        .frame(egui::Frame::default().fill(theme::BG()).corner_radius(10.0).inner_margin(egui::Margin::same(20)))
         .show(ctx, |ui| {
             ui.set_width(width);
             ui.spacing_mut().item_spacing.y = 8.0;
-            ui.label(egui::RichText::new("Open external link?").strong().size(16.0).color(theme::HEADER));
+            ui.label(egui::RichText::new("Open external link?").strong().size(16.0).color(theme::HEADER()));
             ui.add(egui::Label::new("This leaves RustTalk and opens the address below in your web browser.").wrap());
             ui.horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new("Site").color(theme::MUTED));
-                ui.label(egui::RichText::new(display_host(&p.url)).strong().size(15.0).color(theme::HEADER));
+                ui.label(egui::RichText::new("Site").color(theme::MUTED()));
+                ui.label(egui::RichText::new(display_host(&p.url)).strong().size(15.0).color(theme::HEADER()));
             });
-            ui.label(egui::RichText::new("Full address").color(theme::MUTED));
-            egui::Frame::new().fill(theme::DARK).corner_radius(4.0).inner_margin(8.0).show(ui, |ui| {
+            ui.label(egui::RichText::new("Full address").color(theme::MUTED()));
+            egui::Frame::new().fill(theme::DARK()).corner_radius(4.0).inner_margin(8.0).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
                     ui.add(egui::Label::new(egui::RichText::new(p.url.as_str()).monospace().size(12.5)).wrap());
@@ -718,7 +718,7 @@ pub(super) fn prompt_ui(
                 } else {
                     status
                 };
-                ui.add(egui::Label::new(egui::RichText::new(note).size(12.0).color(theme::MUTED)).wrap());
+                ui.add(egui::Label::new(egui::RichText::new(note).size(12.0).color(theme::MUTED())).wrap());
             }
             if p.needs_ack() {
                 ui.checkbox(&mut p.acknowledged, "I understand this address was reported as malicious");

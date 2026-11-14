@@ -10,7 +10,7 @@ impl RustTalkApp {
         match id {
             SectionId::Profile => self.section_profile(ui),
             SectionId::SavedServers => self.section_saved_servers(ui),
-            SectionId::Theme => section_theme(ui),
+            SectionId::Theme => self.section_theme(ui),
             SectionId::PrimaryColor => self.section_primary_color(ui),
             SectionId::Density => self.section_density(ui),
             SectionId::Scaling => self.section_scaling(ui),
@@ -53,7 +53,7 @@ impl RustTalkApp {
 
     fn section_profile(&mut self, ui: &mut egui::Ui) {
         egui::Frame::default()
-            .fill(theme::SIDEBAR)
+            .fill(theme::SIDEBAR())
             .corner_radius(8.0)
             .inner_margin(egui::Margin::same(dense(16.0, 12.0) as i8))
             .show(ui, |ui| {
@@ -66,11 +66,11 @@ impl RustTalkApp {
                             egui::RichText::new(&self.config.username)
                                 .size(20.0)
                                 .strong()
-                                .color(theme::HEADER),
+                                .color(theme::HEADER()),
                         );
                         ui.label(
                             egui::RichText::new("Avatar color is generated from your name")
-                                .color(theme::MUTED),
+                                .color(theme::MUTED()),
                         );
                         ui.horizontal(|ui| {
                             ui.add_enabled(
@@ -159,7 +159,7 @@ impl RustTalkApp {
                 accent_swatch(ui, name, rgb, &mut self.config.accent_color);
             }
             ui.add_space(8.0);
-            ui.label(egui::RichText::new("Custom").color(theme::MUTED));
+            ui.label(egui::RichText::new("Custom").color(theme::MUTED()));
             ui.color_edit_button_srgb(&mut self.config.accent_color)
                 .on_hover_text("Pick any color");
             if self.config.accent_color != crate::config::DEFAULT_ACCENT
@@ -169,7 +169,7 @@ impl RustTalkApp {
             }
         });
         if before != self.config.accent_color {
-            theme::set_appearance(ui.ctx(), self.config.accent_color, self.config.compact);
+            theme::set_appearance(ui.ctx(), self.config.theme, self.config.accent_color, self.config.compact);
         }
     }
 
@@ -195,7 +195,7 @@ impl RustTalkApp {
         });
         if compact != self.config.compact {
             self.config.compact = compact;
-            theme::set_appearance(ui.ctx(), self.config.accent_color, compact);
+            theme::set_appearance(ui.ctx(), self.config.theme, self.config.accent_color, compact);
         }
     }
 
@@ -904,7 +904,7 @@ impl RustTalkApp {
                 egui::RichText::new(format!("Server fingerprint: {}", self.srv.server_fingerprint))
                     .monospace()
                     .size(11.0)
-                    .color(theme::MUTED),
+                    .color(theme::MUTED()),
             );
             ui.add_space(dense(8.0, 4.0));
         }
@@ -925,7 +925,7 @@ impl RustTalkApp {
                 {
                     forget = Some(addr.clone());
                 }
-                ui.label(egui::RichText::new(icons::regular::FINGERPRINT).color(theme::MUTED))
+                ui.label(egui::RichText::new(icons::regular::FINGERPRINT).color(theme::MUTED()))
                     .on_hover_text(fp);
             });
         }
@@ -966,14 +966,14 @@ impl RustTalkApp {
         }
 
         ui.add_space(dense(12.0, 8.0));
-        ui.label(egui::RichText::new("Threat feed (optional)").strong().color(theme::HEADER));
+        ui.label(egui::RichText::new("Threat feed (optional)").strong().color(theme::HEADER()));
         hint(ui, "Import a list of known malicious web addresses that you downloaded yourself, for example the URLhaus plain-text URL list or hostfile (free account and Auth-Key at auth.abuse.ch, not-for-profit use; commercial use may need a Spamhaus subscription). RustTalk only reads the file on this computer: it never sends chat links anywhere and never downloads the feed. Plain URL lists, hosts files and URLhaus CSV are understood; at most 32 MiB.");
         hint(ui, "A link that is not on the list is not necessarily safe. New threats appear before any list has them.");
         let status = self.threat_feed.status(now);
         let color = match self.threat_feed {
             links::FeedState::Failed(_) => theme::RED,
-            links::FeedState::Ready(_) => theme::TEXT,
-            links::FeedState::Off => theme::MUTED,
+            links::FeedState::Ready(_) => theme::TEXT(),
+            links::FeedState::Off => theme::MUTED(),
         };
         ui.add(egui::Label::new(egui::RichText::new(status).color(color)).wrap());
         ui.horizontal_wrapped(|ui| {
@@ -1008,27 +1008,22 @@ impl RustTalkApp {
 
 // ----- sections without app state ------------------------------------------
 
-fn section_theme(ui: &mut egui::Ui) {
-    hint(ui, "Only the dark theme is available for now.");
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        theme_swatch(ui, "Dark", theme::BG, true, true);
-        theme_swatch(
-            ui,
-            "Light",
-            egui::Color32::from_rgb(0xF2, 0xF3, 0xF5),
-            false,
-            false,
-        );
-        theme_swatch(
-            ui,
-            "Midnight",
-            egui::Color32::from_rgb(0x0B, 0x0C, 0x0E),
-            false,
-            false,
-        );
-        theme::wip_badge(ui);
-    });
+impl RustTalkApp {
+    fn section_theme(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            for (t, name, hint) in [
+                (theme::UiTheme::Dark, "Dark", "The classic dark theme"),
+                (theme::UiTheme::Light, "Light", "Bright and clean"),
+                (theme::UiTheme::Obsidian, "Obsidian", "Pure black for OLED screens - only outlines and your primary color light up"),
+            ] {
+                if theme_swatch(ui, name, theme::palette_of(t), self.config.theme == t).on_hover_text(hint).clicked() && self.config.theme != t {
+                    self.config.theme = t;
+                    theme::set_appearance(ui.ctx(), t, self.config.accent_color, self.config.compact);
+                }
+            }
+        });
+    }
 }
 
 fn section_codec(ui: &mut egui::Ui) {
@@ -1105,7 +1100,7 @@ fn section_developer(ui: &mut egui::Ui) {
 
 fn section_version(ui: &mut egui::Ui) {
     egui::Frame::default()
-        .fill(theme::SIDEBAR)
+        .fill(theme::SIDEBAR())
         .corner_radius(8.0)
         .inner_margin(egui::Margin::same(dense(16.0, 10.0) as i8))
         .show(ui, |ui| {
@@ -1116,11 +1111,11 @@ fn section_version(ui: &mut egui::Ui) {
                     egui::RichText::new("RustTalk")
                         .size(26.0)
                         .strong()
-                        .color(theme::HEADER),
+                        .color(theme::HEADER()),
                 );
                 ui.label(
                     egui::RichText::new("Lightweight voice chat. Local first. No accounts.")
-                        .color(theme::MUTED),
+                        .color(theme::MUTED()),
                 );
             });
         });
@@ -1136,7 +1131,7 @@ fn section_version(ui: &mut egui::Ui) {
         ("UI", "egui + Phosphor icons".to_string()),
     ] {
         setting_row(ui, k, None, false, |ui| {
-            ui.label(egui::RichText::new(v).color(theme::TEXT));
+            ui.label(egui::RichText::new(v).color(theme::TEXT()));
         });
     }
 }
@@ -1160,7 +1155,7 @@ fn section_feedback(ui: &mut egui::Ui) {
 
 /// Muted explanatory text under a section heading.
 fn hint(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text).size(13.0).color(theme::MUTED));
+    ui.label(egui::RichText::new(text).size(13.0).color(theme::MUTED()));
 }
 
 fn device_combo(ui: &mut egui::Ui, id: &str, selected: &mut Option<String>, devices: &[String]) {
@@ -1195,7 +1190,7 @@ fn accent_swatch(ui: &mut egui::Ui, name: &str, rgb: [u8; 3], current: &mut [u8;
         p.circle_stroke(
             rect.center(),
             13.5,
-            egui::Stroke::new(2.0_f32, theme::HEADER),
+            egui::Stroke::new(2.0_f32, theme::HEADER()),
         );
         p.text(
             rect.center(),
@@ -1208,7 +1203,7 @@ fn accent_swatch(ui: &mut egui::Ui, name: &str, rgb: [u8; 3], current: &mut [u8;
         p.circle_stroke(
             rect.center(),
             13.5,
-            egui::Stroke::new(1.5_f32, theme::MUTED),
+            egui::Stroke::new(1.5_f32, theme::MUTED()),
         );
     }
     if resp
@@ -1230,11 +1225,11 @@ fn mode_card(ui: &mut egui::Ui, value: &mut bool, this: bool, icon: &str, title:
         rect,
         8.0,
         if selected {
-            theme::SELECTED
+            theme::SELECTED()
         } else if resp.hovered() {
-            theme::HOVER
+            theme::HOVER()
         } else {
-            theme::SIDEBAR
+            theme::SIDEBAR()
         },
     );
     if selected {
@@ -1254,7 +1249,7 @@ fn mode_card(ui: &mut egui::Ui, value: &mut bool, this: bool, icon: &str, title:
         if selected {
             theme::accent()
         } else {
-            theme::MUTED
+            theme::MUTED()
         },
     );
     p.text(
@@ -1262,14 +1257,14 @@ fn mode_card(ui: &mut egui::Ui, value: &mut bool, this: bool, icon: &str, title:
         egui::Align2::LEFT_BOTTOM,
         title,
         egui::FontId::proportional(14.5),
-        theme::HEADER,
+        theme::HEADER(),
     );
     p.text(
         egui::pos2(rect.left() + 40.0, mid + 2.0),
         egui::Align2::LEFT_TOP,
         desc,
         egui::FontId::proportional(12.0),
-        theme::MUTED,
+        theme::MUTED(),
     );
     if resp
         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -1279,36 +1274,46 @@ fn mode_card(ui: &mut egui::Ui, value: &mut bool, this: bool, icon: &str, title:
     }
 }
 
-fn theme_swatch(
-    ui: &mut egui::Ui,
-    name: &str,
-    color: egui::Color32,
-    selected: bool,
-    enabled: bool,
-) {
+/// A clickable miniature of a theme: sidebar, content, a message and a button.
+fn theme_swatch(ui: &mut egui::Ui, name: &str, pal: &theme::Palette, selected: bool) -> egui::Response {
     ui.vertical(|ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(64.0, 44.0), egui::Sense::hover());
-        ui.painter().rect_filled(rect, 8.0, color);
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(96.0, 64.0), egui::Sense::click());
+        let p = ui.painter();
+        p.rect_filled(rect, 8.0, pal.bg);
+        let side = egui::Rect::from_min_max(rect.min, egui::pos2(rect.left() + 28.0, rect.bottom()));
+        p.rect_filled(side, egui::CornerRadius { nw: 8, sw: 8, ne: 0, se: 0 }, pal.sidebar);
+        if pal.outlined {
+            p.line_segment([side.right_top(), side.right_bottom()], egui::Stroke::new(1.0_f32, pal.border));
+        }
+        for i in 0..3 {
+            let y = rect.top() + 12.0 + i as f32 * 9.0;
+            let c = if i == 0 { pal.selected } else { pal.muted.gamma_multiply(0.5) };
+            p.rect_filled(egui::Rect::from_min_size(egui::pos2(side.left() + 5.0, y), egui::vec2(18.0, 4.0)), 2.0, c);
+        }
+        let x = side.right() + 8.0;
+        p.circle_filled(egui::pos2(x + 5.0, rect.top() + 15.0), 5.0, theme::accent());
+        p.rect_filled(egui::Rect::from_min_size(egui::pos2(x + 14.0, rect.top() + 11.0), egui::vec2(30.0, 3.5)), 2.0, pal.header);
+        p.rect_filled(egui::Rect::from_min_size(egui::pos2(x + 14.0, rect.top() + 17.0), egui::vec2(40.0, 3.0)), 2.0, pal.muted);
+        let input = egui::Rect::from_min_max(egui::pos2(x, rect.bottom() - 16.0), egui::pos2(rect.right() - 8.0, rect.bottom() - 7.0));
+        p.rect_filled(input, 3.0, pal.input);
+        if pal.outlined {
+            p.rect_stroke(input, 3.0, egui::Stroke::new(1.0_f32, pal.border), egui::StrokeKind::Inside);
+        }
+        p.rect_filled(egui::Rect::from_min_size(egui::pos2(input.right() - 14.0, input.top() + 2.0), egui::vec2(10.0, 5.0)), 2.0, theme::accent());
         let stroke = if selected {
             egui::Stroke::new(2.0_f32, theme::accent())
+        } else if resp.hovered() {
+            egui::Stroke::new(1.5_f32, theme::MUTED())
         } else {
-            egui::Stroke::new(1.0_f32, theme::BORDER)
+            egui::Stroke::new(1.0_f32, theme::BORDER())
         };
-        ui.painter()
-            .rect_stroke(rect, 8.0, stroke, egui::StrokeKind::Inside);
+        p.rect_stroke(rect, 8.0, stroke, egui::StrokeKind::Inside);
         if selected {
-            ui.painter().text(
-                rect.right_top() + egui::vec2(-10.0, 10.0),
-                egui::Align2::CENTER_CENTER,
-                icons::regular::CHECK_CIRCLE,
-                egui::FontId::proportional(14.0),
-                theme::accent(),
-            );
+            p.circle_filled(rect.right_top() + egui::vec2(-11.0, 11.0), 7.0, pal.bg);
+            p.text(rect.right_top() + egui::vec2(-11.0, 11.0), egui::Align2::CENTER_CENTER, icons::regular::CHECK_CIRCLE, egui::FontId::proportional(15.0), theme::accent());
         }
-        ui.label(egui::RichText::new(name).size(12.0).color(if enabled {
-            theme::HEADER
-        } else {
-            theme::DISABLED
-        }));
-    });
+        let label = ui.label(egui::RichText::new(name).size(12.5).color(if selected { theme::HEADER() } else { theme::MUTED() }));
+        resp.union(label).on_hover_cursor(egui::CursorIcon::PointingHand)
+    })
+    .inner
 }

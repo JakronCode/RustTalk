@@ -187,7 +187,7 @@ fn connection_panel_is_readable_and_scrolls_inside_the_window() {
         );
         // Ping graph and stats are on screen at full width.
         let graph = out.shapes.iter().find_map(|c| match &c.shape {
-            Shape::Rect(r) if r.fill == theme::DARK && r.rect.height() >= 100.0 => Some(r.rect),
+            Shape::Rect(r) if r.fill == theme::DARK() && r.rect.height() >= 100.0 => Some(r.rect),
             _ => None,
         });
         let graph = graph.expect("ping graph painted");

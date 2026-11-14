@@ -83,38 +83,38 @@ impl RustTalkApp {
         let mut close = false;
         let mut confirm = false;
         let response = egui::Modal::new(egui::Id::new("update_dialog"))
-            .frame(egui::Frame::default().fill(theme::BG).corner_radius(10.0).inner_margin(egui::Margin::same(20)))
+            .frame(egui::Frame::default().fill(theme::BG()).corner_radius(10.0).inner_margin(egui::Margin::same(20)))
             .backdrop_color(egui::Color32::from_black_alpha(160))
             .show(ctx, |ui| {
                 ui.set_width(420.0_f32.min(ctx.screen_rect().width() - 72.0).max(160.0));
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(icons::regular::ARROW_CIRCLE_UP).size(22.0).color(theme::GREEN));
-                    ui.label(egui::RichText::new("Update RustTalk").size(18.0).strong().color(theme::HEADER));
+                    ui.label(egui::RichText::new("Update RustTalk").size(18.0).strong().color(theme::HEADER()));
                 });
                 ui.add_space(6.0);
                 ui.label(
                     egui::RichText::new(format!("Version {} is available. You have {}.", release.version, env!("CARGO_PKG_VERSION")))
-                        .color(theme::TEXT),
+                        .color(theme::TEXT()),
                 );
                 ui.add_space(4.0);
                 if installable {
                     ui.label(
                         egui::RichText::new("RustTalk downloads the update from GitHub, checks its SHA-256 checksum, installs it and restarts.")
-                            .color(theme::MUTED),
+                            .color(theme::MUTED()),
                     );
                     let restart = if self.any_connected() {
                         "Restarting disconnects you from the server, including any voice call or screen share."
                     } else {
                         "RustTalk closes and starts again."
                     };
-                    ui.label(egui::RichText::new(restart).color(theme::MUTED));
+                    ui.label(egui::RichText::new(restart).color(theme::MUTED()));
                 } else {
                     ui.label(
                         egui::RichText::new(
                             "This copy runs without installation (development build), so it cannot update itself. \
                              Download the new version from the release page instead.",
                         )
-                        .color(theme::MUTED),
+                        .color(theme::MUTED()),
                     );
                 }
                 if ui.link("Release notes").clicked() {

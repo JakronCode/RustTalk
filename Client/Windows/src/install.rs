@@ -235,7 +235,7 @@ fn register_aumid(png: &Path) -> Result<()> {
     let (key, _) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(AUMID_KEY)?;
     key.set_value("DisplayName", &APP_NAME)?;
     key.set_value("IconUri", &png.to_string_lossy().to_string())?;
-    key.set_value("IconBackgroundColor", &"FF5865F2")?;
+    key.set_value("IconBackgroundColor", &"FFB7410E")?;
     Ok(())
 }
 

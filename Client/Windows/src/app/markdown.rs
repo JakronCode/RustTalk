@@ -46,7 +46,7 @@ fn format(size: f32, mono: bool) -> TextFormat {
         } else {
             FontId::proportional(size)
         },
-        color: theme::TEXT,
+        color: theme::TEXT(),
         ..Default::default()
     }
 }
@@ -108,10 +108,10 @@ fn inline(
                     match m {
                         "`" => {
                             styled.font_id = FontId::monospace(style.font_id.size);
-                            styled.background = theme::DARK;
+                            styled.background = theme::DARK();
                         }
                         "**" | "__" => {
-                            styled.color = theme::HEADER;
+                            styled.color = theme::HEADER();
                             styled.extra_letter_spacing = 0.5;
                         }
                         "~~" => styled.strikethrough = egui::Stroke::new(1.0_f32, style.color),
@@ -466,12 +466,12 @@ impl Cache {
                 if let Some(tag) = &block.language {
                     ui.push_id((id, i), |ui| {
                         egui::Frame::new()
-                            .fill(theme::DARK)
+                            .fill(theme::DARK())
                             .inner_margin(8.0)
                             .corner_radius(4.0)
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new(tag).small().color(theme::MUTED));
+                                    ui.label(egui::RichText::new(tag).small().color(theme::MUTED()));
                                     if ui.small_button("Copy").clicked() {
                                         ui.ctx().copy_text(block.job.text.clone());
                                     }

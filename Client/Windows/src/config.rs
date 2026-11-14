@@ -184,6 +184,9 @@ pub struct ClientConfig {
     /// Presenter layout: corner of the camera over the screen (dragged, locally).
     #[serde(default)]
     pub presenter_cam_corner: CamCorner,
+    /// Color theme of the interface.
+    #[serde(default)]
+    pub theme: UiTheme,
     /// Companions switched on (opt-in).
     #[serde(default)]
     pub companions: bool,
@@ -193,6 +196,17 @@ pub struct ClientConfig {
     /// How companions are drawn.
     #[serde(default)]
     pub companion_style: CompanionStyle,
+}
+
+/// Color themes. The numbers are the order in the settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UiTheme {
+    #[default]
+    Dark = 0,
+    Light = 1,
+    /// Black surfaces for OLED screens.
+    Obsidian = 2,
 }
 
 /// The drawing styles for companions.
@@ -235,7 +249,7 @@ fn default_sidebar_width() -> f32 {
     260.0
 }
 
-pub const DEFAULT_ACCENT: [u8; 3] = [0x58, 0x65, 0xF2];
+pub const DEFAULT_ACCENT: [u8; 3] = [0xB7, 0x41, 0x0E];
 
 fn default_accent() -> [u8; 3] {
     DEFAULT_ACCENT
@@ -318,6 +332,7 @@ impl Default for ClientConfig {
             share_volumes: Default::default(),
             mixer_open: false,
             compact: false,
+            theme: UiTheme::Dark,
             companions: false,
             companion: None,
             companion_style: CompanionStyle::Doodle,
@@ -472,6 +487,7 @@ mod tests {
             share_volumes: [("anna".to_string(), 0.25)].into_iter().collect(),
             mixer_open: true,
             compact: true,
+            theme: UiTheme::Obsidian,
             companions: true,
             companion: Some(3),
             companion_style: CompanionStyle::Anime,
@@ -500,6 +516,8 @@ mod tests {
         assert!(back.global_ptt);
         assert!(back.compact);
         assert_eq!(back.accent_color, [0xEB, 0x45, 0x95]);
+        assert_eq!(back.theme, UiTheme::Obsidian);
+        assert!(text.contains("theme = \"obsidian\""), "{text}");
         assert!(back.companions);
         assert_eq!(back.companion, Some(3));
         assert_eq!(back.companion_style, CompanionStyle::Anime);
@@ -591,6 +609,7 @@ mod tests {
         assert!(cfg.share_volumes.is_empty() && !cfg.mixer_open);
         assert!(!cfg.compact);
         assert_eq!(cfg.accent_color, DEFAULT_ACCENT);
+        assert_eq!(cfg.theme, UiTheme::Dark);
         assert!(!cfg.companions && cfg.companion.is_none(), "companions are opt-in");
         assert_eq!(cfg.companion_style, CompanionStyle::Doodle);
         assert_eq!(cfg.sidebar_width, 260.0);
