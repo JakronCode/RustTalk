@@ -73,8 +73,8 @@ impl RustTalkApp {
                 // Height is left to the content (up to the window), only the body scrolls.
                 egui::ScrollArea::vertical().max_height(body_max).auto_shrink([false, true]).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 6.0;
-                    ui.label(egui::RichText::new(&name).strong().color(theme::HEADER));
-                    ui.label(egui::RichText::new(&address).size(12.0).color(theme::MUTED));
+                    ui.label(egui::RichText::new(&name).strong().color(theme::HEADER()));
+                    ui.label(egui::RichText::new(&address).size(12.0).color(theme::MUTED()));
                     ping_graph(ui, &points);
                     if let Some(secs) = summary.stale_secs {
                         ui.label(
@@ -92,7 +92,7 @@ impl RustTalkApp {
                              {HIGH_LOSS_PCT:.0} % makes voices sound robotic. If this persists, try reconnecting."
                         ))
                         .size(11.5)
-                        .color(theme::MUTED),
+                        .color(theme::MUTED()),
                     );
                     if let Some(call) = &self.bandwidth {
                         bandwidth_ui(ui, call);
@@ -115,7 +115,7 @@ fn fmt_pct(v: Option<f32>) -> String {
 }
 
 fn stats_grid(ui: &mut egui::Ui, s: &Summary) {
-    let warn = |bad: bool| if bad { theme::YELLOW } else { theme::TEXT };
+    let warn = |bad: bool| if bad { theme::YELLOW } else { theme::TEXT() };
     let rows = [
         (
             "Average ping",
@@ -127,7 +127,7 @@ fn stats_grid(ui: &mut egui::Ui, s: &Summary) {
             fmt_ms(s.last_ms),
             warn(s.last_ms.is_some_and(|v| v >= HIGH_PING_MS)),
         ),
-        ("Jitter", fmt_ms(s.jitter_ms), theme::TEXT),
+        ("Jitter", fmt_ms(s.jitter_ms), theme::TEXT()),
         (
             "Outbound packet loss",
             fmt_pct(s.outbound_loss),
@@ -144,7 +144,7 @@ fn stats_grid(ui: &mut egui::Ui, s: &Summary) {
         .spacing([16.0, 4.0])
         .show(ui, |ui| {
             for (i, (label, value, color)) in rows.into_iter().enumerate() {
-                ui.label(egui::RichText::new(label).color(theme::MUTED));
+                ui.label(egui::RichText::new(label).color(theme::MUTED()));
                 ui.label(egui::RichText::new(value).strong().color(color));
                 if i % 2 == 1 {
                     ui.end_row();
@@ -161,7 +161,7 @@ fn encryption_badge(ui: &mut egui::Ui) {
     .size(11.5)
     .color(theme::GREEN);
     egui::Frame::new()
-        .fill(theme::DARK)
+        .fill(theme::DARK())
         .corner_radius(4.0)
         .inner_margin(egui::Margin::symmetric(6, 3))
         .show(ui, |ui| ui.label(text))
@@ -186,7 +186,7 @@ fn y_max(points: &[(f32, f32)]) -> f32 {
 fn ping_graph(ui: &mut egui::Ui, points: &[(f32, f32)]) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), PING_GRAPH_HEIGHT), egui::Sense::hover());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 4.0, theme::DARK);
+    painter.rect_filled(rect, 4.0, theme::DARK());
     let font = egui::FontId::proportional(10.0);
     let plot = egui::Rect::from_min_max(
         rect.min + egui::vec2(38.0, 8.0),
@@ -205,14 +205,14 @@ fn ping_graph(ui: &mut egui::Ui, points: &[(f32, f32)]) {
         let y = to_screen(0.0, ms).y;
         painter.line_segment(
             [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
-            egui::Stroke::new(1.0_f32, theme::BORDER),
+            egui::Stroke::new(1.0_f32, theme::BORDER()),
         );
         painter.text(
             egui::pos2(plot.left() - 4.0, y),
             egui::Align2::RIGHT_CENTER,
             format!("{ms:.0}"),
             font.clone(),
-            theme::MUTED,
+            theme::MUTED(),
         );
     }
     painter.text(
@@ -220,7 +220,7 @@ fn ping_graph(ui: &mut egui::Ui, points: &[(f32, f32)]) {
         egui::Align2::LEFT_TOP,
         "ms",
         font.clone(),
-        theme::DISABLED,
+        theme::DISABLED(),
     );
     for min in 0..=4u32 {
         let x = to_screen(min as f32 * 60.0, 0.0).x;
@@ -234,7 +234,7 @@ fn ping_graph(ui: &mut egui::Ui, points: &[(f32, f32)]) {
             egui::Align2::CENTER_TOP,
             label,
             font.clone(),
-            theme::MUTED,
+            theme::MUTED(),
         );
     }
     if top >= HIGH_PING_MS {
@@ -250,7 +250,7 @@ fn ping_graph(ui: &mut egui::Ui, points: &[(f32, f32)]) {
             egui::Align2::CENTER_CENTER,
             "Measuring...",
             egui::FontId::proportional(12.0),
-            theme::MUTED,
+            theme::MUTED(),
         );
         return;
     }
@@ -288,7 +288,7 @@ fn bandwidth_ui(ui: &mut egui::Ui, call: &crate::bandwidth::Call) {
             ui.colored_label(color, name);
         }
     });
-    ui.label(egui::RichText::new("Media payloads + Other (serialized chat/control and UDP control). Excludes framing, encryption, IP/TCP/UDP overhead, retransmits, incomplete TCP frames and rejected UDP packets. Local only.").size(11.5).color(theme::MUTED));
+    ui.label(egui::RichText::new("Media payloads + Other (serialized chat/control and UDP control). Excludes framing, encryption, IP/TCP/UDP overhead, retransmits, incomplete TCP frames and rejected UDP packets. Local only.").size(11.5).color(theme::MUTED()));
 }
 
 fn bandwidth_legend() -> [(&'static str, egui::Color32); 5] {
@@ -297,7 +297,7 @@ fn bandwidth_legend() -> [(&'static str, egui::Color32); 5] {
         ("Camera", theme::YELLOW),
         ("Microphone", egui::Color32::from_rgb(100, 180, 255)),
         ("Shared audio", egui::Color32::from_rgb(220, 130, 230)),
-        ("Other", theme::MUTED),
+        ("Other", theme::MUTED()),
     ]
 }
 
@@ -309,7 +309,7 @@ fn bandwidth_graph(
 ) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), BANDWIDTH_GRAPH_HEIGHT), egui::Sense::hover());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 4., theme::DARK);
+    painter.rect_filled(rect, 4., theme::DARK());
     let plot = egui::Rect::from_min_max(
         rect.min + egui::vec2(45., 15.),
         rect.max - egui::vec2(8., 18.),
@@ -324,14 +324,14 @@ fn bandwidth_graph(
         let y = plot.bottom() - plot.height() * i as f32 / 2.;
         painter.line_segment(
             [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
-            egui::Stroke::new(1.0_f32, theme::BORDER),
+            egui::Stroke::new(1.0_f32, theme::BORDER()),
         );
         painter.text(
             egui::pos2(plot.left() - 4., y),
             egui::Align2::RIGHT_CENTER,
             format!("{:.1}", top / 1024. * i as f64 / 2.),
             font.clone(),
-            theme::MUTED,
+            theme::MUTED(),
         );
     }
     painter.text(
@@ -339,7 +339,7 @@ fn bandwidth_graph(
         egui::Align2::LEFT_TOP,
         "KiB/s",
         font.clone(),
-        theme::MUTED,
+        theme::MUTED(),
     );
     for minute in 0..=4 {
         painter.text(
@@ -354,7 +354,7 @@ fn bandwidth_graph(
                 format!("-{minute} min")
             },
             font.clone(),
-            theme::MUTED,
+            theme::MUTED(),
         );
     }
     for (media, (_, color)) in bandwidth_legend().iter().enumerate() {

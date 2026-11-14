@@ -76,7 +76,7 @@ impl RustTalkApp {
                 theme::dialog_header(ui, &format!("{}  Poke {}", icons::regular::HAND_WAVING, dlg.name), &mut open);
                 ui.label(
                     egui::RichText::new(format!("{} hears a wake-up sound and gets a popup with your message.", dlg.name))
-                        .color(theme::MUTED),
+                        .color(theme::MUTED()),
                 );
                 ui.add_space(4.0);
                 let resp = ui.add(
@@ -91,7 +91,7 @@ impl RustTalkApp {
                 ui.label(
                     egui::RichText::new(format!("{} / {MAX_POKE_LEN}", dlg.message.chars().count()))
                         .size(11.0)
-                        .color(theme::MUTED),
+                        .color(theme::MUTED()),
                 );
                 let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -126,22 +126,22 @@ impl RustTalkApp {
                 ui.horizontal(|ui| {
                     theme::draw_avatar(ui, &from, 40.0, false);
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(&from).strong().color(theme::HEADER));
-                        ui.label(egui::RichText::new(format!("at {}", format_time(at))).size(11.5).color(theme::MUTED));
+                        ui.label(egui::RichText::new(&from).strong().color(theme::HEADER()));
+                        ui.label(egui::RichText::new(format!("at {}", format_time(at))).size(11.5).color(theme::MUTED()));
                     });
                 });
                 ui.add_space(4.0);
                 let text = if message.is_empty() { "wants your attention!".to_string() } else { message.clone() };
                 egui::Frame::default()
-                    .fill(theme::INPUT)
+                    .fill(theme::INPUT())
                     .corner_radius(8.0)
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        ui.add(egui::Label::new(egui::RichText::new(text).size(15.0).color(theme::TEXT)).wrap());
+                        ui.add(egui::Label::new(egui::RichText::new(text).size(15.0).color(theme::TEXT())).wrap());
                     });
                 if waiting > 0 {
-                    ui.label(egui::RichText::new(format!("+{waiting} more")).size(11.5).color(theme::MUTED));
+                    ui.label(egui::RichText::new(format!("+{waiting} more")).size(11.5).color(theme::MUTED()));
                 }
                 ui.add_space(4.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

@@ -84,7 +84,7 @@ pub(super) fn role_color(role: Role) -> egui::Color32 {
     match role {
         Role::Admin => theme::RED,
         Role::Moderator => theme::BLURPLE,
-        Role::Member => theme::MUTED,
+        Role::Member => theme::MUTED(),
     }
 }
 
@@ -174,7 +174,7 @@ impl RustTalkApp {
                 } else {
                     format!("{} is disconnected. They can reconnect right away.", d.name)
                 };
-                ui.label(egui::RichText::new(text).color(theme::TEXT));
+                ui.label(egui::RichText::new(text).color(theme::TEXT()));
                 ui.add_space(6.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut d.reason)
@@ -225,7 +225,7 @@ impl RustTalkApp {
                         "Nobody is admin yet, so everyone can change channels and settings, kick and ban. \
                          Become the first admin to protect the server - after that only admins (and moderators) can.",
                     )
-                    .color(theme::TEXT),
+                    .color(theme::TEXT()),
                 );
                 ui.add_space(6.0);
                 if theme::primary_button(ui, &format!("{}  Become admin", icons::regular::CROWN)).clicked() {
@@ -238,7 +238,7 @@ impl RustTalkApp {
             caption(ui, "Your role");
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(icons::regular::SHIELD_CHECK).size(18.0).color(role_color(mine)));
-                ui.label(egui::RichText::new(mine.label()).strong().color(theme::HEADER));
+                ui.label(egui::RichText::new(mine.label()).strong().color(theme::HEADER()));
             });
             if !self.srv.open_permissions && mine != Role::Admin {
                 ui.separator();
@@ -258,17 +258,17 @@ impl RustTalkApp {
             ui.label(
                 egui::RichText::new("Roles belong to a person's RustTalk (not their name). Give roles to online people via right-click in the channel list.")
                     .size(12.0)
-                    .color(theme::MUTED),
+                    .color(theme::MUTED()),
             );
             ui.separator();
             if self.srv.admin.roles.is_empty() {
-                ui.label(egui::RichText::new("No moderators or admins yet.").color(theme::MUTED));
+                ui.label(egui::RichText::new("No moderators or admins yet.").color(theme::MUTED()));
             }
             let roles = self.srv.admin.roles.clone();
             for r in roles {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(icons::regular::SHIELD_CHECK).color(role_color(r.role)));
-                    ui.label(egui::RichText::new(&r.name).color(theme::HEADER));
+                    ui.label(egui::RichText::new(&r.name).color(theme::HEADER()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let mut role = r.role;
                         egui::ComboBox::from_id_salt(("role", &r.uid)).width(120.0).selected_text(role.label()).show_ui(ui, |ui| {
@@ -293,7 +293,7 @@ impl RustTalkApp {
         card(ui, |ui| {
             caption(ui, "Banned");
             if self.srv.admin.bans.is_empty() {
-                ui.label(egui::RichText::new("Nobody is banned. Ban someone via right-click on their name.").color(theme::MUTED));
+                ui.label(egui::RichText::new("Nobody is banned. Ban someone via right-click on their name.").color(theme::MUTED()));
             }
             let now = Self::now();
             let bans = self.srv.admin.bans.clone();
@@ -303,16 +303,16 @@ impl RustTalkApp {
                 }
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(&b.name).strong().color(theme::HEADER));
+                        ui.label(egui::RichText::new(&b.name).strong().color(theme::HEADER()));
                         let until = match b.until {
                             Some(t) if t > now => format!("{} min left", (t - now + 59) / 60),
                             Some(_) => "ending".to_string(),
                             None => "permanent".to_string(),
                         };
                         let reason = if b.reason.is_empty() { "no reason".to_string() } else { b.reason.clone() };
-                        ui.label(egui::RichText::new(format!("{reason}  -  {until}  -  by {} on {}", b.by, short_date(b.created))).size(12.0).color(theme::MUTED));
+                        ui.label(egui::RichText::new(format!("{reason}  -  {until}  -  by {} on {}", b.by, short_date(b.created))).size(12.0).color(theme::MUTED()));
                         if let Some(ip) = &b.ip {
-                            ui.label(egui::RichText::new(format!("IP {ip}")).size(11.0).color(theme::DISABLED));
+                            ui.label(egui::RichText::new(format!("IP {ip}")).size(11.0).color(theme::DISABLED()));
                         }
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -334,7 +334,7 @@ impl RustTalkApp {
             ui.label(
                 egui::RichText::new("Invite links open RustTalk and connect directly - no server password needed.")
                     .size(12.0)
-                    .color(theme::MUTED),
+                    .color(theme::MUTED()),
             );
             ui.horizontal(|ui| {
                 ui.label("Uses");
@@ -364,7 +364,7 @@ impl RustTalkApp {
         card(ui, |ui| {
             caption(ui, "Active invites");
             if self.srv.admin.invites.is_empty() {
-                ui.label(egui::RichText::new("No active invites.").color(theme::MUTED));
+                ui.label(egui::RichText::new("No active invites.").color(theme::MUTED()));
             }
             let now = Self::now();
             let invites = self.srv.admin.invites.clone();
@@ -375,7 +375,7 @@ impl RustTalkApp {
                 let link = invite_link(&address, &inv.code);
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(&link).monospace().color(theme::HEADER));
+                        ui.label(egui::RichText::new(&link).monospace().color(theme::HEADER()));
                         let uses = match inv.max_uses {
                             Some(m) => format!("{}/{m} used", inv.uses),
                             None => format!("{} used", inv.uses),
@@ -385,7 +385,7 @@ impl RustTalkApp {
                             Some(_) => "expired".into(),
                             None => "never expires".into(),
                         };
-                        ui.label(egui::RichText::new(format!("{uses}  -  {exp}  -  by {}", inv.by)).size(12.0).color(theme::MUTED));
+                        ui.label(egui::RichText::new(format!("{uses}  -  {exp}  -  by {}", inv.by)).size(12.0).color(theme::MUTED()));
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button(egui::RichText::new(icons::regular::TRASH).color(theme::RED)).on_hover_text("Delete").clicked() {
@@ -408,13 +408,13 @@ impl RustTalkApp {
         card(ui, |ui| {
             caption(ui, "Audit log (newest first)");
             if self.srv.admin.audit.is_empty() {
-                ui.label(egui::RichText::new("Nothing logged yet.").color(theme::MUTED));
+                ui.label(egui::RichText::new("Nothing logged yet.").color(theme::MUTED()));
             }
             for e in &self.srv.admin.audit {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(short_date(e.timestamp)).monospace().size(11.5).color(theme::MUTED));
-                    ui.label(egui::RichText::new(&e.actor).strong().color(theme::HEADER));
-                    ui.label(egui::RichText::new(&e.action).color(theme::TEXT));
+                    ui.label(egui::RichText::new(short_date(e.timestamp)).monospace().size(11.5).color(theme::MUTED()));
+                    ui.label(egui::RichText::new(&e.actor).strong().color(theme::HEADER()));
+                    ui.label(egui::RichText::new(&e.action).color(theme::TEXT()));
                 });
             }
         });
@@ -465,7 +465,7 @@ fn role_legend(ui: &mut egui::Ui) {
         ] {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(format!("{}  {}", icons::regular::SHIELD_CHECK, role.label())).strong().color(role_color(role)));
-                ui.label(egui::RichText::new(text).color(theme::TEXT));
+                ui.label(egui::RichText::new(text).color(theme::TEXT()));
             });
         }
     });

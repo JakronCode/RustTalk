@@ -14,6 +14,7 @@ pub(crate) enum SettingsPage {
     Notifications,
     Advanced,
     About,
+    Companions,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -44,6 +45,7 @@ pub(crate) enum SectionId {
     Version,
     Updates,
     Feedback,
+    Companions,
 }
 
 pub(crate) struct Section<S: 'static = SectionId> {
@@ -90,7 +92,7 @@ pub(crate) const GROUPS: &[Group] = &[
             Page {
                 page: SettingsPage::Appearance, title: "Appearance", icon: ic::PAINT_BRUSH,
                 sections: &[
-                    s(S::Theme, "Theme", &["theme", "dark", "light", "midnight", "mode"]),
+                    s(S::Theme, "Theme", &["theme", "dark", "light", "obsidian", "oled", "black", "mode"]),
                     s(S::PrimaryColor, "Primary color", &["primary color", "accent", "colour", "highlight", "buttons", "links", "selection", "custom color"]),
                     s(S::Density, "Density", &["density", "cozy", "compact", "spacing", "layout", "avatars"]),
                     s(S::Scaling, "Scaling", &["ui scale", "zoom", "size", "chat font size", "text size", "font"]),
@@ -153,6 +155,16 @@ pub(crate) const GROUPS: &[Group] = &[
                 s(S::Version, "Version", &["version", "protocol", "build", "about"]),
                 s(S::Updates, "Updates", &["updates", "check for updates", "install update", "release notes", "github"]),
                 s(S::Feedback, "Feedback", &["feedback", "report a bug", "bug", "issue", "github"]),
+            ],
+        }],
+    },
+    // Opt-in fun, deliberately last.
+    Group {
+        title: "Extras",
+        pages: &[Page {
+            page: SettingsPage::Companions, title: "Companions", icon: ic::PAW_PRINT,
+            sections: &[
+                s(S::Companions, "Companions", &["companions", "companion", "pet", "dog", "puppy", "mascot", "happiness", "bond", "snacks", "art style", "doodle", "anime"]),
             ],
         }],
     },
@@ -252,6 +264,7 @@ mod tests {
             SettingsPage::Notifications,
             SettingsPage::Advanced,
             SettingsPage::About,
+            SettingsPage::Companions,
         ];
         for p in all {
             let count = GROUPS

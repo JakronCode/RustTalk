@@ -323,9 +323,9 @@ impl RustTalkApp {
             .fixed_pos(pos)
             .show(ctx, |ui| {
                 egui::Frame::default()
-                    .fill(theme::SIDEBAR)
+                    .fill(theme::SIDEBAR())
                     .corner_radius(10.0)
-                    .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
+                    .stroke(egui::Stroke::new(1.0_f32, theme::BORDER()))
                     .shadow(egui::epaint::Shadow {
                         offset: [0, 8],
                         blur: 24,
@@ -353,7 +353,7 @@ impl RustTalkApp {
                                 let (icon, label) = group_label(*g);
                                 if theme::ghost_button(
                                     ui,
-                                    egui::RichText::new(icon).size(18.0).color(theme::MUTED),
+                                    egui::RichText::new(icon).size(18.0).color(theme::MUTED()),
                                 )
                                 .on_hover_text(label)
                                 .clicked()
@@ -394,7 +394,7 @@ impl RustTalkApp {
                                         egui::Align2::LEFT_CENTER,
                                         *label,
                                         egui::FontId::proportional(12.0),
-                                        theme::MUTED,
+                                        theme::MUTED(),
                                     );
                                     if jump.is_some_and(|g| group_label(g).1 == *label) {
                                         ui.scroll_to_rect(header, Some(egui::Align::TOP));
@@ -424,7 +424,7 @@ impl RustTalkApp {
                                             ui.painter().rect_filled(
                                                 rect.shrink(2.0),
                                                 6.0,
-                                                theme::HOVER,
+                                                theme::HOVER(),
                                             );
                                             hovered = Some(e);
                                         }
@@ -433,7 +433,7 @@ impl RustTalkApp {
                                             egui::Align2::CENTER_CENTER,
                                             e.as_str(),
                                             egui::FontId::proportional(24.0),
-                                            theme::TEXT,
+                                            theme::TEXT(),
                                         );
                                         if resp.clicked() {
                                             chosen = Some(e.as_str());
@@ -442,7 +442,7 @@ impl RustTalkApp {
                                     if list.is_empty() {
                                         ui.label(
                                             egui::RichText::new("No emoji found.")
-                                                .color(theme::MUTED),
+                                                .color(theme::MUTED()),
                                         );
                                     }
                                 }
@@ -453,17 +453,17 @@ impl RustTalkApp {
                                 ui.label(
                                     egui::RichText::new(e.as_str())
                                         .size(22.0)
-                                        .color(theme::TEXT),
+                                        .color(theme::TEXT()),
                                 );
                                 let name = shortcode(e)
                                     .map_or_else(|| e.name().to_string(), |s| format!(":{s}:"));
-                                ui.label(egui::RichText::new(name).strong().color(theme::HEADER));
+                                ui.label(egui::RichText::new(name).strong().color(theme::HEADER()));
                             }
                             None => {
                                 ui.label(
                                     egui::RichText::new("Shift+click to pick several")
                                         .size(12.0)
-                                        .color(theme::DISABLED),
+                                        .color(theme::DISABLED()),
                                 );
                             }
                         });

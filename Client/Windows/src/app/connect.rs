@@ -10,7 +10,7 @@ impl RustTalkApp {
             self.ui_sidebar(ctx, None);
         }
         egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(theme::DARK))
+            .frame(egui::Frame::default().fill(theme::DARK()))
             .show(ctx, |ui| {
                 if self.srv.join_error.is_some() {
                     ui.disable();
@@ -22,15 +22,15 @@ impl RustTalkApp {
                 ui.vertical_centered(|ui| {
                     logo::paint_logo(ui, 64.0);
                     ui.add_space(6.0);
-                    ui.label(egui::RichText::new("RustTalk").size(30.0).strong().color(theme::HEADER));
-                    ui.label(egui::RichText::new("Lightweight voice chat. Local first. No accounts.").color(theme::MUTED));
+                    ui.label(egui::RichText::new("RustTalk").size(30.0).strong().color(theme::HEADER()));
+                    ui.label(egui::RichText::new("Lightweight voice chat. Local first. No accounts.").color(theme::MUTED()));
                 });
                 ui.add_space(20.0);
 
                 ui.horizontal(|ui| {
                     ui.add_space(((avail.x - card_w) / 2.0).max(0.0));
                     egui::Frame::default()
-                        .fill(theme::BG)
+                        .fill(theme::BG())
                         .corner_radius(12.0)
                         .inner_margin(egui::Margin::same(20))
                         .shadow(egui::epaint::Shadow { offset: [0, 8], blur: 28, spread: 0, color: egui::Color32::from_black_alpha(110) })
@@ -69,7 +69,7 @@ impl RustTalkApp {
                 if !self.status.is_empty() && self.srv.join_error.is_none() {
                     ui.add_space(14.0);
                     ui.vertical_centered(|ui| {
-                        let color = if self.status_is_error { theme::RED } else { theme::MUTED };
+                        let color = if self.status_is_error { theme::RED } else { theme::MUTED() };
                         ui.label(egui::RichText::new(&self.status).color(color));
                     });
                 }
@@ -79,7 +79,7 @@ impl RustTalkApp {
             let size = ctx.screen_rect().size();
             let width = (size.x - 96.0).clamp(160.0, 640.0);
             let response = egui::Modal::new(egui::Id::new("join_error_dialog"))
-                .frame(egui::Frame::default().fill(theme::BG).corner_radius(10.0))
+                .frame(egui::Frame::default().fill(theme::BG()).corner_radius(10.0))
                 .backdrop_color(egui::Color32::from_black_alpha(160))
                 .show(ctx, |ui| {
                     // A modal Area otherwise retains its small default height and clips the scroll viewport.
@@ -109,7 +109,7 @@ impl RustTalkApp {
                 ui.label(
                     egui::RichText::new("No saved servers yet.")
                         .size(12.5)
-                        .color(theme::MUTED),
+                        .color(theme::MUTED()),
                 );
             }
             for (i, bm) in bookmarks.iter().enumerate() {
@@ -117,17 +117,17 @@ impl RustTalkApp {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 44.0), egui::Sense::hover());
                 let resp = ui.interact(rect, ui.id().with(("saved_server", &bm.address)), egui::Sense::click());
                 let p = ui.painter();
-                p.rect_filled(rect, 8.0, if selected { theme::SELECTED } else if resp.hovered() { theme::HOVER } else { egui::Color32::TRANSPARENT });
+                p.rect_filled(rect, 8.0, if selected { theme::SELECTED() } else if resp.hovered() { theme::HOVER() } else { egui::Color32::TRANSPARENT });
                 let icon_r = egui::Rect::from_center_size(rect.left_center() + egui::vec2(22.0, 0.0), egui::vec2(30.0, 30.0));
                 p.rect_filled(icon_r, 15.0, theme::avatar_color(&bm.address));
                 p.text(icon_r.center(), egui::Align2::CENTER_CENTER, icons::regular::HARD_DRIVES, egui::FontId::proportional(15.0), egui::Color32::WHITE);
                 let text_w = rect.width() - 52.0;
                 match bm.nickname() {
                     Some(nick) => {
-                        paint_clipped(ui, rect.left_top() + egui::vec2(46.0, 7.0), nick, 14.0, theme::HEADER, text_w);
-                        paint_clipped(ui, rect.left_top() + egui::vec2(46.0, 25.0), &bm.address, 11.5, theme::MUTED, text_w);
+                        paint_clipped(ui, rect.left_top() + egui::vec2(46.0, 7.0), nick, 14.0, theme::HEADER(), text_w);
+                        paint_clipped(ui, rect.left_top() + egui::vec2(46.0, 25.0), &bm.address, 11.5, theme::MUTED(), text_w);
                     }
-                    None => paint_clipped(ui, rect.left_top() + egui::vec2(46.0, 13.0), &bm.address, 14.0, theme::HEADER, text_w),
+                    None => paint_clipped(ui, rect.left_top() + egui::vec2(46.0, 13.0), &bm.address, 14.0, theme::HEADER(), text_w),
                 }
                 if resp.clicked() || resp.double_clicked() {
                     self.select_saved_server(bm);
@@ -157,7 +157,7 @@ impl RustTalkApp {
             if theme::ghost_button(
                 ui,
                 egui::RichText::new(format!("{}  Add / connect custom server", icons::regular::PLUS))
-                    .color(theme::MUTED),
+                    .color(theme::MUTED()),
             ).clicked() {
                 self.show_connect_form = true;
                 self.server_nickname.clear();
@@ -261,17 +261,17 @@ impl RustTalkApp {
                     ui.add_space(6.0);
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(err.title()).strong().size(15.0).color(theme::HEADER));
+                            ui.label(egui::RichText::new(err.title()).strong().size(15.0).color(theme::HEADER()));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if theme::ghost_button(ui, egui::RichText::new(icons::regular::X).color(theme::MUTED)).on_hover_text("Dismiss").clicked() {
+                                if theme::ghost_button(ui, egui::RichText::new(icons::regular::X).color(theme::MUTED())).on_hover_text("Dismiss").clicked() {
                                     self.srv.join_error = None;
                                     self.srv.cert_check = None;
                                     self.set_status("");
                                 }
                             });
                         });
-                        ui.label(egui::RichText::new(err.explanation()).color(theme::TEXT));
-                        ui.label(egui::RichText::new(err.suggestion()).size(12.5).color(theme::MUTED));
+                        ui.label(egui::RichText::new(err.explanation()).color(theme::TEXT()));
+                        ui.label(egui::RichText::new(err.suggestion()).size(12.5).color(theme::MUTED()));
                         if matches!(err.kind, super::join_error::Kind::CertChanged | super::join_error::Kind::UnknownServer) {
                             self.cert_actions(ui);
                         }
@@ -283,14 +283,14 @@ impl RustTalkApp {
                                 }
                             }
                             let caret = if err.details_open { icons::regular::CARET_DOWN } else { icons::regular::CARET_RIGHT };
-                            if theme::ghost_button(ui, egui::RichText::new(format!("{caret}  Details")).color(theme::MUTED)).clicked() {
+                            if theme::ghost_button(ui, egui::RichText::new(format!("{caret}  Details")).color(theme::MUTED())).clicked() {
                                 if let Some(e) = self.srv.join_error.as_mut() {
                                     e.details_open = !e.details_open;
                                 }
                             }
                         });
                         if err.details_open {
-                            ui.label(egui::RichText::new(&err.raw).monospace().size(11.5).color(theme::MUTED));
+                            ui.label(egui::RichText::new(&err.raw).monospace().size(11.5).color(theme::MUTED()));
                         }
                     });
                 });
@@ -302,14 +302,14 @@ impl RustTalkApp {
         let Some(check) = self.srv.cert_check.clone() else { return };
         ui.add_space(6.0);
         egui::Frame::default()
-            .fill(theme::DARK)
+            .fill(theme::DARK())
             .corner_radius(6.0)
             .inner_margin(egui::Margin::symmetric(10, 8))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.label(egui::RichText::new(&check.addr).strong().color(theme::HEADER));
+                ui.label(egui::RichText::new(&check.addr).strong().color(theme::HEADER()));
                 theme::caption(ui, "SHA-256 fingerprint");
-                ui.label(egui::RichText::new(super::join_error::group_fingerprint(&check.fingerprint)).monospace().size(12.0).color(theme::TEXT));
+                ui.label(egui::RichText::new(super::join_error::group_fingerprint(&check.fingerprint)).monospace().size(12.0).color(theme::TEXT()));
             });
         ui.add_space(6.0);
         ui.horizontal(|ui| {

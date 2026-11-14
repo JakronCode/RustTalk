@@ -56,11 +56,11 @@ pub(super) fn meter_fill(level: f32) -> f32 {
 }
 
 fn level_bar(p: &egui::Painter, rect: egui::Rect, level: f32, muted: bool) {
-    p.rect_filled(rect, 2.0, theme::DARK);
+    p.rect_filled(rect, 2.0, theme::DARK());
     let w = rect.width() * meter_fill(level);
     if w >= 2.0 {
         let color = if muted {
-            theme::DISABLED
+            theme::DISABLED()
         } else if level >= 0.9 {
             theme::YELLOW
         } else {
@@ -109,13 +109,13 @@ fn mixer_row(ui: &mut egui::Ui, row: &Row, pct: &mut f32, level: f32, dim: bool)
             .allocate_ui_with_layout(egui::vec2(label_w, 30.0), egui::Layout::top_down(egui::Align::Min), |ui| {
                 ui.set_width(label_w);
                 ui.spacing_mut().item_spacing.y = 0.0;
-                let color = if row.muted { theme::MUTED } else { theme::HEADER };
+                let color = if row.muted { theme::MUTED() } else { theme::HEADER() };
                 let title = ui.add(
                     egui::Label::new(egui::RichText::new(row.title).strong().color(color))
                         .truncate()
                         .sense(egui::Sense::click()),
                 );
-                ui.add(egui::Label::new(egui::RichText::new(&row.subtitle).size(11.5).color(theme::MUTED)).truncate());
+                ui.add(egui::Label::new(egui::RichText::new(&row.subtitle).size(11.5).color(theme::MUTED())).truncate());
                 title
             })
             .inner;
@@ -138,10 +138,10 @@ fn mixer_icon_button(ui: &mut egui::Ui, rect: egui::Rect, open: bool) -> egui::R
     let fill = match (open, resp.hovered()) {
         (true, false) => theme::GREEN,
         (true, true) => theme::GREEN.gamma_multiply(0.7),
-        (false, false) => theme::INPUT,
-        (false, true) => theme::DARK,
+        (false, false) => theme::INPUT(),
+        (false, true) => theme::DARK(),
     };
-    let fg = if open || resp.hovered() { egui::Color32::WHITE } else { theme::TEXT };
+    let fg = if open { egui::Color32::WHITE } else if resp.hovered() { theme::HEADER() } else { theme::TEXT() };
     let p = ui.painter();
     p.rect_filled(rect, 6.0, fill);
     p.text(
@@ -183,7 +183,7 @@ impl RustTalkApp {
                 egui::RichText::new("Volume Mixer")
                     .size(15.0)
                     .strong()
-                    .color(theme::HEADER),
+                    .color(theme::HEADER()),
             );
         });
         ui.add_space(2.0);
@@ -204,7 +204,7 @@ impl RustTalkApp {
             theme::menu_separator(ui);
             theme::caption(ui, "In this channel");
             if rows.is_empty() {
-                ui.label(egui::RichText::new("Nobody else is here yet.").color(theme::MUTED));
+                ui.label(egui::RichText::new("Nobody else is here yet.").color(theme::MUTED()));
             }
             self.mixer_stream_rows(ui, rows);
         });
@@ -232,7 +232,7 @@ impl RustTalkApp {
         egui::popup_below_widget(ui, popup_id, response, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
             ui.set_width(340.0);
             ui.label(egui::RichText::new(format!("{}'s shared audio", user.name)).strong());
-            ui.label(egui::RichText::new("Only changes what you hear.").small().color(theme::MUTED));
+            ui.label(egui::RichText::new("Only changes what you hear.").small().color(theme::MUTED()));
             theme::menu_separator(ui);
             let streams = self.control.shared_streams.lock().unwrap().get(&user.id).cloned().unwrap_or_default();
             let kinds = if streams.is_empty() {

@@ -200,7 +200,7 @@ impl RustTalkApp {
         let dismiss = theme::popup_frame(ctx, "audio_share_popup", picker.at, 520.0,
             &format!("{}  Share audio", icons::regular::MUSIC_NOTES), |ui| {
                 ui.label(
-                    egui::RichText::new("Your microphone stays separate.").color(theme::MUTED),
+                    egui::RichText::new("Your microphone stays separate.").color(theme::MUTED()),
                 );
                 ui.add_space(4.0);
                 let system = AudioShareSource::System;
@@ -349,7 +349,7 @@ enum RowIcon<'a> {
 }
 
 fn hint(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text).size(12.5).color(theme::MUTED));
+    ui.label(egui::RichText::new(text).size(12.5).color(theme::MUTED()));
 }
 
 fn source_row(
@@ -373,9 +373,9 @@ fn source_row(
         if selected {
             accent.gamma_multiply(0.16)
         } else if resp.hovered() {
-            theme::HOVER
+            theme::HOVER()
         } else {
-            theme::DARK
+            theme::DARK()
         },
     );
     if selected {
@@ -440,15 +440,15 @@ fn source_row(
         };
         painter.layout_job(job)
     };
-    let title_galley = one_line(title, 13.5, theme::HEADER);
-    let sub_galley = subtitle.map(|t| one_line(t, 11.5, theme::MUTED));
+    let title_galley = one_line(title, 13.5, theme::HEADER());
+    let sub_galley = subtitle.map(|t| one_line(t, 11.5, theme::MUTED()));
     let total = title_galley.size().y + sub_galley.as_ref().map_or(0.0, |g| g.size().y + 1.0);
     let mut y = rect.center().y - total / 2.0;
     let h = title_galley.size().y;
-    painter.galley(egui::pos2(text_x, y), title_galley, theme::HEADER);
+    painter.galley(egui::pos2(text_x, y), title_galley, theme::HEADER());
     y += h + 1.0;
     if let Some(g) = sub_galley {
-        painter.galley(egui::pos2(text_x, y), g, theme::MUTED);
+        painter.galley(egui::pos2(text_x, y), g, theme::MUTED());
     }
     if selected {
         painter.text(
@@ -464,7 +464,7 @@ fn source_row(
             egui::Align2::RIGHT_CENTER,
             icons::regular::CIRCLE,
             egui::FontId::proportional(22.0),
-            theme::MUTED.gamma_multiply(0.5),
+            theme::MUTED().gamma_multiply(0.5),
         );
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)

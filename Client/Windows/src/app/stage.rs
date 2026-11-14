@@ -436,7 +436,7 @@ impl RustTalkApp {
             |ui| {
                 ui.set_min_width(300.0);
                 ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(egui::RichText::new("Layout").strong().color(theme::HEADER));
+                ui.label(egui::RichText::new("Layout").strong().color(theme::HEADER()));
                 theme::menu_separator(ui);
                 let auto = self.config.stage_auto;
                 let icon = if auto { icons::regular::CHECK_SQUARE } else { icons::regular::SQUARE };
@@ -470,11 +470,11 @@ impl RustTalkApp {
                 ui.label(
                     egui::RichText::new(format!("{} on", mode.label()))
                         .strong()
-                        .color(theme::HEADER),
+                        .color(theme::HEADER()),
                 );
                 theme::menu_separator(ui);
                 if members.is_empty() {
-                    ui.label(egui::RichText::new("Nobody is in this channel").color(theme::MUTED));
+                    ui.label(egui::RichText::new("Nobody is in this channel").color(theme::MUTED()));
                 }
                 match mode {
                     StageMode::Focus => {
@@ -631,9 +631,9 @@ impl RustTalkApp {
             let galley = p.layout_no_wrap(
                 "Nobody has a camera or screen share on".into(),
                 egui::FontId::proportional(14.0),
-                theme::MUTED,
+                theme::MUTED(),
             );
-            p.galley(area.center() - galley.size() / 2.0, galley, theme::MUTED);
+            p.galley(area.center() - galley.size() / 2.0, galley, theme::MUTED());
             if controls {
                 self.stage_controls(ui, full, all.first().map_or(0, |(u, _)| u.channel_id));
             }
@@ -742,13 +742,13 @@ impl RustTalkApp {
         if let Some(hint) = hint {
             let p = ui.painter();
             let galley =
-                p.layout_no_wrap(hint.into(), egui::FontId::proportional(13.0), theme::HEADER);
+                p.layout_no_wrap(hint.into(), egui::FontId::proportional(13.0), theme::HEADER());
             let pill = egui::Rect::from_center_size(
                 egui::pos2(area.center().x, area.top() + galley.size().y / 2.0 + 4.0),
                 galley.size() + egui::vec2(20.0, 8.0),
             );
             p.rect_filled(pill, 8.0, egui::Color32::from_black_alpha(190));
-            p.galley(pill.center() - galley.size() / 2.0, galley, theme::HEADER);
+            p.galley(pill.center() - galley.size() / 2.0, galley, theme::HEADER());
         }
         if let Some((user, kind)) = focus_click {
             self.config.stage_mode = StageMode::Focus;
@@ -862,7 +862,7 @@ impl RustTalkApp {
                 egui::Align2::CENTER_CENTER,
                 icons::regular::MUSIC_NOTES,
                 egui::FontId::proportional(16.0),
-                if lit { egui::Color32::WHITE } else { theme::MUTED },
+                if lit { egui::Color32::WHITE } else { theme::MUTED() },
             );
             let response = ui.interact(badge, ui.id().with(("audio_badge", user.id, kind)), egui::Sense::click());
             self.shared_audio_popup(ui, user, &response);
@@ -938,7 +938,7 @@ impl RustTalkApp {
                     egui::Align2::CENTER_CENTER,
                     "Connecting...",
                     egui::FontId::proportional(12.0),
-                    theme::MUTED,
+                    theme::MUTED(),
                 );
             }
             None => {

@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RustTalk – Your conversations. Your server. Your data.</title>
 <meta name="description" content="RustTalk: encrypted voice, video and text chat you run yourself. No accounts, no ads, no tracking. Own your data again.">
-<link rel="icon" href="favicon.svg" type="image/svg+xml">
-<link rel="apple-touch-icon" href="img/apple-touch-icon.png">
+<link rel="icon" href="favicon.svg?v=rust" type="image/svg+xml">
+<link rel="apple-touch-icon" href="img/apple-touch-icon.png?v=rust">
 <meta property="og:title" content="RustTalk">
 <meta property="og:description" content="Your conversations. Your server. Your data. No accounts, no ads, no tracking.">
 <meta property="og:image" content="https://rusttalk.com/img/voice.png">
@@ -14,7 +14,7 @@
 :root{
   --bg:#1e1f22;--bg2:#2b2d31;--bg3:#313338;--line:#3f4147;
   --text:#f2f3f5;--muted:#b5bac1;--dim:#80848e;
-  --accent:#5865f2;--accent2:#4752c4;--green:#23a55a;
+  --accent:#b7410e;--accent2:#8c3008;--green:#23a55a;
   --radius:14px;--max:1120px;
 }
 *{box-sizing:border-box}
@@ -35,9 +35,9 @@ nav .wrap{display:flex;align-items:center;gap:20px;height:64px}
 .lang button.on{background:var(--accent);color:#fff}
 @media(max-width:720px){.links a.opt{display:none}}
 /* hero */
-.hero{padding:80px 0 40px;text-align:center;background:radial-gradient(900px 400px at 50% -80px,rgba(88,101,242,.35),transparent)}
+.hero{padding:80px 0 40px;text-align:center;background:radial-gradient(900px 400px at 50% -80px,rgba(183,65,14,.35),transparent)}
 .hero h1{font-size:clamp(36px,6vw,62px);line-height:1.08;margin:0 0 18px;letter-spacing:-.02em}
-.hero h1 span{background:linear-gradient(90deg,#8b93ff,#5865f2 60%,#23a55a);-webkit-background-clip:text;background-clip:text;color:transparent}
+.hero h1 span{background:linear-gradient(90deg,#f08a4b,#b7410e 60%,#23a55a);-webkit-background-clip:text;background-clip:text;color:transparent}
 .hero p.lead{font-size:clamp(17px,2.2vw,20px);color:var(--muted);max-width:680px;margin:0 auto 32px}
 .cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
 .btn{display:inline-flex;align-items:center;gap:10px;padding:13px 22px;border-radius:10px;font-weight:600;text-decoration:none;font-size:16px;transition:background .15s,transform .15s}
@@ -55,7 +55,7 @@ h2{font-size:clamp(28px,4vw,38px);margin:0 0 10px;letter-spacing:-.01em}
 .sub{color:var(--muted);margin:0 0 40px;max-width:640px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}
 .card{background:var(--bg2);border:1px solid var(--line);border-radius:var(--radius);padding:24px}
-.card .ic{width:42px;height:42px;border-radius:10px;background:rgba(88,101,242,.18);display:grid;place-items:center;margin-bottom:14px;font-size:21px}
+.card .ic{width:42px;height:42px;border-radius:10px;background:rgba(183,65,14,.18);display:grid;place-items:center;margin-bottom:14px;font-size:21px}
 .card h3{margin:0 0 6px;font-size:18px}
 .card p{margin:0;color:var(--muted);font-size:15px}
 /* gallery */
@@ -92,9 +92,9 @@ pre code{background:none;padding:0}
 .alt{background:var(--bg2);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
 .alt .card{background:var(--bg3)}
 /* why */
-.why{padding:84px 0;background:linear-gradient(180deg,var(--bg) 0%,#23243a 50%,var(--bg) 100%);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.why{padding:84px 0;background:linear-gradient(180deg,var(--bg) 0%,#2a201c 50%,var(--bg) 100%);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
 .why h2{font-size:clamp(28px,4.4vw,44px);line-height:1.15;margin:0 0 22px;max-width:820px}
-.why h2 span{background:linear-gradient(90deg,#8b93ff,#23a55a);-webkit-background-clip:text;background-clip:text;color:transparent}
+.why h2 span{background:linear-gradient(90deg,#f08a4b,#23a55a);-webkit-background-clip:text;background-clip:text;color:transparent}
 .manifest{font-size:clamp(17px,2vw,19.5px);line-height:1.7;color:var(--muted);max-width:760px;margin:0 0 36px}
 .pillars{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
 .pillars>div{background:rgba(43,45,49,.7);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:12px;padding:18px 20px;display:flex;flex-direction:column;gap:6px}
@@ -111,7 +111,7 @@ html[data-os=windows] .dl-win,html[data-os=linux] .dl-linux,html[data-os=mac] .d
 .dl .card.wide{grid-column:1/-1}
 .dl .card.wide .row{display:flex;flex-wrap:wrap;align-items:center;gap:14px 22px}
 .dl .card.wide .row p{flex:1 1 320px}
-.soon{white-space:nowrap;display:inline-block;font-size:12px;font-weight:700;padding:2px 8px;border-radius:99px;background:rgba(88,101,242,.2);color:#aab0ff;margin-left:6px}
+.soon{white-space:nowrap;display:inline-block;font-size:12px;font-weight:700;padding:2px 8px;border-radius:99px;background:rgba(183,65,14,.2);color:#f6a878;margin-left:6px}
 details.files{margin-top:auto;border-top:1px solid var(--line);padding-top:10px}
 details.files summary{cursor:pointer;color:var(--muted);font-size:14px;font-weight:600;user-select:none}
 details.files summary:hover{color:var(--text)}
@@ -144,7 +144,7 @@ html[lang=en] [data-l=de],html[lang=de] [data-l=en]{display:none!important}
 <nav>
   <div class="wrap">
     <a class="brand" href="#top" aria-label="RustTalk">
-      <img src="favicon.svg" alt="" width="32" height="32">
+      <img src="favicon.svg?v=rust" alt="" width="32" height="32">
       RustTalk
     </a>
     <div class="links">
