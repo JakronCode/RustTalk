@@ -216,6 +216,7 @@ fn connection_panel_is_readable_and_scrolls_inside_the_window() {
 fn settings_is_the_main_page_connected_and_disconnected() {
     for connected in [false, true] {
         for size in SIZES {
+            let _devices = Devices::new();
             let mut app = app();
             let _rx = connected.then(|| connect(&mut app));
             let mut time = 1.0;
