@@ -75,7 +75,7 @@ impl RustTalkApp {
                     .frame(egui::Frame::default().fill(theme::SIDEBAR()).inner_margin(egui::Margin::same(8)))
                     .show_separator_line(false)
                     .show_inside(ui, |ui| {
-                        egui::Frame::default()
+                        let user_panel = egui::Frame::default()
                             .fill(theme::PANEL())
                             .stroke(theme::outline())
                             .corner_radius(8.0)
@@ -85,7 +85,10 @@ impl RustTalkApp {
                                 ui.spacing_mut().item_spacing.y = 4.0;
                                 self.ui_voice_panel(ui);
                                 self.ui_user_panel(ui);
-                            });
+                            })
+                            .response;
+                        // The companion sits on top of the panel (right side).
+                        self.ui_companion(ui.ctx(), user_panel.rect.right_top() + egui::vec2(-8.0, 0.0));
                     });
 
                 egui::CentralPanel::default()

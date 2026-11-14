@@ -10,6 +10,7 @@
 
 mod app;
 mod bandwidth;
+mod companion;
 mod audio;
 mod config;
 mod hotkey;
