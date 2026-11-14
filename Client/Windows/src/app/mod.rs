@@ -17,6 +17,7 @@
 mod audio_lifecycle;
 mod audio_picker;
 mod channel_settings;
+mod companion_ui;
 mod connect;
 mod connection_ui;
 #[cfg(debug_assertions)]
@@ -381,6 +382,8 @@ pub struct RustTalkApp {
     /// Debug builds: scripted input (`RUSTTALK_DEV_INPUT`).
     #[cfg(debug_assertions)]
     dev_input: dev_input::DevInput,
+    /// Companions: saved store, mood, adoption.
+    companion: companion_ui::State,
     cam_dialog: Option<CamDialog>,
     screen_picker: Option<ScreenPicker>,
     /// Letzter eigener Frame (auch im reinen Vorschau-Modus).
@@ -553,6 +556,7 @@ impl RustTalkApp {
             dev_pending_share: None,
             #[cfg(debug_assertions)]
             dev_input: Default::default(),
+            companion: Default::default(),
             cam_dialog: None,
             screen_picker: None,
             local_preview: Arc::new(Mutex::new(None)),
@@ -1357,6 +1361,7 @@ impl eframe::App for RustTalkApp {
         }
         self.poll_reconnect();
         self.prune_sessions();
+        self.companion_tick();
         self.media_upkeep();
         // Status changed somewhere without set_status -> restart the toast.
         if self.status != self.status_seen {
@@ -1414,6 +1419,7 @@ impl eframe::App for RustTalkApp {
         #[cfg(target_os = "linux")]
         hotkey::shutdown_global_ptt(&self.global_ptt);
         self.config.save();
+        self.companion.save();
     }
 }
 
@@ -1441,6 +1447,9 @@ impl RustTalkApp {
         } else {
             self.ui_connect(ctx);
         }
+        self.ui_adoption(ctx);
+        #[cfg(debug_assertions)]
+        self.ui_companion_gallery(ctx);
         self.ui_new_channel(ctx);
         self.ui_channel_settings(ctx);
         self.ui_poke_dialog(ctx);
@@ -1587,6 +1596,7 @@ impl RustTalkApp {
                                 "notifications" => SettingsPage::Notifications,
                                 "advanced" => SettingsPage::Advanced,
                                 "about" => SettingsPage::About,
+                                "companions" => SettingsPage::Companions,
                                 _ => SettingsPage::Voice,
                             };
                             self.open_settings(page);
@@ -1661,6 +1671,11 @@ impl RustTalkApp {
                                 _ => ChatAction::Reply(id),
                             });
                         }
+                        "adopt" => {
+                            self.config.companions = true;
+                            self.companion.start_adoption(crate::companion::Kind::Dog);
+                        }
+                        "companion_gallery" => self.companion.gallery = true,
                         "server" => self.open_server_settings(match arg {
                             "afk" => server_settings::ServerTab::Afk,
                             "messages" => server_settings::ServerTab::Messages,

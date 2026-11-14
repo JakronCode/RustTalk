@@ -14,6 +14,7 @@ pub(crate) enum SettingsPage {
     Notifications,
     Advanced,
     About,
+    Companions,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -44,6 +45,7 @@ pub(crate) enum SectionId {
     Version,
     Updates,
     Feedback,
+    Companions,
 }
 
 pub(crate) struct Section<S: 'static = SectionId> {
@@ -156,6 +158,16 @@ pub(crate) const GROUPS: &[Group] = &[
             ],
         }],
     },
+    // Opt-in fun, deliberately last.
+    Group {
+        title: "Extras",
+        pages: &[Page {
+            page: SettingsPage::Companions, title: "Companions", icon: ic::PAW_PRINT,
+            sections: &[
+                s(S::Companions, "Companions", &["companions", "companion", "pet", "dog", "puppy", "mascot", "happiness", "bond", "snacks", "art style", "doodle", "anime"]),
+            ],
+        }],
+    },
 ];
 
 pub(crate) fn page(p: SettingsPage) -> &'static Page {
@@ -252,6 +264,7 @@ mod tests {
             SettingsPage::Notifications,
             SettingsPage::Advanced,
             SettingsPage::About,
+            SettingsPage::Companions,
         ];
         for p in all {
             let count = GROUPS
