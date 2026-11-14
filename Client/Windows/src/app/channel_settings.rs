@@ -66,8 +66,8 @@ impl RustTalkApp {
                     ui.vertical(|ui| {
                         ui.set_width(170.0);
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(channel_icon(ch.kind)).size(16.0).color(theme::MUTED));
-                            ui.label(egui::RichText::new(&ch.name).strong().color(theme::HEADER));
+                            ui.label(egui::RichText::new(channel_icon(ch.kind)).size(16.0).color(theme::MUTED()));
+                            ui.label(egui::RichText::new(&ch.name).strong().color(theme::HEADER()));
                         });
                         ui.add_space(8.0);
                         for (tab, icon, label, wip) in [
@@ -79,9 +79,9 @@ impl RustTalkApp {
                             let resp = ui.add(
                                 egui::Button::new(
                                     egui::RichText::new(format!("{icon}  {label}"))
-                                        .color(if sel { theme::HEADER } else { theme::MUTED }),
+                                        .color(if sel { theme::HEADER() } else { theme::MUTED() }),
                                 )
-                                .fill(if sel { theme::SELECTED } else { egui::Color32::TRANSPARENT })
+                                .fill(if sel { theme::SELECTED() } else { egui::Color32::TRANSPARENT })
                                 .min_size(egui::vec2(170.0, 32.0)),
                             );
                             if wip {
@@ -254,7 +254,7 @@ impl RustTalkApp {
                 ui.spacing_mut().item_spacing.y = 8.0;
                 if !is_cat {
                     if let Some(p) = self.new_channel_parent {
-                        ui.label(egui::RichText::new(format!("in {}", self.channel_name(p))).color(theme::MUTED));
+                        ui.label(egui::RichText::new(format!("in {}", self.channel_name(p))).color(theme::MUTED()));
                     }
                     caption(ui, "Channel type");
                     for (kind, icon, title, desc) in [
@@ -264,14 +264,14 @@ impl RustTalkApp {
                         let sel = self.new_channel_kind == kind;
                         let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 52.0), egui::Sense::click());
                         let p = ui.painter();
-                        p.rect_filled(rect, 8.0, if sel { theme::SELECTED } else if resp.hovered() { theme::HOVER } else { theme::INPUT });
-                        p.text(rect.left_center() + egui::vec2(20.0, 0.0), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(20.0), theme::MUTED);
-                        p.text(rect.left_top() + egui::vec2(44.0, 9.0), egui::Align2::LEFT_TOP, title, egui::FontId::proportional(14.5), theme::HEADER);
-                        p.text(rect.left_top() + egui::vec2(44.0, 29.0), egui::Align2::LEFT_TOP, desc, egui::FontId::proportional(12.0), theme::MUTED);
+                        p.rect_filled(rect, 8.0, if sel { theme::SELECTED() } else if resp.hovered() { theme::HOVER() } else { theme::INPUT() });
+                        p.text(rect.left_center() + egui::vec2(20.0, 0.0), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(20.0), theme::MUTED());
+                        p.text(rect.left_top() + egui::vec2(44.0, 9.0), egui::Align2::LEFT_TOP, title, egui::FontId::proportional(14.5), theme::HEADER());
+                        p.text(rect.left_top() + egui::vec2(44.0, 29.0), egui::Align2::LEFT_TOP, desc, egui::FontId::proportional(12.0), theme::MUTED());
                         let dot = rect.right_center() - egui::vec2(20.0, 0.0);
-                        p.circle_stroke(dot, 8.0, egui::Stroke::new(2.0_f32, if sel { theme::HEADER } else { theme::MUTED }));
+                        p.circle_stroke(dot, 8.0, egui::Stroke::new(2.0_f32, if sel { theme::HEADER() } else { theme::MUTED() }));
                         if sel {
-                            p.circle_filled(dot, 4.5, theme::HEADER);
+                            p.circle_filled(dot, 4.5, theme::HEADER());
                         }
                         if resp.clicked() {
                             self.new_channel_kind = kind;
@@ -330,17 +330,17 @@ impl RustTalkApp {
                 theme::dialog_header(ui, &format!("Delete {what}"), &mut open);
                 ui.label(
                     egui::RichText::new(format!("Are you sure you want to delete \"{}\"? This cannot be undone.", ch.name))
-                        .color(theme::TEXT),
+                        .color(theme::TEXT()),
                 );
                 match ch.kind {
                     ChannelKind::Text => {
-                        ui.label(egui::RichText::new("All messages in this channel will be deleted.").color(theme::MUTED));
+                        ui.label(egui::RichText::new("All messages in this channel will be deleted.").color(theme::MUTED()));
                     }
                     ChannelKind::Voice => {
-                        ui.label(egui::RichText::new("Everyone in it is moved to the lobby.").color(theme::MUTED));
+                        ui.label(egui::RichText::new("Everyone in it is moved to the lobby.").color(theme::MUTED()));
                     }
                     ChannelKind::Category => {
-                        ui.label(egui::RichText::new("Its channels are kept and moved to the top level.").color(theme::MUTED));
+                        ui.label(egui::RichText::new("Its channels are kept and moved to the top level.").color(theme::MUTED()));
                     }
                     ChannelKind::Spawn => {}
                 }
@@ -367,7 +367,7 @@ fn channel_permissions(ui: &mut egui::Ui, kind: ChannelKind) {
     card(ui, |ui| {
         caption(ui, "Roles");
         ui.horizontal(|ui| {
-            for (role, color) in [("@everyone", theme::MUTED), ("Admin", theme::RED), ("Moderator", theme::GREEN)] {
+            for (role, color) in [("@everyone", theme::MUTED()), ("Admin", theme::RED), ("Moderator", theme::GREEN)] {
                 ui.add_enabled(false, egui::Button::new(egui::RichText::new(role).color(color)));
             }
         });
@@ -404,7 +404,7 @@ fn channel_permissions(ui: &mut egui::Ui, kind: ChannelKind) {
 fn channel_invites(ui: &mut egui::Ui) {
     card(ui, |ui| {
         caption(ui, "Invite links");
-        ui.label(egui::RichText::new("Create links that drop people directly into this channel.").color(theme::MUTED));
+        ui.label(egui::RichText::new("Create links that drop people directly into this channel.").color(theme::MUTED()));
         ui.horizontal(|ui| {
             let mut link = "rusttalk://host:7331/channel".to_string();
             ui.add_enabled(false, egui::TextEdit::singleline(&mut link).desired_width(300.0));

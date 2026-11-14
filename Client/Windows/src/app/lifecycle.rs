@@ -158,32 +158,32 @@ impl RustTalkApp {
     pub(super) fn ui_install(&mut self, ctx: &egui::Context) {
         let Some(mut screen) = self.install_screen.take() else { return };
         let mut done = false;
-        egui::CentralPanel::default().frame(egui::Frame::default().fill(theme::DARK)).show(ctx, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::default().fill(theme::DARK())).show(ctx, |ui| {
             let avail = ui.available_size();
             ui.add_space(((avail.y - 420.0) / 2.0).max(16.0));
             ui.vertical_centered(|ui| {
                 logo::paint_logo(ui, 72.0);
                 ui.add_space(6.0);
-                ui.label(egui::RichText::new("Install RustTalk").size(28.0).strong().color(theme::HEADER));
-                ui.label(egui::RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).color(theme::MUTED));
+                ui.label(egui::RichText::new("Install RustTalk").size(28.0).strong().color(theme::HEADER()));
+                ui.label(egui::RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).color(theme::MUTED()));
                 ui.add_space(16.0);
                 egui::Frame::default()
-                    .fill(theme::BG)
+                    .fill(theme::BG())
                     .corner_radius(12.0)
                     .inner_margin(egui::Margin::same(20))
                     .show(ui, |ui| {
                         ui.set_width(440.0);
                         ui.vertical(|ui| {
                             let dir = install::install_dir().map(|d| d.display().to_string()).unwrap_or_default();
-                            ui.label(egui::RichText::new("RustTalk will be installed for your user (no admin rights needed):").color(theme::TEXT));
-                            ui.label(egui::RichText::new(dir).monospace().size(12.0).color(theme::MUTED));
+                            ui.label(egui::RichText::new("RustTalk will be installed for your user (no admin rights needed):").color(theme::TEXT()));
+                            ui.label(egui::RichText::new(dir).monospace().size(12.0).color(theme::MUTED()));
                             ui.add_space(8.0);
                             for line in [
                                 "Start menu entry, uninstall via Windows \"Apps & features\"",
                                 "Settings are kept in your user profile",
                                 "Updates are installed from inside the app",
                             ] {
-                                ui.label(egui::RichText::new(format!("{}  {line}", icons::regular::CHECK)).color(theme::TEXT));
+                                ui.label(egui::RichText::new(format!("{}  {line}", icons::regular::CHECK)).color(theme::TEXT()));
                             }
                             ui.add_space(8.0);
                             ui.checkbox(&mut screen.desktop_shortcut, "Create a desktop shortcut");
@@ -340,12 +340,12 @@ impl RustTalkApp {
         if let Some(r) = self.update.available.clone() {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(icons::regular::ARROW_CIRCLE_UP).size(18.0).color(theme::GREEN));
-                ui.label(egui::RichText::new(format!("Version {} is available (you have {})", r.version, env!("CARGO_PKG_VERSION"))).strong().color(theme::HEADER));
+                ui.label(egui::RichText::new(format!("Version {} is available (you have {})", r.version, env!("CARGO_PKG_VERSION"))).strong().color(theme::HEADER()));
             });
             if !r.notes.trim().is_empty() {
                 let notes: String = r.notes.chars().take(600).collect();
                 egui::ScrollArea::vertical().max_height(110.0).show(ui, |ui| {
-                    ui.label(egui::RichText::new(notes).size(12.0).color(theme::MUTED));
+                    ui.label(egui::RichText::new(notes).size(12.0).color(theme::MUTED()));
                 });
             }
             ui.horizontal(|ui| {
@@ -357,7 +357,7 @@ impl RustTalkApp {
                         self.update.open_dialog();
                     }
                 } else {
-                    ui.label(egui::RichText::new("Updates install automatically only in the installed version.").color(theme::MUTED));
+                    ui.label(egui::RichText::new("Updates install automatically only in the installed version.").color(theme::MUTED()));
                 }
                 if ui.link("Release notes").clicked() {
                     ui.ctx().open_url(egui::OpenUrl::new_tab(super::update_ui::release_page(&r)));
@@ -372,7 +372,7 @@ impl RustTalkApp {
                 } else {
                     "Not checked yet".to_string()
                 };
-                ui.label(egui::RichText::new(text).color(theme::TEXT));
+                ui.label(egui::RichText::new(text).color(theme::TEXT()));
                 if self.update.checking {
                     ui.spinner();
                 }
@@ -393,7 +393,7 @@ impl RustTalkApp {
             ui.label(
                 egui::RichText::new(format!("{}  This copy runs without installation (development build).", icons::regular::INFO))
                     .size(12.0)
-                    .color(theme::MUTED),
+                    .color(theme::MUTED()),
             );
         }
     }

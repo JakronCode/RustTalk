@@ -90,7 +90,7 @@ pub(crate) const GROUPS: &[Group] = &[
             Page {
                 page: SettingsPage::Appearance, title: "Appearance", icon: ic::PAINT_BRUSH,
                 sections: &[
-                    s(S::Theme, "Theme", &["theme", "dark", "light", "midnight", "mode"]),
+                    s(S::Theme, "Theme", &["theme", "dark", "light", "obsidian", "oled", "black", "mode"]),
                     s(S::PrimaryColor, "Primary color", &["primary color", "accent", "colour", "highlight", "buttons", "links", "selection", "custom color"]),
                     s(S::Density, "Density", &["density", "cozy", "compact", "spacing", "layout", "avatars"]),
                     s(S::Scaling, "Scaling", &["ui scale", "zoom", "size", "chat font size", "text size", "font"]),

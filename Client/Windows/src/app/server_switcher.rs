@@ -106,11 +106,11 @@ impl RustTalkApp {
         let width = (ctx.screen_rect().width() - 48.0).clamp(160.0, 420.0);
         let mut answer = None;
         let modal = egui::Modal::new(egui::Id::new("remember_prompt"))
-            .frame(egui::Frame::default().fill(theme::BG).corner_radius(10.0).inner_margin(egui::Margin::same(20)))
+            .frame(egui::Frame::default().fill(theme::BG()).corner_radius(10.0).inner_margin(egui::Margin::same(20)))
             .show(ctx, |ui| {
                 ui.set_width(width);
                 ui.spacing_mut().item_spacing.y = 8.0;
-                ui.label(egui::RichText::new(format!("Connect to {name}?")).strong().size(16.0).color(theme::HEADER));
+                ui.label(egui::RichText::new(format!("Connect to {name}?")).strong().size(16.0).color(theme::HEADER()));
                 ui.add(egui::Label::new("Reconnect this server when RustTalk starts? Chat only, voice and camera stay off.").wrap());
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
@@ -164,7 +164,7 @@ impl RustTalkApp {
                     ui.label(
                         egui::RichText::new("No servers yet.")
                             .size(12.5)
-                            .color(theme::MUTED),
+                            .color(theme::MUTED()),
                     );
                 }
                 for row in &rows {
@@ -199,7 +199,7 @@ fn status_text(row: &ServerRow) -> (String, egui::Color32) {
             with("Needs attention, select to fix", &row.error),
             theme::RED,
         ),
-        ServerStatus::Disconnected => ("Disconnected".into(), theme::MUTED),
+        ServerStatus::Disconnected => ("Disconnected".into(), theme::MUTED()),
     }
 }
 
@@ -272,9 +272,9 @@ fn server_row(ui: &mut egui::Ui, row: &ServerRow) -> Option<SwitchAction> {
 
     let p = ui.painter();
     if row.viewed {
-        p.rect_filled(rect, 6.0, theme::SELECTED);
+        p.rect_filled(rect, 6.0, theme::SELECTED());
     } else if select.hovered() {
-        p.rect_filled(rect, 6.0, theme::HOVER);
+        p.rect_filled(rect, 6.0, theme::HOVER());
     }
     p.circle_filled(
         rect.left_center() + egui::vec2(16.0, 0.0),
@@ -311,9 +311,9 @@ fn server_row(ui: &mut egui::Ui, row: &ServerRow) -> Option<SwitchAction> {
         name,
         name_font,
         if row.viewed {
-            theme::HEADER
+            theme::HEADER()
         } else {
-            theme::TEXT
+            theme::TEXT()
         },
     );
     p.text(
@@ -342,13 +342,13 @@ fn server_row(ui: &mut egui::Ui, row: &ServerRow) -> Option<SwitchAction> {
         p.rect_filled(
             action_rect.shrink2(egui::vec2(4.0, 4.0)),
             6.0,
-            egui::Color32::from_white_alpha(14),
+            theme::overlay(14),
         );
     }
     let (icon, color) = if live {
         (icons::regular::SIGN_OUT, theme::RED)
     } else {
-        (icons::regular::SIGN_IN, theme::TEXT)
+        (icons::regular::SIGN_IN, theme::TEXT())
     };
     p.text(
         action_rect.center(),

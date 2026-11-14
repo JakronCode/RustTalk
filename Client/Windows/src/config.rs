@@ -184,6 +184,20 @@ pub struct ClientConfig {
     /// Presenter layout: corner of the camera over the screen (dragged, locally).
     #[serde(default)]
     pub presenter_cam_corner: CamCorner,
+    /// Color theme of the interface.
+    #[serde(default)]
+    pub theme: UiTheme,
+}
+
+/// Color themes. The numbers are the order in the settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UiTheme {
+    #[default]
+    Dark = 0,
+    Light = 1,
+    /// Black surfaces for OLED screens.
+    Obsidian = 2,
 }
 
 /// Corner of the presented screen where the presenter's camera sits.
@@ -215,7 +229,7 @@ fn default_sidebar_width() -> f32 {
     260.0
 }
 
-pub const DEFAULT_ACCENT: [u8; 3] = [0x58, 0x65, 0xF2];
+pub const DEFAULT_ACCENT: [u8; 3] = [0xB7, 0x41, 0x0E];
 
 fn default_accent() -> [u8; 3] {
     DEFAULT_ACCENT
@@ -298,6 +312,7 @@ impl Default for ClientConfig {
             share_volumes: Default::default(),
             mixer_open: false,
             compact: false,
+            theme: UiTheme::Dark,
             accent_color: DEFAULT_ACCENT,
             sidebar_width: default_sidebar_width(),
             trusted_links: Default::default(),
@@ -449,6 +464,7 @@ mod tests {
             share_volumes: [("anna".to_string(), 0.25)].into_iter().collect(),
             mixer_open: true,
             compact: true,
+            theme: UiTheme::Obsidian,
             accent_color: [0xEB, 0x45, 0x95],
             sidebar_width: 320.0,
             trusted_links: [("https://github.com".to_string(), 1_700_000_000)].into_iter().collect(),
@@ -474,6 +490,8 @@ mod tests {
         assert!(back.global_ptt);
         assert!(back.compact);
         assert_eq!(back.accent_color, [0xEB, 0x45, 0x95]);
+        assert_eq!(back.theme, UiTheme::Obsidian);
+        assert!(text.contains("theme = \"obsidian\""), "{text}");
         assert_eq!(back.sidebar_width, 320.0);
         assert_eq!(back.stage_mode, StageMode::Presenter);
         assert!(back.remove_background);
@@ -562,6 +580,7 @@ mod tests {
         assert!(cfg.share_volumes.is_empty() && !cfg.mixer_open);
         assert!(!cfg.compact);
         assert_eq!(cfg.accent_color, DEFAULT_ACCENT);
+        assert_eq!(cfg.theme, UiTheme::Dark);
         assert_eq!(cfg.sidebar_width, 260.0);
         assert!(cfg.server_address.ends_with(":7331"));
         assert!(cfg.auto_connect.is_empty(), "existing installs are not enrolled");

@@ -431,7 +431,7 @@ impl RustTalkApp {
         cc.egui_ctx.set_fonts(fonts);
 
         let config = ClientConfig::load();
-        theme::set_appearance(&cc.egui_ctx, config.accent_color, config.compact);
+        theme::set_appearance(&cc.egui_ctx, config.theme, config.accent_color, config.compact);
         cc.egui_ctx.set_zoom_factor(config.ui_scale.clamp(0.75, 1.5));
         let mut config = config;
         let launch_link = std::env::args().skip(1).find_map(|a| moderation_ui::parse_invite_link(&a));

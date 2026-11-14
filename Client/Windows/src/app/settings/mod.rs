@@ -83,7 +83,7 @@ pub(super) fn nav_panel(ctx: &egui::Context, id: &str, add: impl FnOnce(&mut egu
     egui::SidePanel::left(egui::Id::new(id))
         .exact_width(240.0)
         .resizable(false)
-        .frame(egui::Frame::default().fill(theme::SIDEBAR).inner_margin(egui::Margin { left: 12, right: 10, top: 16, bottom: 10 }))
+        .frame(egui::Frame::default().fill(theme::SIDEBAR()).inner_margin(egui::Margin { left: 12, right: 10, top: 16, bottom: 10 }))
         .show(ctx, add);
 }
 
@@ -94,20 +94,20 @@ pub(super) fn close_panel(ctx: &egui::Context, id: &str) -> bool {
         .exact_width(72.0)
         .resizable(false)
         .show_separator_line(false)
-        .frame(egui::Frame::default().fill(theme::BG).inner_margin(egui::Margin { left: 0, right: 16, top: 24, bottom: 0 }))
+        .frame(egui::Frame::default().fill(theme::BG()).inner_margin(egui::Margin { left: 0, right: 16, top: 24, bottom: 0 }))
         .show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 let close = ui
                     .add(
-                        egui::Button::new(egui::RichText::new(icons::regular::X).size(18.0).color(theme::MUTED))
+                        egui::Button::new(egui::RichText::new(icons::regular::X).size(18.0).color(theme::MUTED()))
                             .fill(egui::Color32::TRANSPARENT)
-                            .stroke(egui::Stroke::new(1.5_f32, theme::MUTED))
+                            .stroke(egui::Stroke::new(1.5_f32, theme::MUTED()))
                             .corner_radius(18.0)
                             .min_size(egui::vec2(36.0, 36.0)),
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .on_hover_text("Close (Esc)");
-                ui.label(egui::RichText::new("ESC").size(11.5).strong().color(theme::MUTED));
+                ui.label(egui::RichText::new("ESC").size(11.5).strong().color(theme::MUTED()));
                 clicked = close.clicked();
             });
         });
@@ -117,7 +117,7 @@ pub(super) fn close_panel(ctx: &egui::Context, id: &str) -> bool {
 /// The one `CentralPanel` of a settings page: a scrolling, width-limited column.
 pub(super) fn content_panel<S>(ctx: &egui::Context, id: &str, nav: &mut Nav<S>, add: impl FnOnce(&mut egui::Ui, &mut Nav<S>)) {
     egui::CentralPanel::default()
-        .frame(egui::Frame::default().fill(theme::BG).inner_margin(egui::Margin { left: 40, right: 8, top: 0, bottom: 0 }))
+        .frame(egui::Frame::default().fill(theme::BG()).inner_margin(egui::Margin { left: 40, right: 8, top: 0, bottom: 0 }))
         .show(ctx, |ui| {
             let mut area = egui::ScrollArea::vertical().id_salt(id.to_owned()).auto_shrink([false, false]);
             if std::mem::take(&mut nav.reset_scroll) {
@@ -158,7 +158,7 @@ pub(super) fn nav_sidebar<P: Copy + PartialEq + 'static, S: Copy + PartialEq + '
             ui.spacing_mut().item_spacing.y = 2.0;
             if results.is_empty() {
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new(format!("No settings match \"{}\"", nav.search.trim())).color(theme::MUTED));
+                ui.label(egui::RichText::new(format!("No settings match \"{}\"", nav.search.trim())).color(theme::MUTED()));
             }
             for (gi, hit) in results.iter().enumerate() {
                 if gi > 0 {
@@ -183,7 +183,7 @@ pub(super) fn nav_sidebar<P: Copy + PartialEq + 'static, S: Copy + PartialEq + '
             }
         });
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-        ui.label(egui::RichText::new(footer).size(11.0).color(theme::DISABLED));
+        ui.label(egui::RichText::new(footer).size(11.0).color(theme::DISABLED()));
     });
     clicked
 }
@@ -192,13 +192,14 @@ pub(super) fn nav_sidebar<P: Copy + PartialEq + 'static, S: Copy + PartialEq + '
 /// Its id is [`SEARCH_ID`]; focusing it cancels shortcut recording.
 fn search_field(ui: &mut egui::Ui, search: &mut String) -> egui::Response {
     egui::Frame::default()
-        .fill(theme::DARK)
+        .fill(theme::DARK())
+        .stroke(theme::outline())
         .corner_radius(6.0)
         .inner_margin(egui::Margin::symmetric(8, dense(5.0, 3.0) as i8))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(egui::RichText::new(icons::regular::MAGNIFYING_GLASS).color(theme::MUTED));
+                ui.label(egui::RichText::new(icons::regular::MAGNIFYING_GLASS).color(theme::MUTED()));
                 ui.spacing_mut().button_padding = egui::vec2(2.0, 0.0);
                 let clear_w = if search.is_empty() { 0.0 } else { 26.0 };
                 let edit = ui.add(
@@ -211,7 +212,7 @@ fn search_field(ui: &mut egui::Ui, search: &mut String) -> egui::Response {
                 );
                 if !search.is_empty() {
                     let clear = ui
-                        .add(egui::Button::new(egui::RichText::new(icons::regular::X).color(theme::MUTED)).frame(false))
+                        .add(egui::Button::new(egui::RichText::new(icons::regular::X).color(theme::MUTED())).frame(false))
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .on_hover_text("Clear (Esc)");
                     if clear.clicked() {
@@ -240,9 +241,9 @@ pub(super) fn page_body<P: 'static, S: Copy + PartialEq + 'static>(
     ui.spacing_mut().interact_size.x = 64.0; // equal width for slider values
     ui.spacing_mut().combo_width = 250.0;
     ui.spacing_mut().slider_width = 180.0;
-    ui.visuals_mut().extreme_bg_color = theme::DARK; // text fields stand out on BG
+    ui.visuals_mut().extreme_bg_color = theme::DARK(); // text fields stand out on BG
     ui.add_space(dense(28.0, 20.0));
-    ui.label(egui::RichText::new(page.title).size(26.0).strong().color(theme::HEADER));
+    ui.label(egui::RichText::new(page.title).size(26.0).strong().color(theme::HEADER()));
 
     let anim = egui::style::ScrollAnimation::new(2400.0, egui::Rangef::new(0.2, 0.45));
     let mut active = page.sections.first().map(|s| s.id);
@@ -265,7 +266,7 @@ pub(super) fn page_body<P: 'static, S: Copy + PartialEq + 'static>(
         last_anchor = anchor;
         // The page title already says it when there is only one section.
         if page.sections.len() > 1 {
-            ui.label(egui::RichText::new(sec.title).size(20.0).strong().color(theme::HEADER));
+            ui.label(egui::RichText::new(sec.title).size(20.0).strong().color(theme::HEADER()));
             ui.add_space(dense(6.0, 2.0));
         }
         section(ui, sec.id);
@@ -364,7 +365,7 @@ impl RustTalkApp {
         let label = if self.recording_key == Some(action) {
             egui::RichText::new("Press a key...").color(theme::YELLOW)
         } else {
-            egui::RichText::new(format!("{}  {}", icons::regular::KEYBOARD, self.binding_name(action).unwrap_or("Not set"))).color(theme::HEADER)
+            egui::RichText::new(format!("{}  {}", icons::regular::KEYBOARD, self.binding_name(action).unwrap_or("Not set"))).color(theme::HEADER())
         };
         let resp = ui.add(egui::Button::new(label).min_size(egui::vec2(140.0, 28.0)))
             .on_hover_text("Click, then press a key or side mouse button with optional modifiers (Esc cancels)");
@@ -412,7 +413,7 @@ impl RustTalkApp {
 /// Thin full-width line between sections.
 fn divider(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width().max(0.0), 1.0), egui::Sense::hover());
-    ui.painter().rect_filled(rect, 0.0, theme::SELECTED);
+    ui.painter().rect_filled(rect, 0.0, theme::SELECTED());
 }
 
 fn nav_caption(ui: &mut egui::Ui, text: &str) {
@@ -426,15 +427,15 @@ fn nav_page_row(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool) -> e
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width().max(0.0), dense(32.0, 28.0)), egui::Sense::click());
     let hovered = resp.hovered();
     let bg = if selected {
-        theme::SELECTED
+        theme::SELECTED()
     } else if hovered {
-        theme::HOVER
+        theme::HOVER()
     } else {
         egui::Color32::TRANSPARENT
     };
     let p = ui.painter();
     p.rect_filled(rect, 6.0, bg);
-    let fg = if selected || hovered { theme::HEADER } else { theme::MUTED };
+    let fg = if selected || hovered { theme::HEADER() } else { theme::MUTED() };
     p.text(rect.left_center() + egui::vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, icon, egui::FontId::proportional(16.0), fg);
     p.text(rect.left_center() + egui::vec2(34.0, 0.0), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(dense(14.5, 14.0)), fg);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -458,18 +459,18 @@ fn nav_section_list<S: Copy + PartialEq + 'static>(ui: &mut egui::Ui, sections: 
     }
     let &(_, last, _) = rows.last()?;
     let p = ui.painter();
-    p.line_segment([egui::pos2(line_x, top + 2.0), egui::pos2(line_x, last.bottom() - 2.0)], egui::Stroke::new(1.5_f32, theme::SELECTED));
+    p.line_segment([egui::pos2(line_x, top + 2.0), egui::pos2(line_x, last.bottom() - 2.0)], egui::Stroke::new(1.5_f32, theme::SELECTED()));
     for (sec, rect, hovered) in rows {
         let is_active = active == Some(sec.id);
         if hovered {
             let bg = egui::Rect::from_min_max(egui::pos2(line_x + 8.0, rect.top()), rect.max);
-            p.rect_filled(bg, 4.0, theme::HOVER);
+            p.rect_filled(bg, 4.0, theme::HOVER());
         }
         if is_active {
             let bar = egui::Rect::from_center_size(egui::pos2(line_x, rect.center().y), egui::vec2(3.0, row_h - 8.0));
             p.rect_filled(bar, 1.5, theme::accent());
         }
-        let fg = if is_active || hovered { theme::HEADER } else { theme::MUTED };
+        let fg = if is_active || hovered { theme::HEADER() } else { theme::MUTED() };
         p.text(rect.left_center() + egui::vec2(34.0, 0.0), egui::Align2::LEFT_CENTER, sec.title, egui::FontId::proportional(dense(13.5, 13.0)), fg);
     }
     clicked

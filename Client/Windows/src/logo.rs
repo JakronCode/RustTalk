@@ -3,8 +3,9 @@
 
 use eframe::egui;
 
-pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x58, 0x65, 0xF2);
-const ACCENT_DARK: egui::Color32 = egui::Color32::from_rgb(0x40, 0x4A, 0xC8);
+/// Rust orange (the language's color).
+pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(0xB7, 0x41, 0x0E);
+const ACCENT_DARK: egui::Color32 = egui::Color32::from_rgb(0x8C, 0x30, 0x08);
 
 /// Balkenhoehen der Klangwelle (relativ zur Kantenlaenge), 5 Balken.
 const BARS: [f32; 5] = [0.30, 0.52, 0.78, 0.52, 0.30];
@@ -113,7 +114,7 @@ mod tests {
         // Akzentpixel existieren (oben links im Quadrat).
         let accent = &icon.rgba[(5 * 64 + 10) * 4..(5 * 64 + 10) * 4 + 4];
         assert_eq!(accent[3], 255);
-        assert!(accent[2] > 150, "Akzent hat Blauanteil");
+        assert!(accent[0] > 150 && accent[2] < 60, "Akzent ist Rust-Orange");
     }
 
     #[test]

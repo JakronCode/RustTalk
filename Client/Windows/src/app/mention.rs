@@ -295,9 +295,9 @@ impl RustTalkApp {
             .pivot(egui::Align2::LEFT_BOTTOM)
             .show(ctx, |ui| {
                 egui::Frame::default()
-                    .fill(theme::SIDEBAR)
+                    .fill(theme::SIDEBAR())
                     .corner_radius(8.0)
-                    .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
+                    .stroke(egui::Stroke::new(1.0_f32, theme::BORDER()))
                     .shadow(egui::epaint::Shadow {
                         offset: [0, 4],
                         blur: 16,
@@ -310,7 +310,7 @@ impl RustTalkApp {
                         ui.label(
                             egui::RichText::new("Members")
                                 .size(12.0)
-                                .color(theme::MUTED),
+                                .color(theme::MUTED()),
                         );
                         ui.add_space(4.0);
                         egui::ScrollArea::vertical()
@@ -329,7 +329,7 @@ impl RustTalkApp {
                                         pick = Some(name.clone());
                                     }
                                     if i == self.mention.selected {
-                                        ui.painter().rect_filled(rect, 4.0, theme::SELECTED);
+                                        ui.painter().rect_filled(rect, 4.0, theme::SELECTED());
                                         if scroll {
                                             ui.scroll_to_rect(rect, None);
                                         }
@@ -346,7 +346,7 @@ impl RustTalkApp {
                                             egui::Align2::LEFT_CENTER,
                                             name,
                                             egui::FontId::proportional(15.0),
-                                            theme::HEADER,
+                                            theme::HEADER(),
                                         );
                                 }
                             });

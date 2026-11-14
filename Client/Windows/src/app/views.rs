@@ -41,7 +41,7 @@ impl RustTalkApp {
         cmd_tx: &net::CommandSender,
     ) {
         egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(theme::BG))
+            .frame(egui::Frame::default().fill(theme::BG()))
             .show(ctx, |ui| {
                 let Some(ch_id) = self.srv.selected_channel.filter(|id| self.srv.channels.contains_key(id)) else {
                     empty_state(ui, icons::regular::CHAT_CIRCLE_DOTS, "No channel selected", "Pick a channel on the left.");
@@ -67,14 +67,14 @@ impl RustTalkApp {
             .exact_height(48.0)
             .frame(
                 egui::Frame::default()
-                    .fill(theme::BG)
+                    .fill(theme::BG())
                     .inner_margin(egui::Margin::symmetric(16, 0))
-                    .stroke(egui::Stroke::new(1.0_f32, theme::BORDER)),
+                    .stroke(egui::Stroke::new(1.0_f32, theme::BORDER())),
             )
             .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.label(egui::RichText::new(channel_icon(kind)).size(22.0).color(theme::MUTED));
-                    ui.label(egui::RichText::new(self.channel_name(ch_id)).size(16.0).strong().color(theme::HEADER));
+                    ui.label(egui::RichText::new(channel_icon(kind)).size(22.0).color(theme::MUTED()));
+                    ui.label(egui::RichText::new(self.channel_name(ch_id)).size(16.0).strong().color(theme::HEADER()));
                     let subtitle = match kind {
                         ChannelKind::Text => "Text channel".to_string(),
                         ChannelKind::Voice => {
@@ -85,7 +85,7 @@ impl RustTalkApp {
                         ChannelKind::Category => String::new(),
                     };
                     ui.add(egui::Separator::default().vertical().spacing(12.0));
-                    ui.label(egui::RichText::new(subtitle).color(theme::MUTED));
+                    ui.label(egui::RichText::new(subtitle).color(theme::MUTED()));
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         self.update_banner(ui);
@@ -132,15 +132,15 @@ impl RustTalkApp {
         // Composer FIRST as bottom panel (otherwise the scroll area pushes
         // it below the window edge).
         egui::TopBottomPanel::bottom(format!("composer_{ch_id}"))
-            .frame(egui::Frame::default().fill(theme::BG).inner_margin(egui::Margin { left: 16, right: 16, top: 8, bottom: 8 }))
+            .frame(egui::Frame::default().fill(theme::BG()).inner_margin(egui::Margin { left: 16, right: 16, top: 8, bottom: 8 }))
             .show_separator_line(false)
             .show_inside(ui, |ui| self.composer(ui, ch_id, cmd_tx));
         let name = self.channel_name(ch_id);
         self.message_list(ui, ch_id, |ui| {
             ui.add_space(24.0);
-            ui.label(egui::RichText::new(icons::regular::CHAT_CIRCLE_TEXT).size(44.0).color(theme::MUTED));
-            ui.label(egui::RichText::new(format!("Welcome to {name}!")).size(22.0).strong().color(theme::HEADER));
-            ui.label(egui::RichText::new("This is the start of the channel. Say hi!").color(theme::MUTED));
+            ui.label(egui::RichText::new(icons::regular::CHAT_CIRCLE_TEXT).size(44.0).color(theme::MUTED()));
+            ui.label(egui::RichText::new(format!("Welcome to {name}!")).size(22.0).strong().color(theme::HEADER()));
+            ui.label(egui::RichText::new("This is the start of the channel. Say hi!").color(theme::MUTED()));
         });
     }
 
@@ -166,13 +166,13 @@ impl RustTalkApp {
         let stage_h = if members.len() > 1 { (stage_h + super::stage::CONTROLS_BAND).min(full * 0.75) } else { stage_h };
         egui::TopBottomPanel::top(format!("stage_{ch_id}"))
             .exact_height(stage_h)
-            .frame(egui::Frame::default().fill(theme::DARK).inner_margin(egui::Margin::same(16)))
+            .frame(egui::Frame::default().fill(theme::DARK()).inner_margin(egui::Margin::same(16)))
             .show_inside(ui, |ui| {
                 if members.is_empty() {
                     ui.vertical_centered(|ui| {
                         ui.add_space(30.0);
-                        ui.label(egui::RichText::new(icons::regular::SPEAKER_HIGH).size(40.0).color(theme::MUTED));
-                        ui.label(egui::RichText::new("Nobody is here yet").size(18.0).color(theme::HEADER));
+                        ui.label(egui::RichText::new(icons::regular::SPEAKER_HIGH).size(40.0).color(theme::MUTED()));
+                        ui.label(egui::RichText::new("Nobody is here yet").size(18.0).color(theme::HEADER()));
                         if theme::primary_button(ui, "Join Voice").clicked() {
                             self.join_channel(ch_id);
                         }
@@ -205,18 +205,18 @@ impl RustTalkApp {
                 let max = (ui.available_width() * 0.55).clamp(160.0, 640.0);
                 300.0f32.min(max)..=max
             })
-            .frame(egui::Frame::default().fill(theme::SIDEBAR).inner_margin(egui::Margin { left: 12, right: 12, top: 8, bottom: 8 }))
+            .frame(egui::Frame::default().fill(theme::SIDEBAR()).inner_margin(egui::Margin { left: 12, right: 12, top: 8, bottom: 8 }))
             .show_animated_inside(ui, show_mixer, |ui| self.ui_mixer(ui, &members));
 
         // Text feed below the stage.
         egui::TopBottomPanel::bottom(format!("voice_composer_{ch_id}"))
-            .frame(egui::Frame::default().fill(theme::BG).inner_margin(egui::Margin { left: 16, right: 16, top: 8, bottom: 8 }))
+            .frame(egui::Frame::default().fill(theme::BG()).inner_margin(egui::Margin { left: 16, right: 16, top: 8, bottom: 8 }))
             .show_separator_line(false)
             .show_inside(ui, |ui| self.composer(ui, ch_id, cmd_tx));
         self.message_list(ui, ch_id, |ui| {
             ui.add_space(12.0);
-            ui.label(egui::RichText::new("Voice chat").size(16.0).strong().color(theme::HEADER));
-            ui.label(egui::RichText::new("Messages and images shared here are visible to everyone in this channel.").color(theme::MUTED));
+            ui.label(egui::RichText::new("Voice chat").size(16.0).strong().color(theme::HEADER()));
+            ui.label(egui::RichText::new("Messages and images shared here are visible to everyone in this channel.").color(theme::MUTED()));
         });
         // Drawn last so it stays on top of chat and mixer.
         if mixer_here {
@@ -236,9 +236,9 @@ impl RustTalkApp {
                     super::server_settings::paint_server_icon(ui, r, &settings, &mut self.textures);
                     ui.add_space(4.0);
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(format!("Welcome to {}", settings.name)).size(18.0).strong().color(theme::HEADER));
+                        ui.label(egui::RichText::new(format!("Welcome to {}", settings.name)).size(18.0).strong().color(theme::HEADER()));
                         if !settings.welcome_message.is_empty() {
-                            ui.add(egui::Label::new(egui::RichText::new(&settings.welcome_message).color(theme::TEXT)).wrap());
+                            ui.add(egui::Label::new(egui::RichText::new(&settings.welcome_message).color(theme::TEXT())).wrap());
                             ui.add_space(2.0);
                         }
                         ui.label(
@@ -248,7 +248,7 @@ impl RustTalkApp {
                                 icons::regular::INFO
                             ))
                             .size(12.5)
-                            .color(theme::MUTED),
+                            .color(theme::MUTED()),
                         );
                     });
                 });
@@ -257,14 +257,14 @@ impl RustTalkApp {
                 ui.add_space(8.0);
                 theme::card(ui, |ui| {
                     theme::caption(ui, &format!("{}  Server rules", icons::regular::SCROLL));
-                    ui.add(egui::Label::new(egui::RichText::new(&settings.rules).color(theme::TEXT)).wrap());
+                    ui.add(egui::Label::new(egui::RichText::new(&settings.rules).color(theme::TEXT())).wrap());
                 });
             }
             ui.add_space(12.0);
             theme::caption(ui, "Activity");
         });
         self.message_list(ui, ch_id, |ui| {
-            ui.label(egui::RichText::new("No activity yet.").color(theme::MUTED));
+            ui.label(egui::RichText::new("No activity yet.").color(theme::MUTED()));
         });
     }
 
@@ -298,7 +298,7 @@ impl RustTalkApp {
                     };
                     if query.is_some() {
                         let n = lines.iter().filter(|l| matches(l)).count();
-                        ui.label(egui::RichText::new(format!("{} {n} result(s)", icons::regular::MAGNIFYING_GLASS)).color(theme::MUTED));
+                        ui.label(egui::RichText::new(format!("{} {n} result(s)", icons::regular::MAGNIFYING_GLASS)).color(theme::MUTED()));
                     }
                     let mut prev: Option<(&str, u64)> = None;
                     for line in lines.iter().filter(|l| matches(l)) {
@@ -343,15 +343,15 @@ impl RustTalkApp {
         if let Some((name, kb)) = self.pending_image.as_ref().map(|(n, b)| (n.clone(), b.len() / 1024)) {
             let mut clear = false;
             egui::Frame::default()
-                .fill(theme::INPUT)
+                .fill(theme::INPUT())
                 .corner_radius(egui::CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 })
                 .inner_margin(egui::Margin::symmetric(12, 6))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(icons::regular::IMAGE).color(theme::accent()));
-                        ui.label(egui::RichText::new(name).color(theme::HEADER));
-                        ui.label(egui::RichText::new(format!("{kb} KB")).color(theme::MUTED));
+                        ui.label(egui::RichText::new(name).color(theme::HEADER()));
+                        ui.label(egui::RichText::new(format!("{kb} KB")).color(theme::MUTED()));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button(icons::regular::X).on_hover_text("Remove").clicked() {
                                 clear = true;
@@ -368,12 +368,12 @@ impl RustTalkApp {
         let focused = ui.memory(|m| m.has_focus(composer_id(ch_id)));
         self.mention_keys(ui.ctx(), ch_id, focused);
         let frame = egui::Frame::default()
-            .fill(theme::INPUT)
+            .fill(theme::INPUT())
             .corner_radius(8.0)
             .inner_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if theme::ghost_button(ui, egui::RichText::new(icons::regular::PLUS_CIRCLE).size(20.0).color(theme::MUTED))
+                    if theme::ghost_button(ui, egui::RichText::new(icons::regular::PLUS_CIRCLE).size(20.0).color(theme::MUTED()))
                         .on_hover_text("Attach image")
                         .clicked()
                     {
@@ -421,7 +421,7 @@ impl RustTalkApp {
                         let send = theme::ghost_button(ui, egui::RichText::new(icons::regular::PAPER_PLANE_RIGHT).size(18.0).color(theme::accent()))
                             .on_hover_text("Send (Enter)  -  Shift+Enter for a new line")
                             .clicked();
-                        let gif_color = if self.giphy.open { theme::accent() } else { theme::MUTED };
+                        let gif_color = if self.giphy.open { theme::accent() } else { theme::MUTED() };
                         let gif = theme::ghost_button(ui, egui::RichText::new(icons::regular::GIF).size(18.0).color(gif_color))
                             .on_hover_text("GIFs");
                         self.gif_button_rect = Some(gif.rect);
@@ -433,7 +433,7 @@ impl RustTalkApp {
                                 self.open_gif_picker();
                             }
                         }
-                        let emoji_color = if self.emoji.open { theme::accent() } else { theme::MUTED };
+                        let emoji_color = if self.emoji.open { theme::accent() } else { theme::MUTED() };
                         let emoji = theme::ghost_button(ui, egui::RichText::new(icons::regular::SMILEY).size(18.0).color(emoji_color))
                             .on_hover_text("Emoji");
                         self.emoji_button_rect = Some(emoji.rect);
@@ -492,15 +492,15 @@ impl RustTalkApp {
             .unwrap_or_default();
         let mut cancel = false;
         egui::Frame::default()
-            .fill(theme::INPUT)
+            .fill(theme::INPUT())
             .corner_radius(egui::CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 })
             .inner_margin(egui::Margin::symmetric(12, 6))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(icon).color(theme::accent()));
-                    ui.label(egui::RichText::new(title).strong().color(theme::HEADER));
-                    ui.label(egui::RichText::new(snippet).color(theme::MUTED));
+                    ui.label(egui::RichText::new(title).strong().color(theme::HEADER()));
+                    ui.label(egui::RichText::new(snippet).color(theme::MUTED()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button(icons::regular::X).on_hover_text("Cancel (Esc)").clicked() {
                             cancel = true;
@@ -534,10 +534,10 @@ impl RustTalkApp {
             .fixed_size([420.0, 0.0])
             .show(ctx, |ui| {
                 theme::dialog_header(ui, "Delete Message", &mut open);
-                ui.label(egui::RichText::new("Are you sure you want to delete this message? This cannot be undone.").color(theme::TEXT));
+                ui.label(egui::RichText::new("Are you sure you want to delete this message? This cannot be undone.").color(theme::TEXT()));
                 ui.add_space(6.0);
                 egui::Frame::default()
-                    .fill(theme::DARK)
+                    .fill(theme::DARK())
                     .corner_radius(8.0)
                     .inner_margin(egui::Margin::same(10))
                     .show(ui, |ui| {
@@ -546,10 +546,10 @@ impl RustTalkApp {
                             theme::draw_avatar(ui, &from, 28.0, false);
                             ui.vertical(|ui| {
                                 ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new(&from).strong().color(theme::HEADER));
-                                    ui.label(egui::RichText::new(&time).size(11.0).color(theme::MUTED));
+                                    ui.label(egui::RichText::new(&from).strong().color(theme::HEADER()));
+                                    ui.label(egui::RichText::new(&time).size(11.0).color(theme::MUTED()));
                                 });
-                                ui.add(egui::Label::new(egui::RichText::new(&preview).color(theme::TEXT)).wrap());
+                                ui.add(egui::Label::new(egui::RichText::new(&preview).color(theme::TEXT())).wrap());
                             });
                         });
                     });
@@ -557,7 +557,7 @@ impl RustTalkApp {
                 ui.label(
                     egui::RichText::new(format!("{}  Tip: hold Shift while clicking the trash icon to delete without asking.", icons::regular::INFO))
                         .size(11.5)
-                        .color(theme::MUTED),
+                        .color(theme::MUTED()),
                 );
                 ui.add_space(8.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -604,9 +604,9 @@ impl RustTalkApp {
 fn empty_state(ui: &mut egui::Ui, icon: &str, title: &str, text: &str) {
     ui.vertical_centered(|ui| {
         ui.add_space(ui.available_height() * 0.3);
-        ui.label(egui::RichText::new(icon).size(48.0).color(theme::MUTED));
-        ui.label(egui::RichText::new(title).size(20.0).strong().color(theme::HEADER));
-        ui.label(egui::RichText::new(text).color(theme::MUTED));
+        ui.label(egui::RichText::new(icon).size(48.0).color(theme::MUTED()));
+        ui.label(egui::RichText::new(title).size(20.0).strong().color(theme::HEADER()));
+        ui.label(egui::RichText::new(text).color(theme::MUTED()));
     });
 }
 
@@ -659,7 +659,7 @@ fn status_badges(p: &egui::Painter, rect: egui::Rect, user: &UserInfo) {
     for (on, icon) in [(user.deafened, icons::regular::SPEAKER_SLASH), (user.muted, icons::regular::MICROPHONE_SLASH)] {
         if on {
             let c = egui::pos2(x, rect.top() + r + 6.0);
-            p.circle_filled(c, r, theme::DARK);
+            p.circle_filled(c, r, theme::DARK());
             p.text(c, egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(r * 1.15), theme::RED);
             x -= 2.0 * r + 6.0;
         }
@@ -695,7 +695,7 @@ pub(super) fn member_card(ui: &mut egui::Ui, rect: egui::Rect, user: &UserInfo, 
         egui::Align2::CENTER_CENTER,
         label,
         egui::FontId::proportional((rect.height() * 0.08).clamp(13.0, 17.0)),
-        theme::HEADER,
+        theme::HEADER(),
     );
     status_badges(p, rect, user);
     resp
@@ -728,7 +728,7 @@ pub(super) fn watch_tile(ui: &mut egui::Ui, rect: egui::Rect, user: &UserInfo, k
         VideoKind::Camera => format!("{} turned on their camera", user.name),
     };
     let text_y = av.bottom() + 16.0;
-    p.text(egui::pos2(rect.center().x, text_y), egui::Align2::CENTER_TOP, what, egui::FontId::proportional((rect.height() * 0.065).clamp(12.0, 15.0)), theme::HEADER);
+    p.text(egui::pos2(rect.center().x, text_y), egui::Align2::CENTER_TOP, what, egui::FontId::proportional((rect.height() * 0.065).clamp(12.0, 15.0)), theme::HEADER());
     // Button look (the click is the whole tile).
     let label = p.layout_no_wrap(format!("{}  Watch {}", icons::regular::EYE, if kind == VideoKind::Screen { "Stream" } else { "Camera" }), egui::FontId::proportional(14.0), theme::on_accent());
     let btn = egui::Rect::from_center_size(egui::pos2(rect.center().x, text_y + 44.0), label.size() + egui::vec2(28.0, 14.0));
@@ -763,7 +763,7 @@ pub(super) fn video_tile(
         }
         None => {
             // First keyframe not there yet.
-            p.text(rect.center(), egui::Align2::CENTER_CENTER, "Connecting...", egui::FontId::proportional(13.0), theme::MUTED);
+            p.text(rect.center(), egui::Align2::CENTER_CENTER, "Connecting...", egui::FontId::proportional(13.0), theme::MUTED());
         }
     }
     let name = if me { format!("{} (you)", user.name) } else { user.name.clone() };
@@ -844,9 +844,9 @@ pub(super) fn chat_line(
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new(icons::regular::ARROW_RIGHT).color(theme::GREEN));
-                ui.label(egui::RichText::new(&line.text).color(theme::MUTED));
+                ui.label(egui::RichText::new(&line.text).color(theme::MUTED()));
                 if c.show_ts {
-                    ui.label(egui::RichText::new(format_time(line.timestamp)).size(11.0).color(theme::DISABLED));
+                    ui.label(egui::RichText::new(format_time(line.timestamp)).size(11.0).color(theme::DISABLED()));
                 }
             });
             ui.add_space(2.0);
@@ -892,13 +892,13 @@ pub(super) fn chat_line(
                         }
                         None => format!("{}  Original message was deleted", icons::regular::ARROW_BEND_UP_RIGHT),
                     };
-                    ui.label(egui::RichText::new(text).size(12.0).color(theme::MUTED));
+                    ui.label(egui::RichText::new(text).size(12.0).color(theme::MUTED()));
                 }
                 if !c.grouped && !compact {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(from).strong().color(name_color));
                         if c.show_ts {
-                            ui.label(egui::RichText::new(format_time(line.timestamp)).size(11.0).color(theme::MUTED));
+                            ui.label(egui::RichText::new(format_time(line.timestamp)).size(11.0).color(theme::MUTED()));
                         }
                     });
                 }
@@ -908,14 +908,14 @@ pub(super) fn chat_line(
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         if c.show_ts {
-                            ui.label(egui::RichText::new(format_time(line.timestamp)).size(11.0).color(theme::MUTED));
+                            ui.label(egui::RichText::new(format_time(line.timestamp)).size(11.0).color(theme::MUTED()));
                         }
                         ui.label(egui::RichText::new(from).strong().color(name_color));
                         if !line.text.is_empty() {
                             markdown.show(ui, line.id, &line.text);
                         }
                         if line.edited {
-                            ui.label(egui::RichText::new("(edited)").size(11.0).color(theme::DISABLED));
+                            ui.label(egui::RichText::new("(edited)").size(11.0).color(theme::DISABLED()));
                         }
                     });
                 } else if !line.text.is_empty() {
@@ -923,7 +923,7 @@ pub(super) fn chat_line(
                         ui.spacing_mut().item_spacing.x = 4.0;
                         markdown.show(ui, line.id, &line.text);
                         if line.edited {
-                            ui.label(egui::RichText::new("(edited)").size(11.0).color(theme::DISABLED));
+                            ui.label(egui::RichText::new("(edited)").size(11.0).color(theme::DISABLED()));
                         }
                     });
                 }
@@ -933,7 +933,7 @@ pub(super) fn chat_line(
                             ui.add(egui::Image::new(&tex).max_width(360.0).max_height(260.0).corner_radius(8.0));
                         }
                         None => {
-                            ui.label(egui::RichText::new("[image could not be decoded]").color(theme::MUTED));
+                            ui.label(egui::RichText::new("[image could not be decoded]").color(theme::MUTED()));
                         }
                     }
                 }
@@ -1020,14 +1020,14 @@ pub(super) fn chat_line(
             .fixed_pos(tools_rect.min)
             .show(ui.ctx(), |ui| {
                 egui::Frame::default()
-                    .fill(theme::DARK)
+                    .fill(theme::DARK())
                     .corner_radius(6.0)
-                    .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
+                    .stroke(egui::Stroke::new(1.0_f32, theme::BORDER()))
                     .inner_margin(egui::Margin::same(2))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             for (icon, tip, a) in buttons {
-                                let color = if matches!(a, ChatAction::Delete(_)) { theme::RED } else { theme::MUTED };
+                                let color = if matches!(a, ChatAction::Delete(_)) { theme::RED } else { theme::MUTED() };
                                 if theme::ghost_button_sized(ui, egui::RichText::new(icon).size(15.0).color(color), egui::vec2(24.0, 22.0))
                                     .on_hover_text(tip)
                                     .clicked()
@@ -1050,7 +1050,7 @@ pub(super) fn chat_line(
 fn inline_editor(ui: &mut egui::Ui, id: u64, edit: EditBox) -> Option<ChatAction> {
     let field_id = egui::Id::new(("edit-message", id));
     let resp = egui::Frame::default()
-        .fill(theme::INPUT)
+        .fill(theme::INPUT())
         .corner_radius(6.0)
         .stroke(egui::Stroke::new(1.0_f32, theme::accent()))
         .inner_margin(egui::Margin::symmetric(8, 6))
@@ -1091,12 +1091,12 @@ fn inline_editor(ui: &mut egui::Ui, id: u64, edit: EditBox) -> Option<ChatAction
             action = Some(ChatAction::SaveEdit);
         }
         let cancel = ui
-            .add(egui::Button::new(egui::RichText::new(format!("{}  Cancel", icons::regular::X)).color(theme::HEADER)))
+            .add(egui::Button::new(egui::RichText::new(format!("{}  Cancel", icons::regular::X)).color(theme::HEADER())))
             .on_hover_text("Cancel (Esc)");
         if cancel.clicked() {
             action = Some(ChatAction::CancelEdit);
         }
-        ui.label(egui::RichText::new("Enter = save  -  Esc = cancel  -  Shift+Enter = new line").size(11.0).color(theme::MUTED));
+        ui.label(egui::RichText::new("Enter = save  -  Esc = cancel  -  Shift+Enter = new line").size(11.0).color(theme::MUTED()));
     });
     action
 }
