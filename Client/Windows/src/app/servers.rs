@@ -833,6 +833,7 @@ impl RustTalkApp {
 
     /// Leaves voice on `owner`: media stops first, then its server moves us to the lobby.
     pub(super) fn leave_voice(&mut self, owner: SessionId) -> bool {
+        let leaving_voice = self.voice_owner == Some(owner) && self.voice().is_some();
         let in_voice = self
             .session(owner)
             .filter(|s| s.connected && s.my_voice_channel().is_some());
@@ -849,6 +850,9 @@ impl RustTalkApp {
         self.set_voice_owner(None);
         self.send_idle_mute(owner);
         self.sync_voice_audio(); // notification sounds keep playing meanwhile
+        if leaving_voice {
+            self.notify(Sound::Leave);
+        }
         true
     }
 

@@ -427,6 +427,44 @@ mod tests {
     }
 
     #[test]
+    fn hang_up_plays_one_leave_sound_and_honors_notification_settings() {
+        let devices = Devices::new();
+        for enabled in [true, false] {
+            let mut app = app();
+            let _commands = connect(&mut app);
+            join(&mut app, 2);
+            app.sfx.lock().unwrap().clear();
+            app.config.sound_leave = enabled;
+            let owner = app.srv.id;
+            assert!(app.leave_voice(owner));
+            assert_eq!(devices.0.borrow().inputs, 0);
+            assert_eq!(devices.0.borrow().outputs, 1, "notification playback survives hang up");
+            if enabled { assert_sound(&app, Sound::Leave); }
+            let assert_silent = |app: &RustTalkApp| {
+                let mut samples = vec![0.0; sfx::render(Sound::Leave).len()];
+                sfx::mix_into(&app.sfx, &mut samples);
+                assert!(samples.iter().all(|sample| *sample == 0.0), "no disabled or duplicate leave sound");
+            };
+            assert_silent(&app);
+            assert!(app.leave_voice(owner));
+            assert_silent(&app);
+            move_to(&mut app, 1);
+            assert_silent(&app);
+            join(&mut app, 2);
+            app.sfx.lock().unwrap().clear();
+            app.join_channel(1);
+            move_to(&mut app, 1);
+            if enabled { assert_sound(&app, Sound::Leave); }
+            assert_silent(&app);
+            join(&mut app, 2);
+            app.sfx.lock().unwrap().clear();
+            app.srv.channels.remove(&1);
+            assert!(!app.leave_voice(owner), "missing lobby refuses hang up");
+            assert_silent(&app);
+        }
+    }
+
+    #[test]
     fn audio_sharing_status_is_sent_once_per_change_and_lights_up_on_sound() {
         use crate::audio::share_source::AudioShareSource;
         let _devices = Devices::new();
