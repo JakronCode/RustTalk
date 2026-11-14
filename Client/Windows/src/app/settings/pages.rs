@@ -34,6 +34,7 @@ impl RustTalkApp {
             SectionId::Version => section_version(ui),
             SectionId::Updates => self.updates_section(ui),
             SectionId::Feedback => section_feedback(ui),
+            SectionId::Companions => self.page_companions(ui),
         }
     }
 
