@@ -202,7 +202,7 @@ Build and test the image yourself: `make docker-build` (or `docker build -f Serv
 
 ### Client (Windows) – install
 
-Download `rusttalk-windows.exe` from the [latest release](https://github.com/rusttalkcrew/RustTalk/releases/latest) and run it. It installs itself for your user (no admin rights): `%LOCALAPPDATA%\Programs\RustTalk`, Start menu entry (optional desktop shortcut), settings in `%APPDATA%\RustTalk`. Uninstall via Windows **Apps & features**.
+Download `rusttalk-windows.exe` from the [client release](https://github.com/rusttalkcrew/RustTalk/releases) and run it. It installs itself for your user (no admin rights): `%LOCALAPPDATA%\Programs\RustTalk`, Start menu entry (optional desktop shortcut), settings in `%APPDATA%\RustTalk`. Uninstall via Windows **Apps & features**.
 
 **Updates:** the installed app checks GitHub for a newer release on start (Settings > About > Updates). A newer release shows an "Update" notice in the top right corner; clicking it (or Install in Settings > About) asks for confirmation, then downloads it, checks its SHA-256 checksum and restarts.
 
@@ -289,27 +289,65 @@ On start: enter the server address (e.g. `10.69.40.101`) and a username, then co
 
 ### Releasing
 
-Bump the version in `Client/Windows/Cargo.toml`, `Server/Cargo.toml` and `shared/Cargo.toml`, then push a tag:
+Independent stable releases use `vMAJOR.MINOR.PATCH+client.HASH` or
+`vMAJOR.MINOR.PATCH+server.HASH`. Only the selected package's Cargo version must
+match the core. `HASH` is a lowercase 7–40 hexadecimal prefix of the peeled tag
+commit, which must be reachable from fetched `origin/main`. Numeric fields have
+no leading zeros and fit unsigned 64-bit integers. `index-server` is recognized
+but refused until a real package exists. Prerelease tags are currently refused.
+Build metadata identifies the component/commit; it does not order versions.
+Protocol version and shared crate version remain independent.
 
-```bash
-git tag v0.4.0 && git push origin v0.4.0
+Publishing needs explicit approval. After approval, from the reviewed main commit,
+for example (fish-compatible; replace the core with the selected package version):
+
+```fish
+set release_hash (git rev-parse --short=12 HEAD)
+set release_tag "v0.12.0+client.$release_hash"
+git tag "$release_tag"
+git push origin "$release_tag"
 ```
 
-The [build workflow](.github/workflows/build.yml) tests and builds both client and
-server on native Windows x64, Windows ARM64, Linux x64, and Linux ARM64 runners.
-Full builds run for release tags and manual workflow dispatch, not ordinary
-main/master pushes. New manual builds cancel older manual builds on the same ref;
-release builds are isolated from cancellation. Pull requests only run
-the [test workflow](.github/workflows/test.yml): tests and clippy on Linux x64 and
-Windows x64, without release builds or packages.
-Integration tests run serially because their server fixtures share TLS files.
-The [release workflow](.github/workflows/release.yml) verifies package versions
-and publishes only after the entire matrix succeeds. It also builds the server
-image for linux/amd64 and linux/arm64, smoke-tests it and pushes it to
-`ghcr.io/rusttalkcrew/rusttalk-server` as `vX.Y.Z`, `X.Y.Z`, `X.Y` and `latest` (pull
-requests only build and test it, see the [Docker workflow](.github/workflows/docker.yml)).
-When the minor version changes, also update the image tag in
-`Server/deploy/docker-compose.yml`; the version check refuses the release otherwise.
+Before relying on independent discovery, ship a **combined transition release**
+containing the component-aware updaters. Combined stable `vX.Y.Z` remains supported
+and requires client, server and shared versions to match. Only combined releases
+move GitHub's global latest pointer; component releases use `make_latest: false`.
+Older binaries that query `/releases/latest` remain on the last combined release
+and may need manual upgrade. Choose a matching client/server platform asset from
+the [releases page](https://github.com/rusttalkcrew/RustTalk/releases) if an older
+latest link lacks it. Discovery retains GitHub HTTPS/TLS and mandatory SHA-256
+checksums; tag metadata is not a signature or new trust guarantee.
+
+The [build workflow](.github/workflows/build.yml) accepts `all` (default), `client`
+or `server`; it explicitly tests shared alongside the selected package. Native
+Windows x64/ARM64 and Linux x64/ARM64 builds must all succeed. Manual builds on the
+same ref cancel older manual builds; release publication is globally serialized
+without cancelling the running release. GitHub can replace an older pending run
+with a newer pending run; inspect cancelled runs before scheduling them again.
+PR tests do not run release packaging.
+
+The [release workflow](.github/workflows/release.yml) rejects malformed tags,
+wrong versions, non-main commits and duplicate component/core versions, including
+hash-length variants and overlapping legacy tags. It verifies exact matrix assets
+and checksums, creates a fresh draft and uploads without replacement before any
+Docker push. Reruns refuse existing releases, including failed drafts. A partial
+failure preserves that draft and any pushed image as evidence: inspect the run,
+draft, tag and registry, then obtain explicit operator approval for recovery.
+Never delete a draft just to rerun over published immutable aliases. Final
+publication requires this run/attempt's draft and exact asset digests, and retains
+automatically generated release notes.
+
+Server and combined releases smoke-test and push linux/amd64 and linux/arm64 to
+`ghcr.io/rusttalkcrew/rusttalk-server`. Immutable aliases are `vX.Y.Z`, `X.Y.Z` and
+(for component tags) `vX.Y.Z-server.HASH`; `+` becomes `-` in Docker. Existing
+immutable aliases cause refusal. `X.Y` and `latest` intentionally move. Client
+releases never push server images. Server/combined tags also require the compose
+example's image minor alias to match; update it when changing the server minor.
+
+Run `make test-release` for offline synthetic Git/API/artifact failure tests.
+These tests do not publish or exercise native builds, registry credentials,
+GitHub runner permissions, Docker pushes, or platform hardware. Full native
+matrix/package and image checks run only in CI; release execution needs approval.
 
 Linux clients are `rusttalk-linux-x86_64.AppImage` and
 `rusttalk-linux-aarch64.AppImage`, with checksums. Built on Ubuntu 24.04, they bundle

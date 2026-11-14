@@ -798,8 +798,12 @@ admin_password = \"boss\"
     expect(&mut e, "erin admin", |m| matches!(m, ServerMessage::UserRoleChanged { client_id, role: Role::Admin } if *client_id == we.client_id)).await;
 }
 
-/// Fake GitHub API: `releases/latest` says v99.0.0 with a server binary.
+/// Fake GitHub API: release list includes v99.0.0 with a server binary.
 fn fake_github() -> u16 {
+    fake_github_with_checksum(true)
+}
+
+fn fake_github_with_checksum(checksum: bool) -> u16 {
     use std::io::{BufRead, BufReader};
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -807,6 +811,12 @@ fn fake_github() -> u16 {
         for stream in listener.incoming().flatten() {
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(
+                line,
+                "GET /repos/rusttalkcrew/RustTalk/releases?per_page=100&page=1 HTTP/1.1\r\n"
+            );
+            line.clear();
             while reader.read_line(&mut line).map(|n| n > 2).unwrap_or(false) {
                 line.clear();
             }
@@ -818,8 +828,13 @@ fn fake_github() -> u16 {
                 target => panic!("Unsupported update-test target: {target:?}"),
             };
             let body = format!(
-                r#"{{"tag_name":"v99.0.0","html_url":"http://x/v99","assets":[{{"name":"{asset}","browser_download_url":"http://x/bin"}},{{"name":"{asset}.sha256","browser_download_url":"http://x/sha"}}]}}"#
+                r#"[{{"tag_name":"v99.0.0+server.abcdef1","draft":false,"prerelease":false,"body":null,"html_url":"http://x/v99","assets":[{{"name":"{asset}","browser_download_url":"http://x/bin"}},{{"name":"{asset}.sha256","browser_download_url":"http://x/sha"}}]}}]"#
             );
+            let mut releases: serde_json::Value = serde_json::from_str(&body).unwrap();
+            if !checksum {
+                releases[0]["assets"].as_array_mut().unwrap().pop();
+            }
+            let body = releases.to_string();
             let mut s = stream;
             let _ = write!(s, "HTTP/1.1 200 OK
 Content-Type: application/json
@@ -1608,6 +1623,20 @@ fn container_refuses_update_installs_but_still_checks() {
 
     let (ok, out, _) = run_to_exit(&["update", "--check"], &[api, container]);
     assert!(ok && out.contains("New version available") && out.contains("99.0.0"), "{out}");
+}
+
+#[test]
+fn update_missing_checksum_refuses_before_downloading_or_installing() {
+    let gh = fake_github_with_checksum(false);
+    let (ok, _, err) = run_to_exit(
+        &["update", "--no-restart"],
+        &[
+            ("RUSTTALK_UPDATE_API", format!("http://127.0.0.1:{gh}")),
+            ("RUSTTALK_CONTAINER", "0".to_string()),
+        ],
+    );
+    assert!(!ok);
+    assert!(err.contains("no checksum file"), "{err}");
 }
 
 /// docker stop / systemctl stop: SIGTERM closes SQLite cleanly, data and key survive.

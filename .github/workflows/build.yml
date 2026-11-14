@@ -2,7 +2,18 @@ name: Build
 # Full builds for releases and manual validation. PRs run tests (test.yml).
 on:
   workflow_call:
+    inputs:
+      component:
+        description: Component to build and package
+        type: string
+        default: all
   workflow_dispatch:
+    inputs:
+      component:
+        description: Component to build and package
+        type: choice
+        default: all
+        options: [all, client, server]
 permissions:
   contents: read
 concurrency:
@@ -22,37 +33,49 @@ jobs:
           - {runner: windows-11-arm, os: windows, arch: aarch64}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    env:
+      COMPONENT: ${{ inputs.component }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate component
+        shell: bash
+        run: bash scripts/build-component.sh "$COMPONENT" validate
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: ${{ matrix.os }}-${{ matrix.arch }}
-      - name: Linux dependencies
-        if: runner.os == 'Linux'
+      - name: Linux server dependencies
+        if: runner.os == 'Linux' && env.COMPONENT == 'server'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev
+      - name: Linux client dependencies
+        if: runner.os == 'Linux' && env.COMPONENT != 'server'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake nasm pkg-config libssl-dev libasound2-dev libasound2-plugins libopus-dev libudev-dev libwayland-dev libxkbcommon-dev libgl1-mesa-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-pipewire pipewire-alsa libpipewire-0.3-dev patchelf squashfs-tools
       - name: Windows CMake compatibility
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && env.COMPONENT != 'server'
         shell: pwsh
         run: '"CMAKE_POLICY_VERSION_MINIMUM=3.5" >> $env:GITHUB_ENV'
       # OpenH264's x86 SIMD assembly needs nasm - without it video encoding is ~5x slower.
       - name: Windows NASM
-        if: runner.os == 'Windows' && matrix.arch == 'x86_64'
+        if: runner.os == 'Windows' && matrix.arch == 'x86_64' && env.COMPONENT != 'server'
         shell: pwsh
         run: |
           choco install nasm -y --no-progress
           "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
       - name: Test
-        run: cargo test --locked --workspace -- --test-threads=1
-      - name: Build client and server
-        run: cargo build --locked --release --workspace
+        shell: bash
+        run: bash scripts/build-component.sh "$COMPONENT" test
+      - name: Build selected component
+        shell: bash
+        run: bash scripts/build-component.sh "$COMPONENT" build
       - name: Linux AppImage and server bundle
         if: runner.os == 'Linux'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash scripts/package-linux.sh
+        run: bash scripts/package-linux.sh "$COMPONENT"
       - name: Windows binaries
         if: runner.os == 'Windows'
         shell: pwsh
@@ -61,16 +84,22 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           $suffix = if ($env:BUILD_ARCH -eq 'aarch64') { '-arm64' } else { '' }
-          Copy-Item target/release/rusttalk.exe "dist/rusttalk-windows$suffix.exe"
-          Copy-Item target/release/rusttalk-server.exe "dist/rusttalk-server-windows$suffix.exe"
-          # Native speech dependencies, when supplied by ONNX Runtime.
-          Get-ChildItem target/release/*.dll -ErrorAction SilentlyContinue | Copy-Item -Destination dist
-          foreach ($file in Get-ChildItem dist/*.exe) {
+          if ($env:COMPONENT -ne 'server') {
+            Copy-Item target/release/rusttalk.exe "dist/rusttalk-windows$suffix.exe"
+            # Native speech dependencies, when supplied by ONNX Runtime.
+            Get-ChildItem target/release/*.dll -ErrorAction SilentlyContinue | Copy-Item -Destination dist
+          }
+          if ($env:COMPONENT -ne 'client') {
+            Copy-Item target/release/rusttalk-server.exe "dist/rusttalk-server-windows$suffix.exe"
+          }
+          foreach ($file in Get-ChildItem dist/* -Include *.exe,*.dll -File) {
             $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
             "$hash  $($file.Name)" | Out-File -Encoding ascii "$($file.FullName).sha256"
           }
-          & "dist/rusttalk-server-windows$suffix.exe" --version
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($env:COMPONENT -ne 'client') {
+            & "dist/rusttalk-server-windows$suffix.exe" --version
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rusttalk-${{ matrix.os }}-${{ matrix.arch }}

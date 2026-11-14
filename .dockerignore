@@ -5,6 +5,7 @@
 !Cargo.lock
 !shared/Cargo.toml
 !shared/src/
+!shared/update_discovery.rs
 !Server/Cargo.toml
 !Server/src/
 !Client/Windows/Cargo.toml
