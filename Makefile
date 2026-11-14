@@ -129,6 +129,10 @@ format-channel-deletion: ## Format the focused deletion regression module
 test-client: ## Client tests
 	@$(CARGO) test --locked -p rusttalk-client
 
+.PHONY: test-client-network
+test-client-network: ## Headless TLS queue, cancellation and timeout regressions
+	@$(CARGO) test --locked -p rusttalk-client net::tests:: -- --test-threads=1
+
 .PHONY: e2e
 e2e: ## Local end-to-end smoke test (server + two test clients)
 	@bash Server/Test_Scripts/e2e_local.sh

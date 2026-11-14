@@ -966,7 +966,7 @@ mod tests {
         let addr = tls_server(move |stream| async move {
             let (mut r, mut w) = tokio::io::split(stream);
             let _hello: Option<ClientMessage> = read_frame(&mut r).await.unwrap();
-            tokio::spawn(async move {
+            let reader = tokio::spawn(async move {
                 loop {
                     let seen = match read_frame::<_, ClientMessage>(&mut r).await {
                         Ok(Some(ClientMessage::Chat { text, .. })) => text,
@@ -994,10 +994,14 @@ mod tests {
                     reply_to: None,
                 };
                 if write_frame(&mut w, &msg).await.is_err() {
-                    return;
+                    break;
                 }
             }
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            // Keep the runtime alive until the reader reports the client's goodbye.
+            tokio::time::timeout(Duration::from_secs(10), reader)
+                .await
+                .unwrap()
+                .unwrap();
         });
         let (events, mut event_rx) = event_queue();
         let conn = connect(
