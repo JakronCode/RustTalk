@@ -4764,7 +4764,7 @@ dependencies = [
 
 [[package]]
 name = "rusttalk-client"
-version = "0.17.0"
+version = "0.17.1"
 dependencies = [
  "aec3",
  "anyhow",
