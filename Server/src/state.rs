@@ -1310,12 +1310,13 @@ impl State {
     pub fn set_audio_streams(
         &mut self,
         id: u64,
-        streams: Vec<rusttalk_shared::protocol::AudioStreamInfo>,
+        mut streams: Vec<rusttalk_shared::protocol::AudioStreamInfo>,
     ) -> Result<(), String> {
         use rusttalk_shared::protocol::valid_audio_streams;
         if !valid_audio_streams(&streams) {
             return Err("Invalid audio streams".into());
         }
+        streams.sort_unstable_by_key(|stream| stream.id);
         let c = self.clients.get_mut(&id).ok_or("Unknown client")?;
         if c.audio_streams == streams {
             return Ok(());
@@ -1557,11 +1558,14 @@ mod tests {
         let (id, token) = state.add_client("sender".into(), tx);
         state.move_client(id, 3).unwrap();
         while rx.try_recv().is_ok() {}
-        let streams = vec![AudioStreamInfo { id: 1, label: "Application 1".into() }];
+        let streams = vec![AudioStreamInfo { id: 1, label: "Application 1".into() }, AudioStreamInfo { id: 2, label: "Application 2".into() }];
         state.set_audio_streams(id, streams.clone()).unwrap();
         assert!(matches!(rx.try_recv(), Ok(ServerMessage::AudioStreamsChanged { .. })));
-        for _ in 0..100 { state.set_audio_streams(id, streams.clone()).unwrap(); }
-        assert!(rx.try_recv().is_err(), "identical registrations do not flood listeners");
+        for _ in 0..100 {
+            state.set_audio_streams(id, streams.clone()).unwrap();
+            state.set_audio_streams(id, streams.iter().rev().cloned().collect()).unwrap();
+        }
+        assert!(rx.try_recv().is_err(), "identical or reordered registrations do not flood listeners");
         assert!(!state.set_audio_sharing(id, false).unwrap(), "capture never started");
         assert!(matches!(rx.try_recv(), Ok(ServerMessage::AudioStreamsChanged { streams, .. }) if streams.is_empty()));
         assert!(state.clients[&id].audio_streams.is_empty());
