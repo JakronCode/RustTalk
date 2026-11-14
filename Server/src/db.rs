@@ -149,13 +149,23 @@ impl Db {
     }
 
     /// Loescht den Channel; Kinder werden Top-Level; Chat-Verlauf geht mit.
-    pub fn delete_channel(&self, id: u64) -> Result<()> {
-        self.conn.execute("DELETE FROM channels WHERE id = ?1", params![id as i64])?;
-        self.conn.execute(
+    pub fn delete_channel(&mut self, id: u64, settings: Option<&ServerSettings>) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute("DELETE FROM channels WHERE id = ?1", params![id as i64])?;
+        tx.execute(
             "UPDATE channels SET parent = NULL WHERE parent = ?1",
             params![id as i64],
         )?;
-        self.conn.execute("DELETE FROM messages WHERE channel_id = ?1", params![id as i64])?;
+        tx.execute(
+            "DELETE FROM messages WHERE channel_id = ?1",
+            params![id as i64],
+        )?;
+        if let Some(settings) = settings {
+            Self::write_settings(&tx, settings)?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -225,8 +235,12 @@ impl Db {
     }
 
     pub fn save_settings(&self, s: &ServerSettings) -> Result<()> {
+        Self::write_settings(&self.conn, s)
+    }
+
+    fn write_settings(conn: &Connection, s: &ServerSettings) -> Result<()> {
         let blob = bincode::serialize(s)?;
-        self.conn.execute(
+        conn.execute(
             "INSERT INTO settings (key, value) VALUES ('server', ?1)
              ON CONFLICT(key) DO UPDATE SET value = ?1",
             params![blob],
@@ -381,7 +395,7 @@ mod tests {
     #[test]
     fn channels_roundtrip_and_delete() {
         let path = temp_db("channels");
-        let db = Db::open(&path).unwrap();
+        let mut db = Db::open(&path).unwrap();
         db.upsert_channel(1, "Spawn", ChannelKind::Spawn, None, 0).unwrap();
         db.upsert_channel(2, "Talk", ChannelKind::Category, None, 1).unwrap();
         db.upsert_channel(3, "Funkturm", ChannelKind::Voice, Some(2), 0).unwrap();
@@ -398,11 +412,35 @@ mod tests {
         assert_eq!(channels[2].position, 4, "Position wird gespeichert");
 
         // Kategorie loeschen -> Kind wird Top-Level:
-        db.delete_channel(2).unwrap();
+        db.delete_channel(2, None).unwrap();
         let channels = db.load_channels().unwrap();
         assert_eq!(channels.len(), 2);
         assert_eq!(channels[1].parent, None);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn channel_deletion_commit_failure_rolls_back_and_can_retry() {
+        let mut db = Db::open(":memory:").unwrap();
+        db.conn.pragma_update(None, "foreign_keys", true).unwrap();
+        db.upsert_channel(2, "Category", ChannelKind::Category, None, 0)
+            .unwrap();
+        db.upsert_channel(3, "Child", ChannelKind::Text, Some(2), 0)
+            .unwrap();
+        db.conn.execute_batch(
+            "CREATE TABLE deletion_guard(channel_id INTEGER REFERENCES channels(id) DEFERRABLE INITIALLY DEFERRED);
+             INSERT INTO deletion_guard VALUES(2);",
+        ).unwrap();
+        assert!(db.delete_channel(2, None).is_err());
+        assert!(db.conn.is_autocommit());
+        let channels = db.load_channels().unwrap();
+        assert_eq!(channels.len(), 2);
+        assert_eq!(channels[1].parent, Some(2));
+        db.conn.execute("DELETE FROM deletion_guard", []).unwrap();
+        db.delete_channel(2, None).unwrap();
+        let channels = db.load_channels().unwrap();
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].parent, None);
     }
 
     #[test]

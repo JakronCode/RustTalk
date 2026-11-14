@@ -315,6 +315,88 @@ async fn channel_typen_regeln() {
 }
 
 #[tokio::test]
+async fn channel_deletion_failure_returns_error_without_success_broadcast() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("delete.db");
+    let extra = format!(
+        "persist_state = true\ndb_path = {:?}\n",
+        path.to_string_lossy()
+    );
+    let port = free_port();
+    let server = spawn_server(port, &extra);
+    wait_for_port(port);
+    let (mut actor, _) = connect(port, "actor", None).await;
+    let (mut observer, _) = connect(port, "observer", None).await;
+    drain(&mut actor, 100).await;
+    drain(&mut observer, 100).await;
+    send(
+        &mut actor,
+        &ClientMessage::CreateChannel {
+            name: "Transactional deletion".into(),
+            kind: ChannelKind::Text,
+            parent: None,
+        },
+    )
+    .await;
+    let channel_id = match expect(&mut actor, "created", |m| {
+        matches!(m, ServerMessage::ChannelCreated { .. })
+    })
+    .await
+    {
+        ServerMessage::ChannelCreated { channel } => channel.id,
+        _ => unreachable!(),
+    };
+    drain(&mut actor, 100).await;
+    drain(&mut observer, 100).await;
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let audit: Vec<u8> = db
+        .query_row(
+            "SELECT value FROM settings WHERE key='mod_audit'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    db.execute_batch("CREATE TRIGGER fail_delete BEFORE DELETE ON channels BEGIN SELECT RAISE(ABORT, 'synthetic'); END;").unwrap();
+    send(&mut actor, &ClientMessage::DeleteChannel { channel_id }).await;
+    assert!(matches!(
+        recv(&mut actor, 2000).await,
+        Some(ServerMessage::Error { message }) if message == "Could not save channel deletion"
+    ));
+    assert!(drain(&mut observer, 200).await.is_empty());
+    let after: Vec<u8> = db
+        .query_row(
+            "SELECT value FROM settings WHERE key='mod_audit'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(after, audit, "failed deletion produces no success audit");
+    let (new_client, welcome) = connect(port, "after-failure", None).await;
+    assert!(welcome.channels.iter().any(|c| c.id == channel_id));
+    drop(new_client);
+    drain(&mut actor, 100).await;
+    drain(&mut observer, 100).await;
+    db.execute_batch("DROP TRIGGER fail_delete").unwrap();
+    send(&mut actor, &ClientMessage::DeleteChannel { channel_id }).await;
+    for conn in [&mut actor, &mut observer] {
+        expect(
+            conn,
+            "deleted after retry",
+            |m| matches!(m, ServerMessage::ChannelDeleted { channel_id: id } if *id == channel_id),
+        )
+        .await;
+    }
+    drop(actor);
+    drop(observer);
+    drop(server);
+    let restart_port = free_port();
+    let _restarted = spawn_server(restart_port, &extra);
+    wait_for_port(restart_port);
+    let (_, welcome) = connect(restart_port, "after-restart", None).await;
+    assert!(!welcome.channels.iter().any(|c| c.id == channel_id));
+}
+
+#[tokio::test]
 async fn mute_state_wird_verteilt() {
     let port = free_port();
     let _server = spawn_server(port, "");

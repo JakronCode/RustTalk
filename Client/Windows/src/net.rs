@@ -959,14 +959,14 @@ mod tests {
 
     /// A server flooding big messages fills the event queue up to its byte
     /// budget and then waits; commands still go out, and dropping the
-    /// connection ends it (the server sees the goodbye) at once.
+    /// connection ends it promptly, even if unread flood data resets TCP.
     #[test]
     fn saturated_inbound_queue_neither_blocks_commands_nor_disconnect() {
         let (seen_tx, seen_rx) = std::sync::mpsc::channel::<String>();
         let addr = tls_server(move |stream| async move {
             let (mut r, mut w) = tokio::io::split(stream);
             let _hello: Option<ClientMessage> = read_frame(&mut r).await.unwrap();
-            tokio::spawn(async move {
+            let reader = tokio::spawn(async move {
                 loop {
                     let seen = match read_frame::<_, ClientMessage>(&mut r).await {
                         Ok(Some(ClientMessage::Chat { text, .. })) => text,
@@ -994,10 +994,14 @@ mod tests {
                     reply_to: None,
                 };
                 if write_frame(&mut w, &msg).await.is_err() {
-                    return;
+                    break;
                 }
             }
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            // Keep the runtime alive until the reader reports the client disconnect.
+            tokio::time::timeout(Duration::from_secs(10), reader)
+                .await
+                .unwrap()
+                .unwrap();
         });
         let (events, mut event_rx) = event_queue();
         let conn = connect(
@@ -1029,12 +1033,12 @@ mod tests {
             "ping",
             "commands are not starved"
         );
+        assert_eq!(seen_rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
         let started = Instant::now();
         drop(conn);
-        assert_eq!(
-            seen_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
-            "goodbye"
-        );
+        let terminal = seen_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        // Disconnect is best-effort: closing with unread flood data can reset TCP.
+        assert!(matches!(terminal.as_str(), "goodbye" | "closed"));
         let events = until_closed(&mut event_rx, Duration::from_secs(2));
         assert!(started.elapsed() < Duration::from_secs(2));
         assert!(

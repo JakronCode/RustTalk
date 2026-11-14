@@ -1164,19 +1164,27 @@ impl State {
             return Err("The lobby cannot be deleted".to_string());
         }
         let was_category = channel.kind == ChannelKind::Category;
-        self.channels.remove(&id);
         let afk_gone = self.settings.afk_channel == Some(id);
         let announce_gone = self.settings.announce_channel == Some(id);
-        if afk_gone {
-            self.settings.afk_channel = None;
-        }
-        if announce_gone {
-            self.settings.announce_channel = None;
-        }
-        if afk_gone || announce_gone {
-            if let Some(db) = &self.db {
-                let _ = db.save_settings(&self.settings);
+        let settings = (afk_gone || announce_gone).then(|| {
+            let mut settings = self.settings.clone();
+            if afk_gone {
+                settings.afk_channel = None;
             }
+            if announce_gone {
+                settings.announce_channel = None;
+            }
+            settings
+        });
+        if let Some(db) = &mut self.db {
+            db.delete_channel(id, settings.as_ref()).map_err(|_| {
+                tracing::warn!("Saving channel deletion failed");
+                "Could not save channel deletion".to_string()
+            })?;
+        }
+        self.channels.remove(&id);
+        if let Some(settings) = settings {
+            self.settings = settings;
         }
         if was_category {
             for ch in self.channels.values_mut() {
@@ -1194,11 +1202,6 @@ impl State {
             }
         }
         self.end_sharing(&moved);
-        if let Some(db) = &self.db {
-            if let Err(e) = db.delete_channel(id) {
-                tracing::warn!("Saving channel deletion failed: {e}");
-            }
-        }
         Ok(moved)
     }
 
@@ -1449,6 +1452,9 @@ fn validate_name(name: &str) -> Result<String, String> {
     }
     Ok(name.to_string())
 }
+
+#[cfg(test)]
+mod channel_deletion_tests;
 
 #[cfg(test)]
 mod tests {
