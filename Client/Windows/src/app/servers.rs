@@ -814,8 +814,6 @@ impl RustTalkApp {
             // Lobby: a voice join still on its way is cancelled.
             self.voice_pending = voice.then_some(channel_id);
         }
-        let new_call =
-            voice && (self.bandwidth.is_none() || self.srv.my_voice_channel() != Some(channel_id));
         if tx.send(Command::JoinChannel(channel_id)).is_err() {
             if self.voice_pending.is_some() {
                 self.revoke_voice(id);
@@ -824,10 +822,6 @@ impl RustTalkApp {
                 id,
                 "Not sent: the connection is busy. Try again in a moment.".into(),
             );
-        } else if new_call {
-            self.bandwidth = self
-                .bandwidth_counts()
-                .map(|counts| crate::bandwidth::Call::new(Instant::now(), counts));
         }
     }
 

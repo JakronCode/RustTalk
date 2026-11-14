@@ -1587,3 +1587,29 @@ fn bandwidth_follows_call_not_view_panel_or_device_restart() {
         "a stale voice generation has no diagnostics"
     );
 }
+
+#[test]
+fn bandwidth_resets_only_on_confirmed_call_changes() {
+    use crate::bandwidth::{Media, IN};
+    let _devices = Devices::new();
+    let mut app = app();
+    let (id, _commands) = login(&mut app, "call.invalid:7331", 1);
+    app.view_session(id);
+    app.srv.channels.insert(42, channel(42, ChannelKind::Voice, "Other voice".into()));
+    join_voice(&mut app, VOICE);
+    let traffic = app.srv.cmd_tx.as_ref().unwrap().traffic.clone();
+    traffic.add(IN, Media::Screen, 100);
+    app.sample_bandwidth(Instant::now() + Duration::from_secs(2));
+    app.join_channel(42);
+    app.handle_event(id, NetEvent::Message(ServerMessage::Error { message: "Move refused".into() }));
+    app.sample_bandwidth(Instant::now());
+    assert_eq!(app.bandwidth.as_ref().unwrap().totals[IN][0], 100, "rejected move preserves call totals");
+    assert_eq!(app.bandwidth.as_ref().unwrap().history.len(), 1);
+    moved(&mut app, id, 1, 42);
+    assert_eq!(app.bandwidth.as_ref().unwrap().totals, [[0; 5]; 2]);
+    traffic.add(IN, Media::Voice, 30);
+    app.sample_bandwidth(Instant::now());
+    assert_eq!(app.bandwidth.as_ref().unwrap().totals[IN][2], 30);
+    moved(&mut app, id, 1, VOICE);
+    assert_eq!(app.bandwidth.as_ref().unwrap().totals, [[0; 5]; 2], "moderator move starts new call baseline");
+}

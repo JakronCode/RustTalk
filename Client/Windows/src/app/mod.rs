@@ -1305,6 +1305,10 @@ impl RustTalkApp {
                 self.revoke_voice(id); // left voice: the next voice join decides again
             }
             self.sync_voice_audio();
+            if now_voice.is_some() && (previous_voice != now_voice || self.bandwidth.is_none()) {
+                self.bandwidth = self.bandwidth_counts()
+                    .map(|counts| crate::bandwidth::Call::new(Instant::now(), counts));
+            }
             if now_voice.is_some() && previous_voice != now_voice {
                 self.notify(Sound::Join);
             } else if previous_voice.is_some() && now_voice.is_none() {
