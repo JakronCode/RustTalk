@@ -766,6 +766,7 @@ impl RustTalkApp {
         if self.voice_owner.is_some() {
             self.end_voice_media();
         }
+        self.bandwidth = None;
         self.voice_owner = id;
         self.voice_pending = None;
         self.voice_confirmed = false;
@@ -813,6 +814,8 @@ impl RustTalkApp {
             // Lobby: a voice join still on its way is cancelled.
             self.voice_pending = voice.then_some(channel_id);
         }
+        let new_call =
+            voice && (self.bandwidth.is_none() || self.srv.my_voice_channel() != Some(channel_id));
         if tx.send(Command::JoinChannel(channel_id)).is_err() {
             if self.voice_pending.is_some() {
                 self.revoke_voice(id);
@@ -821,6 +824,10 @@ impl RustTalkApp {
                 id,
                 "Not sent: the connection is busy. Try again in a moment.".into(),
             );
+        } else if new_call {
+            self.bandwidth = self
+                .bandwidth_counts()
+                .map(|counts| crate::bandwidth::Call::new(Instant::now(), counts));
         }
     }
 
@@ -948,6 +955,9 @@ impl RustTalkApp {
     pub(super) fn adopt_link(&mut self, id: SessionId, generation: u64) {
         if self.link_conn == Some((id, generation)) {
             return;
+        }
+        if let Some(tx) = self.session(id).and_then(|s| s.cmd_tx.as_ref()) {
+            *self.control.link.traffic.lock().unwrap() = tx.traffic.clone();
         }
         let window = self
             .session_mut(id)

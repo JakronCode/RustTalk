@@ -170,6 +170,8 @@ impl Default for SessionReplay {
 /// Lock order: `replay` before `history`.
 #[derive(Debug, Default)]
 pub struct LinkStats {
+    /// Bound to the TCP connection before its audio workers start; survives device restarts.
+    pub traffic: Mutex<std::sync::Arc<crate::bandwidth::Traffic>>,
     /// Audio packets sent (voice + screen audio).
     pub audio_sent: AtomicU32,
     /// Authenticated audio packets received.
@@ -181,6 +183,10 @@ pub struct LinkStats {
 }
 
 impl LinkStats {
+    pub fn count_payload(&self, direction: usize, media: crate::bandwidth::Media, len: usize) {
+        self.traffic.lock().unwrap().add(direction, media, len);
+    }
+
     /// New session (new key, server counters start at 0 again).
     #[cfg(test)]
     pub fn reset(&self) {

@@ -447,7 +447,21 @@ fn send_ping(udp: &UdpSocket, token: u64, cipher: &rusttalk_shared::secure::Pack
     header.flags = FLAG_CONTROL;
     // Snapshot before sending: audio sent after the ping is not in the server's count yet.
     pinger.sent(id, now, link.audio_sent.load(Ordering::Relaxed));
-    let _ = udp.send(&seal_packet(&header, cipher, DIR_TO_SERVER, &Control::Ping.encode()));
+    if udp
+        .send(&seal_packet(
+            &header,
+            cipher,
+            DIR_TO_SERVER,
+            &Control::Ping.encode(),
+        ))
+        .is_ok()
+    {
+        link.count_payload(
+            crate::bandwidth::OUT,
+            crate::bandwidth::Media::Other,
+            Control::Ping.encode().len(),
+        );
+    }
 }
 
 /// Empfangsschleife: UDP-Pakete in die Jitter-Buffer der Sprecher einsortieren;
@@ -501,6 +515,11 @@ fn recv_loop(
                     Some(false) => continue, // replayed
                     Some(true) => {}
                 }
+                link.count_payload(
+                    crate::bandwidth::IN,
+                    crate::bandwidth::Media::audio(&header),
+                    payload.len(),
+                );
                 if header.flags & FLAG_CONTROL != 0 {
                     if let (0, Some(Control::Pong { audio_received, audio_relayed })) = (header.token, Control::decode(&payload)) {
                         let received = link.audio_received.load(Ordering::Relaxed);
@@ -681,6 +700,12 @@ mod session_tests {
             assert!(stopped.load(Ordering::Relaxed));
             assert_eq!(link.audio_received.load(Ordering::Relaxed), cycle + 1, "replay and malformed packets rejected");
             assert_eq!(link.session(), session);
+            assert_eq!(
+                link.traffic.lock().unwrap().snapshot()[crate::bandwidth::IN]
+                    [crate::bandwidth::Media::Voice as usize],
+                (cycle + 1) as u64,
+                "only accepted Opus payloads, no headers/tags/replays/forgeries"
+            );
         }
         link.reset(); // reconnect is the only replay reset
         assert_eq!(link.accept(session, 3), None);

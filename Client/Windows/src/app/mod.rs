@@ -245,6 +245,7 @@ pub struct RustTalkApp {
     audio_owner: Option<SessionId>,
     /// Connection (session, attempt) whose replay window is in `control.link`.
     link_conn: Option<(SessionId, u64)>,
+    bandwidth: Option<crate::bandwidth::Call>,
     /// Reconnect enrolled servers on the first frame (never in tests).
     startup_pending: bool,
 
@@ -473,6 +474,7 @@ impl RustTalkApp {
             voice_confirmed: false,
             audio_owner: None,
             link_conn: None,
+            bandwidth: None,
             startup_pending: false,
             chat_input: String::new(),
             markdown: markdown::Cache::default(),
@@ -1417,6 +1419,7 @@ impl eframe::App for RustTalkApp {
         self.ui_screen_picker(ctx);
         self.ui_update_dialog(ctx, false);
         self.ui_remember_prompt(ctx);
+        self.sample_bandwidth(Instant::now());
         self.ui_links(ctx);
 
         self.sync_mic_preview();

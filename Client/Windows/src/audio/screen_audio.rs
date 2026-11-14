@@ -310,7 +310,16 @@ fn encode_loop(
         if let Ok(len) = encoder.encode_float(&frame[..], &mut opus) {
             let mut header = AudioHeader::new(token, seq, ts);
             header.flags |= FLAG_SCREEN_AUDIO;
-            let _ = udp.send(&seal_packet(&header, &cipher, DIR_TO_SERVER, &opus[..len]));
+            if udp
+                .send(&seal_packet(&header, &cipher, DIR_TO_SERVER, &opus[..len]))
+                .is_ok()
+            {
+                link.count_payload(
+                    crate::bandwidth::OUT,
+                    crate::bandwidth::Media::audio(&header),
+                    len,
+                );
+            }
             link.audio_sent.fetch_add(1, Ordering::Relaxed);
             activity.note();
             seq = seq.wrapping_add(1);
@@ -405,7 +414,16 @@ fn encode_separate(
             let mut header = AudioHeader::new(token, *seq, *ts);
             header.flags = FLAG_SCREEN_AUDIO;
             header.stream_id = source.id;
-            let _ = udp.send(&seal_packet(&header, &cipher, DIR_TO_SERVER, &opus[..len]));
+            if udp
+                .send(&seal_packet(&header, &cipher, DIR_TO_SERVER, &opus[..len]))
+                .is_ok()
+            {
+                link.count_payload(
+                    crate::bandwidth::OUT,
+                    crate::bandwidth::Media::audio(&header),
+                    len,
+                );
+            }
             *seq = seq.wrapping_add(1);
             link.audio_sent.fetch_add(1, Ordering::Relaxed);
             activity.note();
@@ -442,10 +460,23 @@ mod tests {
         let (render_prod, render_cons) = HeapRb::<f32>::new(FRAME_SAMPLES).split();
         let tap = Arc::new(Mutex::new(Some(render_prod)));
         let stop = Arc::new(AtomicBool::new(false));
+        let link = Arc::new(super::super::link::LinkStats::default());
         let worker = std::thread::spawn({
+            let link = link.clone();
             let cipher = cipher.clone();
             let stop = stop.clone();
-            move || encode_loop(vec![source], render_cons, sender, 42, cipher, Arc::new(super::super::link::LinkStats::default()), stop, Activity::new())
+            move || {
+                encode_loop(
+                    vec![source],
+                    render_cons,
+                    sender,
+                    42,
+                    cipher,
+                    link,
+                    stop,
+                    Activity::new(),
+                )
+            }
         });
         let audio = ScreenAudio { activity: Activity::new(), source_ids: vec![], registered: Arc::default(), _stream: Some(stream), capture_workers: vec![], source_stops: vec![], worker: Some(worker), stop: stop.clone(), tap: tap.clone() };
         let mut buf = [0; 1500];
@@ -453,8 +484,24 @@ mod tests {
         let (header, _) = decode(&buf[..n]).unwrap();
         assert_eq!(header.flags, FLAG_SCREEN_AUDIO);
         assert_ne!(header.counter, decode(&voice).unwrap().0.counter);
-        assert!(!open_packet(&header, &buf[..n], &cipher, DIR_TO_SERVER).unwrap().is_empty());
+        assert!(!open_packet(&header, &buf[..n], &cipher, DIR_TO_SERVER)
+            .unwrap()
+            .is_empty());
+        let mut payload_bytes = open_packet(&header, &buf[..n], &cipher, DIR_TO_SERVER)
+            .unwrap()
+            .len();
         drop(audio);
+        receiver.set_nonblocking(true).unwrap();
+        while let Ok(n) = receiver.recv(&mut buf) {
+            let (h, _) = decode(&buf[..n]).unwrap();
+            payload_bytes += open_packet(&h, &buf[..n], &cipher, DIR_TO_SERVER)
+                .unwrap()
+                .len();
+        }
+        assert_eq!(
+            link.traffic.lock().unwrap().snapshot()[crate::bandwidth::OUT],
+            [0, 0, 0, payload_bytes as u64, 0]
+        );
         assert!(stop.load(Ordering::Relaxed));
         assert!(tap.lock().unwrap().is_none());
         assert_eq!(devices.0.borrow().systems, 0);

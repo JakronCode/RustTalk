@@ -202,7 +202,13 @@ pub fn run(
             match encoder.encode_float(&out[..], &mut opus_buf) {
                 Ok(len) => {
                     let pkt = seal_packet(&AudioHeader::new(token, seq, timestamp), &cipher, DIR_TO_SERVER, &opus_buf[..len]);
-                    let _ = udp.send(&pkt);
+                    if udp.send(&pkt).is_ok() {
+                        control.link.count_payload(
+                            crate::bandwidth::OUT,
+                            crate::bandwidth::Media::Voice,
+                            len,
+                        );
+                    }
                     control.link.audio_sent.fetch_add(1, Ordering::Relaxed);
                     seq = seq.wrapping_add(1);
                 }

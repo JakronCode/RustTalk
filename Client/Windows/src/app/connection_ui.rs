@@ -1,5 +1,5 @@
-//! Voice connection popup: ping graph (last 4 minutes), packet loss and a
-//! short hint. Opened by clicking "Voice Connected" in the voice panel.
+//! Voice connection popup: bounded ping and payload bandwidth graphs,
+//! packet loss and call totals. Opened by clicking "Voice Connected" in the voice panel.
 
 use std::time::Instant;
 
@@ -14,6 +14,25 @@ const HIGH_PING_MS: f32 = 250.0;
 const HIGH_LOSS_PCT: f32 = 10.0;
 
 impl RustTalkApp {
+    pub(super) fn bandwidth_counts(&self) -> Option<crate::bandwidth::Counts> {
+        let id = self.voice_owner?;
+        let server = self
+            .session(id)
+            .filter(|s| s.connected && s.generation == self.voice_generation)?;
+        let tcp = &server.cmd_tx.as_ref()?.traffic;
+        Some(tcp.snapshot())
+    }
+
+    pub(super) fn sample_bandwidth(&mut self, now: Instant) {
+        let Some(counts) = self.bandwidth_counts() else {
+            self.bandwidth = None;
+            return;
+        };
+        if let Some(call) = &mut self.bandwidth {
+            call.sample(now, counts);
+        }
+    }
+
     /// Opens (or closes) the popup, anchored at `at` (bottom-left corner).
     pub(super) fn toggle_connection_panel(&mut self, at: egui::Pos2) {
         self.connection_panel = match self.connection_panel {
@@ -42,6 +61,7 @@ impl RustTalkApp {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
+            .vscroll(true)
             .pivot(egui::Align2::LEFT_BOTTOM)
             .default_pos(at)
             .fixed_size([GRAPH_SIZE.x, 0.0])
@@ -68,6 +88,9 @@ impl RustTalkApp {
                     .size(11.5)
                     .color(theme::MUTED),
                 );
+                if let Some(call) = &self.bandwidth {
+                    bandwidth_ui(ui, call);
+                }
                 encryption_badge(ui);
             });
         if !open {
@@ -229,6 +252,123 @@ fn ping_graph(ui: &mut egui::Ui, points: &[(f32, f32)]) {
     ));
     if let Some(&last) = line.last() {
         painter.circle_filled(last, 3.0, theme::accent());
+    }
+}
+
+fn bandwidth_ui(ui: &mut egui::Ui, call: &crate::bandwidth::Call) {
+    let now = Instant::now();
+    ui.separator();
+    ui.label(egui::RichText::new("Application payload bandwidth").strong());
+    for (direction, name) in [
+        (crate::bandwidth::IN, "Incoming"),
+        (crate::bandwidth::OUT, "Outgoing"),
+    ] {
+        let rate: f64 = call.rates[direction].iter().sum();
+        let total = call.totals[direction]
+            .iter()
+            .fold(0u64, |sum, n| sum.saturating_add(*n));
+        ui.label(format!(
+            "{name}: {:.1} KiB/s · {:.2} MiB since join",
+            rate / 1024.,
+            total as f64 / 1_048_576.
+        ));
+        bandwidth_graph(ui, call, direction, now);
+    }
+    ui.horizontal_wrapped(|ui| {
+        for (name, color) in bandwidth_legend() {
+            ui.colored_label(color, name);
+        }
+    });
+    ui.label(egui::RichText::new("Media payloads + Other (serialized chat/control and UDP control). Excludes framing, encryption, IP/TCP/UDP overhead, retransmits, incomplete TCP frames and rejected UDP packets. Local only.").size(11.5).color(theme::MUTED));
+}
+
+fn bandwidth_legend() -> [(&'static str, egui::Color32); 5] {
+    [
+        ("Screen", theme::GREEN),
+        ("Camera", theme::YELLOW),
+        ("Microphone", egui::Color32::from_rgb(100, 180, 255)),
+        ("Shared audio", egui::Color32::from_rgb(220, 130, 230)),
+        ("Other", theme::MUTED),
+    ]
+}
+
+fn bandwidth_graph(
+    ui: &mut egui::Ui,
+    call: &crate::bandwidth::Call,
+    direction: usize,
+    now: Instant,
+) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(GRAPH_SIZE.x, 90.), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4., theme::DARK);
+    let plot = egui::Rect::from_min_max(
+        rect.min + egui::vec2(45., 15.),
+        rect.max - egui::vec2(8., 18.),
+    );
+    let top = call
+        .history
+        .iter()
+        .flat_map(|(_, rates)| rates[direction])
+        .fold(1024_f64, f64::max);
+    let font = egui::FontId::proportional(10.);
+    for i in 0..=2 {
+        let y = plot.bottom() - plot.height() * i as f32 / 2.;
+        painter.line_segment(
+            [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
+            egui::Stroke::new(1.0_f32, theme::BORDER),
+        );
+        painter.text(
+            egui::pos2(plot.left() - 4., y),
+            egui::Align2::RIGHT_CENTER,
+            format!("{:.1}", top / 1024. * i as f64 / 2.),
+            font.clone(),
+            theme::MUTED,
+        );
+    }
+    painter.text(
+        rect.min + egui::vec2(4., 2.),
+        egui::Align2::LEFT_TOP,
+        "KiB/s",
+        font.clone(),
+        theme::MUTED,
+    );
+    for minute in 0..=4 {
+        painter.text(
+            egui::pos2(
+                plot.right() - minute as f32 / 4. * plot.width(),
+                plot.bottom() + 3.,
+            ),
+            egui::Align2::CENTER_TOP,
+            if minute == 0 {
+                "now".into()
+            } else {
+                format!("-{minute} min")
+            },
+            font.clone(),
+            theme::MUTED,
+        );
+    }
+    for (media, (_, color)) in bandwidth_legend().iter().enumerate() {
+        let points: Vec<_> = call
+            .history
+            .iter()
+            .filter_map(|(at, rates)| {
+                let age = now.saturating_duration_since(*at).as_secs_f32();
+                (age <= 240.).then(|| {
+                    egui::pos2(
+                        plot.right() - age / 240. * plot.width(),
+                        plot.bottom() - (rates[direction][media] / top) as f32 * plot.height(),
+                    )
+                })
+            })
+            .collect();
+        if let Some(last) = points.last() {
+            painter.circle_filled(*last, 2., *color);
+        }
+        painter.add(egui::Shape::line(
+            points,
+            egui::Stroke::new(1.5_f32, *color),
+        ));
     }
 }
 

@@ -246,6 +246,7 @@ fn try_queue<T>(
 /// Sends commands to one connection without ever blocking the caller.
 #[derive(Clone)]
 pub struct CommandSender {
+    pub traffic: Arc<crate::bandwidth::Traffic>,
     tx: mpsc::Sender<Queued<Command>>,
     bytes: Arc<Semaphore>,
     /// A command (not video) was refused because the queue was full.
@@ -259,6 +260,7 @@ impl CommandSender {
         (
             Self {
                 tx,
+                traffic: Default::default(),
                 bytes,
                 refused: Default::default(),
             },
@@ -443,6 +445,7 @@ pub fn connect(
     upload_backlog: Arc<AtomicUsize>,
 ) -> Connection {
     let (tx, commands) = CommandSender::new();
+    let traffic = tx.traffic.clone();
     let (cancel, mut cancelled_rx) = watch::channel(());
     std::thread::Builder::new()
         .name("net".to_string())
@@ -459,6 +462,7 @@ pub fn connect(
                     &ctx,
                     &upload_backlog,
                     &mut cancelled_rx,
+                    traffic,
                 )
                 .await
                 {
@@ -519,6 +523,7 @@ async fn run(
     ctx: &eframe::egui::Context,
     upload_backlog: &AtomicUsize,
     cancel: &mut watch::Receiver<()>,
+    traffic: Arc<crate::bandwidth::Traffic>,
 ) -> anyhow::Result<()> {
     // Connecting, TLS and login stop as soon as the UI lets go: dropping
     // the unfinished stream closes it, nothing of it is reused.
@@ -537,7 +542,12 @@ async fn run(
     // (25 fps Video!) mitten in einem Frame abgebrochen -> Stream verschoben
     // -> "Netzwerkfehler". Der Task liest immer komplette Frames und wird nur
     // abgebrochen, wenn die ganze Verbindung endet.
-    let mut reader_task = AbortOnDrop(tokio::spawn(read_loop(reader, events.clone(), ctx.clone())));
+    let mut reader_task = AbortOnDrop(tokio::spawn(read_loop(
+        reader,
+        events.clone(),
+        ctx.clone(),
+        traffic.clone(),
+    )));
 
     loop {
         tokio::select! {
@@ -571,7 +581,7 @@ async fn run(
                 drop(_bytes);
                 upload_backlog.fetch_sub(video_len, Ordering::Relaxed);
                 match res {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(())) => traffic.sent(&msg),
                     Ok(Err(e)) => anyhow::bail!("Network error while sending: {e}"),
                     Err(_) => anyhow::bail!("Timeout while sending to the server"),
                 }
@@ -715,10 +725,12 @@ async fn read_loop<R: AsyncRead + Unpin>(
     mut reader: R,
     events: EventSender,
     ctx: eframe::egui::Context,
+    traffic: Arc<crate::bandwidth::Traffic>,
 ) -> anyhow::Result<()> {
     loop {
         match read_frame_sized::<_, ServerMessage>(&mut reader).await {
             Ok(Some((m, len))) => {
+                traffic.received(&m, len);
                 // A full queue drops video frames (the decoder asks for a
                 // keyframe); the rest waits, which stops reading from the server.
                 let sent = match m {
@@ -752,6 +764,10 @@ mod tests {
         assert_eq!(result, Err(super::SendError::Full));
         assert!(connection.take_refused());
         assert!(received.try_recv().is_none());
+        assert_eq!(
+            connection.traffic.snapshot(),
+            [[0; crate::bandwidth::MEDIA]; 2]
+        );
         assert_eq!(
             connection.tx.bytes.available_permits(),
             super::COMMAND_QUEUE_BYTES
@@ -863,6 +879,34 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn bandwidth_counts_received_video_even_when_ui_queue_is_full() {
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let (events, _rx) = event_queue();
+        let traffic = Arc::new(crate::bandwidth::Traffic::default());
+        let write = async move {
+            for _ in 0..EVENT_QUEUE + 10 {
+                write_frame(
+                    &mut writer,
+                    &ServerMessage::VideoFrame {
+                        from_id: 9,
+                        kind: VideoKind::Screen,
+                        data: vec![7; 40],
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        };
+        let read = read_loop(reader, events, Default::default(), traffic.clone());
+        let (_, result) = tokio::join!(write, read);
+        assert!(result.is_err()); // EOF after complete frames.
+        assert_eq!(
+            traffic.snapshot()[crate::bandwidth::IN],
+            [((EVENT_QUEUE + 10) * 40) as u64, 0, 0, 0, 0]
+        );
+    }
+
     /// Regression: Frueher lief `read_frame` als Zweig im `select!` und wurde
     /// bei jedem ausgehenden Befehl mitten im Frame abgebrochen -> Stream
     /// verschoben -> "Netzwerkfehler". Hier gehen grosse Video-Frames
@@ -957,6 +1001,15 @@ mod tests {
         }
         assert_eq!(received_by_server.load(Ordering::Relaxed), N);
         assert_eq!(backlog.load(Ordering::Relaxed), 0);
+        let counts = conn.traffic.snapshot();
+        assert_eq!(
+            counts[crate::bandwidth::OUT][crate::bandwidth::Media::Camera as usize],
+            (N * SIZE) as u64
+        );
+        assert!(
+            counts[crate::bandwidth::IN][crate::bandwidth::Media::Other as usize]
+                > (N * SIZE) as u64
+        );
     }
 
     /// A server flooding big messages fills the event queue up to its byte

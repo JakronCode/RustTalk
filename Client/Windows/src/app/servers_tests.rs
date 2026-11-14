@@ -1520,3 +1520,70 @@ fn mixer_volumes_are_per_stream_saved_by_name_and_follow_the_voice_server() {
     app.apply_user_volume(9, "bob");
     assert!(!app.user_volumes.lock().unwrap().contains_key(&StreamKind::Voice.key(9)));
 }
+
+#[test]
+fn bandwidth_follows_call_not_view_panel_or_device_restart() {
+    use crate::bandwidth::{Media, IN, OUT};
+    let _devices = Devices::new();
+    let mut app = app();
+    let (a, _ra) = login(&mut app, "a.invalid:7331", 1);
+    let (b, _rb) = login(&mut app, "b.invalid:7331", 2);
+    let traffic_a = app
+        .session(a)
+        .unwrap()
+        .cmd_tx
+        .as_ref()
+        .unwrap()
+        .traffic
+        .clone();
+    let traffic_b = app
+        .session(b)
+        .unwrap()
+        .cmd_tx
+        .as_ref()
+        .unwrap()
+        .traffic
+        .clone();
+    traffic_a.add(IN, Media::Other, 1000); // Before joining is not call traffic.
+    app.view_session(a);
+    join_voice(&mut app, VOICE);
+    traffic_a.add(IN, Media::Screen, 100);
+    app.control.link.count_payload(OUT, Media::Voice, 20);
+    traffic_b.add(IN, Media::Camera, 999);
+    assert!(app.connection_panel.is_none());
+    app.sample_bandwidth(Instant::now() + Duration::from_secs(2));
+    assert_eq!(
+        app.bandwidth.as_ref().unwrap().history.len(),
+        1,
+        "samples with popup closed"
+    );
+    assert_eq!(
+        app.bandwidth.as_ref().unwrap().totals[IN],
+        [100, 0, 0, 0, 0]
+    );
+    app.toggle_connection_panel(egui::Pos2::ZERO);
+    app.toggle_connection_panel(egui::Pos2::ZERO);
+    app.view_session(b);
+    app.audio = None;
+    app.sync_voice_audio();
+    app.control.link.count_payload(OUT, Media::Shared, 30);
+    app.sample_bandwidth(Instant::now());
+    assert_eq!(
+        app.bandwidth.as_ref().unwrap().totals[OUT][..4],
+        [0, 0, 20, 30]
+    );
+    join_voice(&mut app, VOICE);
+    app.sample_bandwidth(Instant::now());
+    assert_eq!(app.bandwidth.as_ref().unwrap().totals[IN], [0; 5]);
+    assert_eq!(app.bandwidth.as_ref().unwrap().totals[OUT][..4], [0; 4]);
+    traffic_a.add(IN, Media::Camera, 888); // Previous connection cannot pollute B.
+    app.control.link.count_payload(IN, Media::Shared, 40);
+    app.sample_bandwidth(Instant::now());
+    assert_eq!(app.bandwidth.as_ref().unwrap().totals[IN], [0, 0, 0, 40, 0]);
+    app.srv.generation += 1;
+    app.sample_bandwidth(Instant::now());
+    assert!(
+        app.bandwidth.is_none(),
+        "a stale voice generation has no diagnostics"
+    );
+}

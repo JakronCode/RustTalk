@@ -17,7 +17,7 @@ Website: [rusttalk.com](https://rusttalk.com) (source in [website/](website/))
 
 - **Echo cancellation** (WebRTC AEC3, pure Rust): speakers instead of headphones work
 - **Encryption:** control connection over TLS (the server's own certificate: on first connect the client shows its fingerprint and asks before sending anything, then pins it like SSH; a changed certificate is refused with a warning), voice and screen audio encrypted with ChaCha20-Poly1305 (per-session key)
-- **Voice:** push-to-talk (optionally **global**, also while RustTalk is in the background; keys or side mouse buttons) + voice activity (VAD using RMS *and* RNNoise speech probability), Opus 64 kbit/s 48 kHz/20 ms over UDP with in-band FEC, jitter buffer with FEC/PLC, sinc resampler for any microphone sample rate; click "Voice Connected" for connection stats (ping graph of the last 4 minutes, jitter, inbound/outbound packet loss)
+- **Voice:** push-to-talk (optionally **global**, also while RustTalk is in the background; keys or side mouse buttons) + voice activity (VAD using RMS *and* RNNoise speech probability), Opus 64 kbit/s 48 kHz/20 ms over UDP with in-band FEC, jitter buffer with FEC/PLC, sinc resampler for any microphone sample rate; click "Voice Connected" for connection stats (ping graph of the last 4 minutes, jitter, inbound/outbound packet loss, current payload bandwidth, usage since joining and separate incoming/outgoing four-minute graphs for screen, camera, microphone, shared audio and Other)
 - **Automatic gain control** (AGC + limiter): quiet microphones are boosted, loud ones tamed — can be turned off
 - **AI noise suppression** (RNNoise via `nnnoiseless`) — can be turned off
 - **Microphone privacy:** connecting to the lobby does not open the microphone. Capture starts only after the server confirms a voice-channel join and is released on leaving voice or disconnecting. Opening Settings → Voice & Audio intentionally opens a local level preview outside voice; closing settings or changing pages releases it. Notification sounds remain available in the lobby through output-only playback.
@@ -442,3 +442,21 @@ make docker-test
 - Natural voices use `ort` 2.0 release candidate `=2.0.0-rc.15` (no stable 2.0 exists yet; pinned exactly so builds don't change on their own). Switch to 2.0.0 once it is out
 
 Separate application audio can be enabled with **Send separately** in the share dialog (up to eight apps). Listeners get an independent volume and mute for each app. Generic labels are the default; sharing app names with voice-channel members is opt-in. Labels are session-only. Client and server must both support protocol v17 (UDP audio header v4).
+
+### Call bandwidth diagnostics
+
+Voice Connection measures application payloads locally in RAM, without telemetry.
+Media counts are encoded video data and authenticated Opus payloads; Other counts
+serialized TCP chat/control messages and UDP control payloads. Incoming media
+counts even when playback/decoding or the UI queue drops it. Outgoing counts only
+completed TCP writes and successful UDP sends, not queued or refused media.
+These are not wire totals: framing, media message metadata, encryption tags/TLS,
+IP/TCP/UDP headers, retransmissions, rejected UDP packets and incomplete TCP frames
+are excluded. External downloads and other server connections are excluded.
+
+Totals reset on an explicit new voice join (including changing voice channels),
+not when reopening the popup or restarting audio devices. Rates use actual elapsed
+time; at most 240 one-second samples are retained, also while the popup is closed.
+As with voice playback, late UDP packets have no channel epoch, so a late packet
+after a channel change can be attributed to the new call. No payload content or
+per-application traffic history is retained.
