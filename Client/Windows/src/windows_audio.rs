@@ -14,7 +14,8 @@ use windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, BLOB, CLSCTX_ALL, COINIT_MULTITHREADED,
+    CoCreateInstance, CoInitializeEx, CoTaskMemAlloc, CoUninitialize, BLOB, CLSCTX_ALL,
+    COINIT_MULTITHREADED,
 };
 use windows::Win32::System::Threading::{
     CreateEventW, GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject,
@@ -108,13 +109,34 @@ fn process(pid: u32) -> Result<(OwnedHandle, u64, String)> {
     ))
 }
 
+impl ApplicationSource {
+    /// The process behind a shared window (its whole process tree is captured).
+    pub(crate) fn for_process(pid: u32) -> Result<Self> {
+        let (_process, created, _) = process(pid)?;
+        Ok(Self { pid, created })
+    }
+}
+
+/// Never offered: shell windows play nothing, and another RustTalk would send the call back into itself.
+const SKIPPED_PROCESSES: [&str; 8] = [
+    "rusttalk.exe",
+    "explorer.exe",
+    "applicationframehost.exe",
+    "textinputhost.exe",
+    "shellexperiencehost.exe",
+    "startmenuexperiencehost.exe",
+    "searchhost.exe",
+    "systemsettings.exe",
+];
+
+/// Processes with an audio session (playing or paused), then apps that only
+/// have a window so far (a paused player, a browser before its first sound).
 pub fn applications(stop: &AtomicBool) -> Result<Vec<AudioApplication>> {
     let _com = Com::new()?;
     let enumerator: IMMDeviceEnumerator =
         unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
     let devices = unsafe { enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)? };
-    let mut applications = Vec::new();
-    let mut seen = HashSet::new();
+    let mut sessions: Vec<(u32, bool)> = Vec::new();
     for i in 0..unsafe { devices.GetCount()? }.min(32) {
         anyhow::ensure!(!stop.load(Ordering::Relaxed), "Discovery stopped");
         let device = unsafe { devices.Item(i)? };
@@ -122,29 +144,77 @@ pub fn applications(stop: &AtomicBool) -> Result<Vec<AudioApplication>> {
         else {
             continue;
         };
-        let sessions = unsafe { manager.GetSessionEnumerator()? };
-        for j in 0..unsafe { sessions.GetCount()? }.clamp(0, 512) {
+        let Ok(list) = (unsafe { manager.GetSessionEnumerator() }) else {
+            continue;
+        };
+        for j in 0..unsafe { list.GetCount() }.unwrap_or(0).clamp(0, 512) {
             anyhow::ensure!(!stop.load(Ordering::Relaxed), "Discovery stopped");
-            let Ok(session) = (unsafe { sessions.GetSession(j) }) else {
+            let Ok(session) = (unsafe { list.GetSession(j) }) else {
                 continue;
             };
-            if unsafe { session.GetState()? } != AudioSessionStateActive {
+            let Ok(state) = (unsafe { session.GetState() }) else {
+                continue;
+            };
+            if state == AudioSessionStateExpired {
                 continue;
             }
-            let session: IAudioSessionControl2 = session.cast()?;
-            let pid = unsafe { session.GetProcessId()? };
-            if !seen.insert(pid) || applications.len() >= 128 {
+            let Ok(session) = session.cast::<IAudioSessionControl2>() else {
                 continue;
-            }
-            if let Ok((_process, created, name)) = process(pid) {
-                applications.push(RawApplication {
-                    app: name,
-                    stream: None,
-                    icon_hint: None,
-                    source: ApplicationSource { pid, created },
-                });
+            };
+            let Ok(pid) = (unsafe { session.GetProcessId() }) else {
+                continue;
+            };
+            let active = state == AudioSessionStateActive;
+            if let Some(entry) = sessions.iter_mut().find(|(p, _)| *p == pid) {
+                entry.1 |= active;
+            } else if sessions.len() < 128 {
+                sessions.push((pid, active));
             }
         }
+    }
+
+    let mut applications = Vec::new();
+    let mut names = HashSet::new();
+    for (pid, active) in sessions {
+        if let Ok((_process, created, name)) = process(pid) {
+            let key = name.to_lowercase();
+            if SKIPPED_PROCESSES.contains(&key.as_str()) {
+                continue;
+            }
+            names.insert(key);
+            applications.push(RawApplication {
+                app: name,
+                stream: None,
+                icon_hint: None,
+                active,
+                source: ApplicationSource { pid, created },
+            });
+        }
+    }
+    anyhow::ensure!(!stop.load(Ordering::Relaxed), "Discovery stopped");
+    let mut seen = HashSet::new();
+    for window in xcap::Window::all().unwrap_or_default() {
+        if applications.len() >= 128 {
+            break;
+        }
+        let Ok(pid) = window.pid() else { continue };
+        if !seen.insert(pid) || window.title().unwrap_or_default().trim().is_empty() {
+            continue;
+        }
+        let Ok((_process, created, name)) = process(pid) else {
+            continue;
+        };
+        let key = name.to_lowercase();
+        if SKIPPED_PROCESSES.contains(&key.as_str()) || !names.insert(key) {
+            continue;
+        }
+        applications.push(RawApplication {
+            app: name,
+            stream: None,
+            icon_hint: None,
+            active: false,
+            source: ApplicationSource { pid, created },
+        });
     }
     Ok(super::share_source::finish(applications))
 }
@@ -160,8 +230,6 @@ impl Drop for ActivationLease {
 #[implement(IActivateAudioInterfaceCompletionHandler)]
 struct Activation {
     ready: mpsc::SyncSender<()>,
-    // Kept alive by the COM callback if cancellation wins before activation completes.
-    params: Box<AUDIOCLIENT_ACTIVATION_PARAMS>,
     _lease: ActivationLease,
 }
 impl IActivateAudioInterfaceCompletionHandler_Impl for Activation_Impl {
@@ -189,9 +257,14 @@ fn activate(pid: u32, stop: &AtomicBool) -> Result<IAudioClient> {
         std::thread::sleep(Duration::from_millis(10));
     }
     let (tx, rx) = mpsc::sync_channel(1);
-    let activation = Activation {
-        ready: tx,
-        params: Box::new(AUDIOCLIENT_ACTIVATION_PARAMS {
+    let activation = Activation { ready: tx, _lease: ActivationLease };
+    // Windows takes ownership of the blob and frees it with CoTaskMemFree once the
+    // operation ends, so it must come from the COM allocator and never be freed here.
+    let size = std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>();
+    let params = unsafe { CoTaskMemAlloc(size) } as *mut AUDIOCLIENT_ACTIVATION_PARAMS;
+    anyhow::ensure!(!params.is_null(), "Out of memory");
+    unsafe {
+        params.write(AUDIOCLIENT_ACTIVATION_PARAMS {
             ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
             Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
                 ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
@@ -199,18 +272,16 @@ fn activate(pid: u32, stop: &AtomicBool) -> Result<IAudioClient> {
                     ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
                 },
             },
-        }),
-        _lease: ActivationLease,
-    };
-    let params = activation.params.as_ref() as *const AUDIOCLIENT_ACTIVATION_PARAMS as *mut u8;
-    // PROPVARIANT borrows the callback-owned blob; never PropVariantClear this borrowed allocation.
+        });
+    }
+    let params = params as *mut u8;
     let variant = PROPVARIANT {
         Anonymous: PROPVARIANT_0 {
             Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
                 vt: VT_BLOB,
                 Anonymous: PROPVARIANT_0_0_0 {
                     blob: BLOB {
-                        cbSize: std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
+                        cbSize: size as u32,
                         pBlobData: params,
                     },
                 },
@@ -385,4 +456,46 @@ pub fn start(
                 tracing::warn!("Application audio capture stopped");
             }
         })?)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Lists what the audio picker would show on this machine (opens no capture).
+    /// Manual: `cargo test -p rusttalk-client lists_local_audio_apps -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn lists_local_audio_apps() {
+        let apps = super::applications(&std::sync::atomic::AtomicBool::new(false)).expect("discovery");
+        for app in &apps {
+            println!("{}{}", app.label, if app.active { "  (playing)" } else { "" });
+        }
+        assert!(!apps.is_empty());
+    }
+
+    /// Captures each listed app's process tree for a moment, the way a window share does.
+    /// Manual: `cargo test -p rusttalk-client captures_each_app_briefly -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn captures_each_app_briefly() {
+        use ringbuf::traits::{Consumer, Split};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let apps = super::applications(&AtomicBool::new(false)).expect("discovery");
+        for round in 0..3 {
+            for app in &apps {
+                let (prod, mut cons) = ringbuf::HeapRb::<f32>::new(96_000).split();
+                let stop = Arc::new(AtomicBool::new(false));
+                let worker = super::start(app.source.clone(), prod, stop.clone()).expect("start");
+                let mut got = 0;
+                let mut buf = [0f32; 4096];
+                for _ in 0..40 {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    got += cons.pop_slice(&mut buf);
+                }
+                stop.store(true, Ordering::Relaxed);
+                worker.join().unwrap();
+                println!("round {round} {}: {got} samples", app.label);
+            }
+        }
+    }
 }

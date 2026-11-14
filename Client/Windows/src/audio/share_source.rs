@@ -39,6 +39,8 @@ pub struct AudioApplication {
     /// Shown only when it tells apart several streams of the same app.
     pub detail: Option<String>,
     pub icon: Option<AppIcon>,
+    /// Playing sound right now (listed first).
+    pub active: bool,
     pub source: ApplicationSource,
 }
 
@@ -47,6 +49,7 @@ pub struct RawApplication {
     pub app: String,
     pub stream: Option<String>,
     pub icon_hint: Option<String>,
+    pub active: bool,
     pub source: ApplicationSource,
 }
 
@@ -173,12 +176,14 @@ pub fn finish(raw: Vec<RawApplication>) -> Vec<AudioApplication> {
                 detail: stream_detail(&label, r.stream.as_deref()),
                 label,
                 icon,
+                active: r.active,
                 source: r.source,
             }
         })
         .collect();
     apps.sort_by_cached_key(|a| (a.label.to_lowercase(), a.label.clone(), a.detail.clone()));
     disambiguate(&mut apps);
+    apps.sort_by_key(|a| !a.active);
     apps
 }
 
@@ -307,6 +312,7 @@ mod tests {
             app: app.into(),
             stream: stream.map(Into::into),
             icon_hint: None,
+            active: true,
             source: test_source(pid),
         }
     }

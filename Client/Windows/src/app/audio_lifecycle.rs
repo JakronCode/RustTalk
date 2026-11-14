@@ -1,6 +1,7 @@
 //! Microphone ownership follows confirmed channel membership, not the TCP connection.
 
 use super::*;
+use crate::audio::share_source::AudioShareSource;
 
 fn set_active<T>(
     slot: &mut Option<T>,
@@ -102,14 +103,53 @@ impl RustTalkApp {
     }
 
     pub(super) fn stop_shared_audio(&mut self) {
-        if matches!(self.shared_audio_source, crate::audio::share_source::AudioShareSource::Separate(_)) {
+        if !self.announced_streams.is_empty() || matches!(self.shared_audio_source, AudioShareSource::Separate(_)) {
             if let Some(tx) = self.voice_tx() { let _ = tx.send(Command::SetAudioStreams(Vec::new())); }
         }
+        self.announced_streams.clear();
+        self.confirmed_streams.clear();
+        self.screen_stream = None; // re-adding it needs a fresh ID
         self.screen_audio = None;
+        self.screen_audio_running = None;
         self.audio_only = false;
         self.audio_picker = None;
         self.shared_audio_source = Default::default();
         self.screen_audio_failed = true;
+    }
+
+    /// Stops the explicit audio share; the screen share's own sound keeps going.
+    pub(super) fn stop_audio_only(&mut self) {
+        let screen_sound = self.screen.as_ref().is_some_and(|s| s.is_sending()) && self.config.share_screen_audio;
+        self.stop_shared_audio();
+        if screen_sound {
+            self.screen_audio_failed = false;
+            self.sync_shared_audio();
+        }
+    }
+
+    /// What the capture should record: the explicit selection, the shared
+    /// window's app (or everything for a whole screen), or both: mixed into
+    /// one stream, or the window as its own "Screen audio" stream when the
+    /// explicit apps are sent separately.
+    fn shared_audio_target(&self, screen_sound: bool) -> AudioShareSource {
+        use crate::audio::share_source::MAX_MIX;
+        use AudioShareSource::{Applications, Separate, System};
+        let screen = screen_sound.then(|| self.screen_audio_app.clone().map_or(System, |app| Applications(vec![app])));
+        match (self.audio_only, screen) {
+            (false, Some(screen)) => screen,
+            (true, Some(Applications(window))) => match &self.shared_audio_source {
+                Applications(apps) if apps.len() < MAX_MIX && !apps.contains(&window[0]) => {
+                    Applications(apps.iter().chain(&window).cloned().collect())
+                }
+                Separate(apps) if apps.len() < MAX_MIX && !apps.iter().any(|(a, _)| *a == window[0]) => match &self.screen_stream {
+                    Some(info) => Separate(apps.iter().cloned().chain([(window[0].clone(), info.clone())]).collect()),
+                    None => Separate(apps.clone()),
+                },
+                explicit => explicit.clone(),
+            },
+            (true, Some(System)) if !matches!(self.shared_audio_source, Separate(_)) => System,
+            _ => self.shared_audio_source.clone(),
+        }
     }
 
     #[cfg(test)]
@@ -137,25 +177,58 @@ impl RustTalkApp {
             self.set_error("Computer audio stopped: capture device or encoder failed. Start sharing again to retry.");
             return;
         }
-        if let (Some(audio), crate::audio::share_source::AudioShareSource::Separate(apps)) = (&self.screen_audio, &mut self.shared_audio_source) {
+        let mut pruned = false;
+        if let (Some(audio), AudioShareSource::Separate(apps)) = (&self.screen_audio, &mut self.shared_audio_source) {
             let ids = audio.active_ids();
             let before = apps.len();
             apps.retain(|(_, s)| ids.contains(&s.id));
-            if before != apps.len() {
-                let streams = apps.iter().map(|(_, s)| s.clone()).collect();
-                if let Some(tx) = self.voice_tx() { let _ = tx.send(Command::SetAudioStreams(streams)); }
-            }
+            pruned = before != apps.len();
         }
-        let wanted = wants_shared_audio(
-            self.audio_only,
+        let screen_sound = wants_shared_audio(
+            false,
             self.screen
                 .as_ref()
                 .is_some_and(|screen| screen.is_sending()),
             self.config.share_screen_audio,
         );
+        if screen_sound && self.screen_audio_app.is_some() && self.screen_stream.is_none()
+            && matches!(self.shared_audio_source, AudioShareSource::Separate(_))
+        {
+            self.screen_stream = super::audio_picker::next_stream_id()
+                .map(|id| rusttalk_shared::protocol::AudioStreamInfo { id, label: "Screen audio".into() });
+        }
+        let wanted = self.audio_only || screen_sound;
+        let target = self.shared_audio_target(screen_sound);
+        let screen_stream_used = matches!((&target, &self.screen_stream),
+            (AudioShareSource::Separate(apps), Some(info)) if apps.iter().any(|(_, s)| s.id == info.id));
+        if !screen_stream_used && !screen_sound {
+            self.screen_stream = None; // re-adding it needs a fresh ID
+        }
+        if pruned && matches!(self.screen_audio_running, Some(AudioShareSource::Separate(_))) {
+            // An app that ended leaves its stream; the others keep running.
+            self.screen_audio_running = Some(target.clone());
+        }
+        // Separate streams are announced to the voice channel before they are sent.
+        let streams: Vec<_> = match &target {
+            AudioShareSource::Separate(apps) if wanted => apps.iter().map(|(_, s)| s.clone()).collect(),
+            _ => Vec::new(),
+        };
+        if streams != self.announced_streams {
+            if let Some(tx) = self.voice_tx() {
+                if tx.send(Command::SetAudioStreams(streams.clone())).is_ok() {
+                    self.announced_streams = streams;
+                }
+            }
+        }
         if !wanted {
             self.screen_audio = None;
-        } else if self.screen_audio.is_none() && !self.screen_audio_failed {
+            self.screen_audio_running = None;
+        } else if self.screen_audio.is_some() && self.screen_audio_running.as_ref() != Some(&target) {
+            // Source changed (other window, audio box toggled, explicit share added): restart.
+            self.screen_audio = None;
+            self.screen_audio_running = None;
+        }
+        if wanted && self.screen_audio.is_none() && !self.screen_audio_failed {
             let result = self
                 .audio
                 .as_ref()
@@ -163,11 +236,16 @@ impl RustTalkApp {
                 .and_then(|engine| {
                     engine.start_shared_audio(
                         self.config.output_device.as_deref(),
-                        &self.shared_audio_source,
+                        &target,
                     )
                 });
             match result {
-                Ok(audio) => self.screen_audio = Some(audio),
+                Ok(audio) => {
+                    // Streams the server already confirmed may go out at once; new ones wait for its echo.
+                    audio.register(self.confirmed_streams.clone());
+                    self.screen_audio = Some(audio);
+                    self.screen_audio_running = Some(target);
+                }
                 Err(e) => {
                     self.stop_shared_audio();
                     self.set_error(format!("Computer audio not shared: {e:#}"));
@@ -341,6 +419,60 @@ mod tests {
     }
 
     #[test]
+    fn screen_sound_follows_the_shared_window_and_merges_with_explicit_apps() {
+        use crate::audio::share_source::ApplicationSource as App;
+        use AudioShareSource::{Applications, Separate, System};
+        let mut app = app();
+        assert_eq!(app.shared_audio_target(true), System, "whole screen: all computer sound");
+        app.screen_audio_app = Some(App::for_test(7));
+        assert_eq!(app.shared_audio_target(true), Applications(vec![App::for_test(7)]));
+        app.audio_only = true;
+        app.shared_audio_source = Applications(vec![App::for_test(1)]);
+        assert_eq!(app.shared_audio_target(true), Applications(vec![App::for_test(1), App::for_test(7)]));
+        assert_eq!(app.shared_audio_target(false), Applications(vec![App::for_test(1)]));
+        app.shared_audio_source = Applications(vec![App::for_test(7)]);
+        assert_eq!(app.shared_audio_target(true), Applications(vec![App::for_test(7)]), "no duplicate");
+        use rusttalk_shared::protocol::AudioStreamInfo as Info;
+        let spotify = (App::for_test(1), Info { id: 3, label: "Spotify".into() });
+        let separate = Separate(vec![spotify.clone()]);
+        app.shared_audio_source = separate.clone();
+        let screen = Info { id: 4, label: "Screen audio".into() };
+        app.screen_stream = Some(screen.clone());
+        assert_eq!(app.shared_audio_target(true), Separate(vec![spotify.clone(), (App::for_test(7), screen)]),
+            "the shared window is its own stream next to separate apps");
+        assert_eq!(app.shared_audio_target(false), separate, "box unticked: only the picked apps");
+        app.screen_audio_app = None;
+        assert_eq!(app.shared_audio_target(true), separate, "separate streams are kept as chosen");
+        app.shared_audio_source = Applications(vec![App::for_test(1)]);
+        assert_eq!(app.shared_audio_target(true), System);
+    }
+
+    #[test]
+    fn screen_sound_does_not_light_the_audio_button_and_survives_its_stop() {
+        let _devices = Devices::new();
+        let mut app = app();
+        let _commands = connect(&mut app);
+        join(&mut app, 2);
+        app.config.share_screen_audio = true;
+        app.screen = Some(VideoCapture {
+            stop: Arc::new(AtomicBool::new(false)),
+            sending: Arc::new(AtomicBool::new(true)),
+            keyframe: Arc::new(AtomicBool::new(false)),
+        });
+        app.screen_audio_failed = false; // as start_screen_share does
+        app.sync_shared_audio();
+        assert!(app.screen_audio.is_some() && !app.audio_sharing_active());
+        app.start_audio_selection(AudioShareSource::System);
+        assert!(app.audio_sharing_active());
+        app.stop_audio_only();
+        assert!(!app.audio_sharing_active());
+        assert!(app.screen_audio.is_some(), "the screen's own sound keeps going");
+        app.config.share_screen_audio = false;
+        app.sync_shared_audio();
+        assert!(app.screen_audio.is_none());
+    }
+
+    #[test]
     fn failed_separate_start_clears_registration_before_mixed_retry() {
         use crate::audio::share_source::{ApplicationSource, AudioShareSource};
         use rusttalk_shared::protocol::AudioStreamInfo;
@@ -357,7 +489,7 @@ mod tests {
         assert!(!app.audio_sharing_active());
         devices.0.borrow_mut().fail_system = false;
         app.start_audio_selection(AudioShareSource::System);
-        assert!(matches!(commands.try_recv(), Some(Command::SetAudioStreams(streams)) if streams.is_empty()));
+        assert!(!matches!(commands.try_recv(), Some(Command::SetAudioStreams(_))), "the failed start already cleared them");
         assert!(app.audio_sharing_active());
     }
 
@@ -475,7 +607,6 @@ mod tests {
         app.sync_audio_flag();
         assert!(commands.try_recv().is_none(), "nothing shared, nothing sent");
         app.start_audio_selection(AudioShareSource::System);
-        assert!(matches!(commands.try_recv(), Some(Command::SetAudioStreams(streams)) if streams.is_empty()));
         for _ in 0..3 {
             app.sync_audio_flag();
         }
@@ -500,7 +631,6 @@ mod tests {
         join(&mut app, 2);
         while commands.try_recv().is_some() {}
         app.start_audio_selection(AudioShareSource::System);
-        assert!(matches!(commands.try_recv(), Some(Command::SetAudioStreams(streams)) if streams.is_empty()));
         app.sync_audio_flag();
         assert!(matches!(commands.try_recv(), Some(Command::SetAudioSharing(true))));
         app.stop_shared_audio(); // before the server answered
@@ -520,7 +650,6 @@ mod tests {
         join(&mut app, 2);
         while commands.try_recv().is_some() {}
         app.start_audio_selection(AudioShareSource::System);
-        assert!(matches!(commands.try_recv(), Some(Command::SetAudioStreams(streams)) if streams.is_empty()));
         app.sync_audio_flag();
         assert!(matches!(commands.try_recv(), Some(Command::SetAudioSharing(true))));
         // The server refused (rate limit): no echo. Not asked again straight away ...

@@ -32,7 +32,7 @@ impl AudioPicker {
         let mut picker = Self {
             at,
             separate,
-            names: false,
+            names: true,
             selected,
             dropped: false,
             applications: vec![],
@@ -154,8 +154,9 @@ impl RustTalkApp {
         }
     }
 
+    /// Explicit audio sharing only; the screen share's own sound is separate.
     pub(super) fn audio_sharing_active(&self) -> bool {
-        self.screen_audio.is_some() || self.audio_only
+        self.audio_only
     }
 
     /// Audio button opens settings; stopping is an explicit action.
@@ -173,10 +174,10 @@ impl RustTalkApp {
         }
         self.stop_shared_audio();
         self.sync_audio_flag();
-        if let Some(tx) = self.voice_tx() {
-            let streams = match &source { AudioShareSource::Separate(apps) => apps.iter().map(|(_, s)| s.clone()).collect(), _ => vec![] };
-            if tx.send(Command::SetAudioStreams(streams)).is_err() { return; }
+        if self.voice_tx().is_none() {
+            return;
         }
+        // sync_shared_audio announces the streams (plus a shared window's own stream).
         self.shared_audio_source = source;
         self.audio_only = true;
         self.screen_audio_failed = false;
@@ -194,7 +195,9 @@ impl RustTalkApp {
         let mut close = false;
         let mut start = None;
         let mut stop = false;
-        let dismiss = theme::share_popup(ctx, "audio_share_popup", picker.at, 340.0,
+        // Only the app list scrolls; the controls around it stay in view.
+        let list_h = (theme::popup_body_height(ctx) - 300.0).clamp(140.0, 520.0);
+        let dismiss = theme::popup_frame(ctx, "audio_share_popup", picker.at, 520.0,
             &format!("{}  Share audio", icons::regular::MUSIC_NOTES), |ui| {
                 ui.label(
                     egui::RichText::new("Your microphone stays separate.").color(theme::MUTED),
@@ -235,7 +238,7 @@ impl RustTalkApp {
                 let mut toggled = None;
                 let listed = picker.pending.is_none() && !picker.applications.is_empty();
                 egui::ScrollArea::vertical()
-                    .max_height(192.0)
+                    .max_height(list_h)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 4.0;
@@ -245,14 +248,15 @@ impl RustTalkApp {
                                 _ => RowIcon::Letter(&app.label),
                             };
                             let on = picker.selected_apps().contains(&app.source);
-                            if source_row(ui, icon, &app.label, app.detail.as_deref(), on, true).clicked() {
+                            let sub = app.detail.as_deref().or(app.active.then_some("Playing now"));
+                            if source_row(ui, icon, &app.label, sub, on, true).clicked() {
                                 toggled = Some(app.source.clone());
                             }
                         }
                         if picker.pending.is_some() && picker.applications.is_empty() {
                             hint(ui, "Looking for apps\u{2026}");
                         } else if !listed && picker.error.is_none() {
-                            hint(ui, "Nothing is playing audio right now. Start playback in an app, then refresh.");
+                            hint(ui, "No applications found. Open or start playback in an app, then refresh.");
                         }
                     });
                 if let Some(source) = toggled {
@@ -300,10 +304,9 @@ impl RustTalkApp {
                         if go.clicked() {
                             let selection = if picker.separate {
                                 if let AudioShareSource::Applications(apps) = &picker.selected {
-                                    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
                                     let mut selected = Vec::new();
                                     for (i, app) in apps.iter().enumerate() {
-                                        let Ok(id) = NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1)) else { picker.error = Some("Audio stream IDs exhausted; restart RustTalk".into()); return; };
+                                        let Some(id) = next_stream_id() else { picker.error = Some("Audio stream IDs exhausted; restart RustTalk".into()); return; };
                                         let label = if picker.names { picker.applications.iter().find(|a| &a.source == app).map(|a| a.label.clone()).unwrap_or_else(|| format!("Application {}", i + 1)) } else { format!("Application {}", i + 1) };
                                         let label: String = label.chars().filter(|c| rusttalk_shared::protocol::valid_audio_label_char(*c)).scan(0, |len, c| { *len += c.len_utf8(); (*len <= 64).then_some(c) }).collect();
                                         let label = if label.trim().is_empty() { format!("Application {}", i + 1) } else { label };
@@ -324,11 +327,18 @@ impl RustTalkApp {
             self.start_audio_selection(source);
             self.audio_picker = None;
         } else if stop {
-            self.stop_shared_audio();
+            self.stop_audio_only();
         } else if dismiss || close {
             self.audio_picker = None;
         }
     }
+}
+
+/// Fresh audio stream ID: the server refuses IDs it has already seen.
+#[allow(deprecated)] // fetch_update also supports the project's older Rust toolchains.
+pub(super) fn next_stream_id() -> Option<u32> {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1)).ok()
 }
 
 enum RowIcon<'a> {
@@ -480,6 +490,7 @@ mod tests {
                     label: name.into(),
                     detail: None,
                     icon: None,
+                    active: true,
                     source: share_source::ApplicationSource::for_test(i as u32 + 1),
                 })
                 .collect(),

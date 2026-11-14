@@ -182,6 +182,12 @@ enum ShareTab {
     Screens,
 }
 
+/// From the picker's background thread: the list first, then thumbnails one by one.
+enum PickerMsg {
+    List(Vec<ShareEntry>),
+    Thumb(usize, image::RgbaImage),
+}
+
 /// Bildschirm/Fenster-Auswahl (aehnlich Discord): Vorschaubilder werden
 /// im Hintergrund erzeugt und per Channel geliefert.
 struct ScreenPicker {
@@ -191,7 +197,9 @@ struct ScreenPicker {
     entries: Vec<(ShareEntry, Option<egui::TextureHandle>)>,
     selected: Option<ShareSource>,
     loading: bool,
-    rx: std::sync::mpsc::Receiver<Vec<ShareEntry>>,
+    /// The background thread still runs (thumbnails may arrive).
+    pending: bool,
+    rx: std::sync::mpsc::Receiver<PickerMsg>,
 }
 
 impl ScreenPicker {
@@ -200,9 +208,21 @@ impl ScreenPicker {
         let _ = std::thread::Builder::new()
             .name("share-sources".into())
             .spawn(move || {
-                let _ = tx.send(video::list_share_sources());
+                #[cfg(windows)]
+                {
+                    let list = video::list_share_sources_quick();
+                    let sources: Vec<ShareSource> = list.iter().map(|e| e.source).collect();
+                    if tx.send(PickerMsg::List(list)).is_ok() {
+                        let tx = std::sync::Mutex::new(tx);
+                        video::capture_thumbnails(&sources, |i, image| {
+                            let _ = tx.lock().unwrap().send(PickerMsg::Thumb(i, image));
+                        });
+                    }
+                }
+                #[cfg(not(windows))]
+                let _ = tx.send(PickerMsg::List(video::list_share_sources()));
             });
-        Self { at, include_audio, tab: ShareTab::Apps, entries: Vec::new(), selected: None, loading: true, rx }
+        Self { at, include_audio, tab: ShareTab::Apps, entries: Vec::new(), selected: None, loading: true, pending: true, rx }
     }
 }
 
@@ -370,7 +390,15 @@ pub struct RustTalkApp {
     screen_audio: Option<crate::audio::screen_audio::ScreenAudio>,
     /// Starting it failed: don't retry until the share stops.
     screen_audio_failed: bool,
-    /// Last audio-sharing status sent to the voice server (resent only when it changes).
+    /// What the running capture records (a change restarts it).
+    screen_audio_running: Option<crate::audio::share_source::AudioShareSource>,
+    /// App behind the shared window; `None` shares all computer audio.
+    screen_audio_app: Option<crate::audio::share_source::ApplicationSource>,
+    /// The shared window's own stream while explicit apps are sent separately.
+    screen_stream: Option<rusttalk_shared::protocol::AudioStreamInfo>,
+    /// Separate streams last sent to the voice server / confirmed by its echo.
+    announced_streams: Vec<rusttalk_shared::protocol::AudioStreamInfo>,
+    confirmed_streams: Vec<u32>,    /// Last audio-sharing status sent to the voice server (resent only when it changes).
     audio_flag_sent: bool,
     audio_flag_at: Option<Instant>,
     audio_only: bool,
@@ -545,7 +573,11 @@ impl RustTalkApp {
             screen: None,
             screen_audio: None,
             screen_audio_failed: false,
-            audio_flag_sent: false,
+            screen_audio_running: None,
+            screen_audio_app: None,
+            screen_stream: None,
+            announced_streams: Vec::new(),
+            confirmed_streams: Vec::new(),            audio_flag_sent: false,
             audio_flag_at: None,
             audio_only: false,
             shared_audio_source: Default::default(),
@@ -1146,14 +1178,15 @@ impl RustTalkApp {
                 }
             }
             ServerMessage::AudioStreamsRejected { stream_id } => {
-                if voice && matches!(&self.shared_audio_source, crate::audio::share_source::AudioShareSource::Separate(apps) if apps.iter().any(|(_, s)| s.id == stream_id)) {
+                if voice && self.announced_streams.iter().any(|s| s.id == stream_id) {
                     self.stop_shared_audio();
                 }
             }
             ServerMessage::AudioStreamsChanged { client_id, streams } => {
                 if voice && rusttalk_shared::protocol::valid_audio_streams(&streams) && s.users.get(&client_id).zip(s.users.get(&s.my_id)).is_some_and(|(u, me)| u.channel_id == me.channel_id) {
                     if client_id == s.my_id {
-                        if let Some(audio) = &self.screen_audio { audio.register(streams.iter().map(|s| s.id).collect()); }
+                        self.confirmed_streams = streams.iter().map(|s| s.id).collect();
+                        if let Some(audio) = &self.screen_audio { audio.register(self.confirmed_streams.clone()); }
                     }
                     let keep = |key: &u128| crate::audio::mixer_speaker(*key) != client_id || (*key >> 1) as u32 == 0 || streams.iter().any(|s| s.id == (*key >> 1) as u32);
                     self.user_volumes.lock().unwrap().retain(|k, _| keep(k));

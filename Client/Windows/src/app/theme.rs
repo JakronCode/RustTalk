@@ -241,6 +241,31 @@ pub fn icon_button(ui: &mut egui::Ui, icon: &str, state: IconState, tooltip: &st
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tooltip).on_disabled_hover_text(tooltip)
 }
 
+/// `icon` with a small round "x" badge at its lower right: the stop version of
+/// an icon (Phosphor has no monitor-x or music-note-x). `ring` is the colour
+/// behind the icon; it keeps the badge apart from the glyph.
+pub fn paint_crossed(painter: &egui::Painter, center: egui::Pos2, icon: &str, size: f32, color: egui::Color32, ring: egui::Color32) {
+    painter.text(center - egui::vec2(size * 0.08, size * 0.06), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(size), color);
+    let c = center + egui::vec2(size * 0.34, size * 0.30);
+    let r = size * 0.25;
+    painter.circle_filled(c, r + 1.5, ring);
+    painter.circle_filled(c, r, color);
+    let d = r * 0.42;
+    let stroke = egui::Stroke::new(1.6_f32, ring);
+    painter.line_segment([c + egui::vec2(-d, -d), c + egui::vec2(d, d)], stroke);
+    painter.line_segment([c + egui::vec2(-d, d), c + egui::vec2(d, -d)], stroke);
+}
+
+/// Red stop button in the `icon_button` style, drawn with `paint_crossed`.
+pub fn crossed_icon_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 6.0, RED.gamma_multiply(0.18));
+    }
+    paint_crossed(ui.painter(), rect.center(), icon, 18.0, RED, PANEL);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tooltip)
+}
+
 /// Primary (accent) button.
 pub fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.add(
@@ -577,8 +602,14 @@ mod tests {
     }
 }
 
-/// Source chooser anchored above the control that opened it.
-pub(super) fn share_popup(
+/// Height left for a share popup's body below its title bar.
+pub(super) fn popup_body_height(ctx: &egui::Context) -> f32 {
+    (ctx.screen_rect().height() - 90.0).max(80.0)
+}
+
+/// Source chooser anchored above the control that opened it. The body lays out
+/// (and scrolls) its own parts, so it can keep headers and action rows in view.
+pub(super) fn popup_frame(
     ctx: &egui::Context,
     id: &str,
     at: egui::Pos2,
@@ -604,10 +635,7 @@ pub(super) fn share_popup(
                     });
                 });
                 ui.separator();
-                egui::ScrollArea::vertical()
-                    .id_salt((id, "body"))
-                    .max_height((ctx.screen_rect().height() - 90.0).max(80.0))
-                    .show(ui, contents);
+                contents(ui);
             });
         });
     close || ctx.input(|i| i.key_pressed(egui::Key::Escape)
