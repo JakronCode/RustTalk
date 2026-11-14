@@ -303,11 +303,30 @@ impl RustTalkApp {
         self.settings_nav.goto(changed, table::page(page).sections.first().map(|s| s.id), section);
     }
 
+    pub(super) fn settings_escape_blocked(&self, ctx: &egui::Context) -> bool {
+        self.recording_key.is_some()
+            || self.update.dialog.is_some()
+            || !self.poke_inbox.is_empty()
+            || self.poke_dialog.is_some()
+            || self.cam_dialog.is_some()
+            || self.channel_settings.is_some()
+            || self.show_new_channel
+            || self.confirm_delete.is_some()
+            || self.confirm_delete_msg.is_some()
+            || self.mod_dialog.is_some()
+            || self.audio_picker.is_some()
+            || self.screen_picker.is_some()
+            || self.link_prompt.is_some()
+            || self.giphy.open
+            || self.emoji.open
+            || ctx.memory(|m| m.any_popup_open())
+    }
+
     /// Settings as the page of the main window, with the voice/network
     /// state running underneath. Draws the window's `CentralPanel`.
     pub(super) fn ui_settings(&mut self, ctx: &egui::Context) {
         let mut nav = std::mem::take(&mut self.settings_nav);
-        let blocked = self.recording_key.is_some() || self.update.dialog.is_some();
+        let blocked = self.settings_escape_blocked(ctx);
         let mut close = nav.escape(ctx, blocked);
         nav_panel(ctx, "settings_nav", |ui| {
             let footer = format!("RustTalk v{}  -  protocol v{}", env!("CARGO_PKG_VERSION"), rusttalk_shared::protocol::PROTOCOL_VERSION);

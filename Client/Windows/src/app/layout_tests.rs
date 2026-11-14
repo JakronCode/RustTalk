@@ -310,3 +310,22 @@ fn settings_close_button_returns_and_stops_mic_preview() {
     drop(app);
     drop(devices);
 }
+
+#[test]
+fn escape_dismisses_poke_before_client_settings() {
+    for size in SIZES {
+        let _devices = Devices::new();
+        let mut app = app();
+        let _rx = connect(&mut app);
+        let mut time = 1.0;
+        app.open_settings(SettingsPage::Appearance);
+        settle(&mut app, size, &mut time);
+        app.receive_poke(app.srv.id, 2, "Friend".into(), "Hello".into());
+        settle(&mut app, size, &mut time);
+        key(&mut app, size, &mut time, egui::Key::Escape);
+        assert!(app.poke_inbox.is_empty());
+        assert!(app.show_settings, "foreground poke must not close settings");
+        key(&mut app, size, &mut time, egui::Key::Escape);
+        assert!(!app.show_settings);
+    }
+}

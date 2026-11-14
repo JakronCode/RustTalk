@@ -138,7 +138,7 @@ impl RustTalkApp {
     pub(super) fn ui_server_settings(&mut self, ctx: &egui::Context) {
         let Some(mut dlg) = self.server_settings_dialog.take() else { return };
         let mut nav = std::mem::take(&mut dlg.nav);
-        let mut close = nav.escape(ctx, self.update.dialog.is_some());
+        let mut close = nav.escape(ctx, self.settings_escape_blocked(ctx));
         nav_panel(ctx, "server_settings_nav", |ui| {
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
@@ -577,6 +577,31 @@ mod page_tests {
 
     fn draft(app: &mut RustTalkApp) -> &mut ServerSettings {
         &mut app.server_settings_dialog.as_mut().unwrap().draft
+    }
+
+    #[test]
+    fn escape_dismisses_poke_without_discarding_server_draft() {
+        for size in SIZES {
+            let _devices = crate::audio::test_devices::Devices::new();
+            let mut app = app();
+            let mut commands = connect(&mut app);
+            as_admin(&mut app, true);
+            let original = app.srv.server_settings.name.clone();
+            let mut time = 1.0;
+            app.open_server_settings(ServerTab::Overview);
+            draft(&mut app).name = "Unsaved draft".into();
+            settle(&mut app, size, &mut time);
+            app.receive_poke(app.srv.id, 2, "Friend".into(), "Hello".into());
+            settle(&mut app, size, &mut time);
+            key(&mut app, size, &mut time, egui::Key::Escape);
+            assert!(app.poke_inbox.is_empty());
+            assert!(app.server_settings_dialog.is_some(), "foreground poke must not discard draft");
+            assert_eq!(draft(&mut app).name, "Unsaved draft");
+            assert_eq!(app.srv.server_settings.name, original);
+            assert!(!drain(&mut commands).iter().any(|c| c.contains("UpdateServerSettings")));
+            key(&mut app, size, &mut time, egui::Key::Escape);
+            assert!(app.server_settings_dialog.is_none());
+        }
     }
 
     #[test]
