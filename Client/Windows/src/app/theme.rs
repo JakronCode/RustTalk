@@ -547,3 +547,40 @@ mod tests {
         assert!((s.x - 480.0).abs() < 0.01 && (s.y - 270.0).abs() < 0.01);
     }
 }
+
+/// Source chooser anchored above the control that opened it.
+pub(super) fn share_popup(
+    ctx: &egui::Context,
+    id: &str,
+    at: egui::Pos2,
+    width: f32,
+    title: &str,
+    contents: impl FnOnce(&mut egui::Ui),
+) -> bool {
+    let mut close = false;
+    let shown = egui::Area::new(egui::Id::new(id))
+        .order(egui::Order::Foreground)
+        .movable(false)
+        .pivot(egui::Align2::LEFT_BOTTOM)
+        .fixed_pos(at + egui::vec2(0.0, -8.0))
+        .constrain(true)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(width.min((ctx.screen_rect().width() - 32.0).max(160.0)));
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(title).strong().color(HEADER));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        close = ui.small_button(icons::regular::X).on_hover_text("Close").clicked();
+                    });
+                });
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .id_salt((id, "body"))
+                    .max_height((ctx.screen_rect().height() - 90.0).max(80.0))
+                    .show(ui, contents);
+            });
+        });
+    close || ctx.input(|i| i.key_pressed(egui::Key::Escape)
+        || (i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !shown.response.rect.contains(p))))
+}

@@ -183,6 +183,8 @@ enum ShareTab {
 /// Bildschirm/Fenster-Auswahl (aehnlich Discord): Vorschaubilder werden
 /// im Hintergrund erzeugt und per Channel geliefert.
 struct ScreenPicker {
+    at: egui::Pos2,
+    include_audio: bool,
     tab: ShareTab,
     entries: Vec<(ShareEntry, Option<egui::TextureHandle>)>,
     selected: Option<ShareSource>,
@@ -191,14 +193,14 @@ struct ScreenPicker {
 }
 
 impl ScreenPicker {
-    fn open() -> Self {
+    fn open(at: egui::Pos2, include_audio: bool) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = std::thread::Builder::new()
             .name("share-sources".into())
             .spawn(move || {
                 let _ = tx.send(video::list_share_sources());
             });
-        Self { tab: ShareTab::Apps, entries: Vec::new(), selected: None, loading: true, rx }
+        Self { at, include_audio, tab: ShareTab::Apps, entries: Vec::new(), selected: None, loading: true, rx }
     }
 }
 
@@ -1512,7 +1514,7 @@ impl RustTalkApp {
             } else if share.0 == 1 {
                 let secs: u64 = secs.parse().unwrap_or(0);
                 if secs > 0 && share.1.is_some_and(|t| t.elapsed() >= Duration::from_secs(secs)) {
-                    self.toggle_screen();
+                    self.stop_screen_share();
                     share.0 = 2;
                 }
             }

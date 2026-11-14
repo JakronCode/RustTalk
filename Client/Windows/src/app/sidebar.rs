@@ -809,7 +809,7 @@ impl RustTalkApp {
         ui.columns(3, |cols| {
             for (index, (icon, live, tip)) in [
                 (icons::regular::VIDEO_CAMERA, cam_live, "Camera: choose a device or stop sharing"),
-                (icons::regular::SCREENCAST, screen_live, "Screen: share a screen or window, or stop sharing"),
+                (icons::regular::SCREENCAST, screen_live, "Screen: choose or change the shared screen or window"),
                 (icons::regular::MUSIC_NOTES, active, if active { "Audio: change what is shared or stop sharing" } else { "Audio: choose what to share" }),
             ].into_iter().enumerate() {
                 let label = if compact { "" } else { labels[index] };
@@ -817,7 +817,7 @@ impl RustTalkApp {
                     if live { IconState::Active } else { IconState::Normal }, tip, live && index > 0);
                 if quick_stop {
                     match index {
-                        1 => self.toggle_screen(),
+                        1 => self.stop_screen_share(),
                         _ => self.stop_shared_audio(),
                     }
                 } else if response.clicked() {

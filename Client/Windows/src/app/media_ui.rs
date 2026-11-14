@@ -266,20 +266,21 @@ impl RustTalkApp {
         }
     }
 
-    /// Bildschirm-Button: teilt -> beenden, sonst Auswahl-Dialog oeffnen.
+    /// Screen button changes settings; stopping is an explicit action.
     pub(super) fn toggle_screen(&mut self) {
-        if self.screen.is_some() {
-            self.screen = None;
+        if !self.in_voice() { return; }
+        if self.screen_picker.is_some() {
+            self.screen_picker = None;
+        } else {
+            let at = self.ctx.pointer_hover_pos().unwrap_or(self.ctx.screen_rect().left_bottom() + egui::vec2(16.0, -16.0));
+            self.screen_picker = Some(ScreenPicker::open(at, self.config.share_screen_audio));
+        }
+    }
+
+    pub(super) fn stop_screen_share(&mut self) {
+        self.screen_picker = None;
+        if self.screen.take().is_some() {
             self.after_source_stopped(VideoKind::Screen);
-            return;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            self.start_screen_share(ShareSource::Monitor(0));
-        }
-        #[cfg(not(target_os = "linux"))]
-        if self.screen_picker.is_none() {
-            self.screen_picker = Some(ScreenPicker::open());
         }
     }
 
@@ -709,17 +710,18 @@ impl RustTalkApp {
             }
         }
 
-        let mut open = true;
         let mut cancel = false;
+        let mut stop = false;
+        let active = self.screen.is_some();
         let mut share: Option<ShareSource> = None;
         let mut refresh = false;
-        egui::Window::new(format!("{}  Share Your Screen", icons::regular::SCREENCAST))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .fixed_size([700.0, 520.0])
-            .show(ctx, |ui| {
+        let dismiss = theme::share_popup(ctx, "screen_share_popup", picker.at, 460.0,
+            &format!("{}  Share screen", icons::regular::SCREENCAST), |ui| {
+                if cfg!(target_os = "linux") {
+                    ui.label("Choose a window or screen in the system permission picker.");
+                    if active { ui.weak("Choosing a new source restarts screen capture."); }
+                    picker.selected = Some(ShareSource::Monitor(0));
+                } else {
                 // Reiter
                 ui.horizontal(|ui| {
                     let tab_w = (ui.available_width() - 8.0) / 2.0;
@@ -743,7 +745,7 @@ impl RustTalkApp {
                 });
                 ui.add_space(8.0);
 
-                let list_h = 420.0;
+                let list_h = 250.0;
                 if picker.loading {
                     ui.allocate_ui(egui::vec2(ui.available_width(), list_h), |ui| {
                         ui.centered_and_justified(|ui| {
@@ -797,9 +799,10 @@ impl RustTalkApp {
                         });
                 }
 
+                }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui
+                    if !cfg!(target_os = "linux") && ui
                         .add_enabled(
                             !picker.loading,
                             egui::Button::new(format!(
@@ -811,16 +814,22 @@ impl RustTalkApp {
                     {
                         refresh = true;
                     }
-                    ui.checkbox(&mut self.config.share_screen_audio, format!("{}  Share audio", icons::regular::MUSIC_NOTES))
+                    ui.checkbox(&mut picker.include_audio, format!("{}  Share audio", icons::regular::MUSIC_NOTES))
                         .on_hover_text("Also send what your computer plays (RustTalk voices are filtered out)");
+                });
+                ui.horizontal(|ui| {
+                    if active && theme::ghost_button(ui, egui::RichText::new("Stop sharing").color(theme::RED)).clicked() {
+                        stop = true;
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .add_enabled(
                                 picker.selected.is_some(),
                                 egui::Button::new(
                                     egui::RichText::new(format!(
-                                        "{}  Go Live",
-                                        icons::regular::BROADCAST
+                                        "{}  {}",
+                                        icons::regular::BROADCAST,
+                                        if cfg!(target_os = "linux") { "Choose source" } else if active { "Apply" } else { "Go Live" }
                                     ))
                                     .color(theme::on_accent()),
                                 )
@@ -839,14 +848,18 @@ impl RustTalkApp {
 
         if refresh {
             let tab = picker.tab;
-            let mut fresh = ScreenPicker::open();
+            let mut fresh = ScreenPicker::open(picker.at, picker.include_audio);
             fresh.tab = tab;
             *picker = fresh;
         }
         if let Some(source) = share {
+            self.config.share_screen_audio = picker.include_audio;
+            self.config.save();
             self.screen_picker = None;
             self.start_screen_share(source);
-        } else if !open || cancel {
+        } else if stop {
+            self.stop_screen_share();
+        } else if dismiss || cancel {
             self.screen_picker = None;
         }
     }
@@ -1386,5 +1399,40 @@ mod fullscreen_audio_tests {
             let out = frame(&ctx, &mut app, vec![]);
             assert!(text_pos(&out, "Bob's shared audio").is_none(), "popup must not silently change person");
         }
+    }
+}
+
+#[cfg(test)]
+mod share_popup_tests {
+    use super::*;
+    use super::super::mixer::tests::voice_app;
+
+    #[test]
+    fn screen_settings_and_dismissal_keep_capture_and_audio_choice_unchanged() {
+        let ctx = egui::Context::default();
+        let mut app = voice_app(&ctx);
+        let stopped = Arc::new(AtomicBool::new(false));
+        app.screen = Some(VideoCapture {
+            stop: stopped.clone(),
+            sending: Arc::new(AtomicBool::new(true)),
+            keyframe: Arc::new(AtomicBool::new(false)),
+        });
+        let original_audio = app.config.share_screen_audio;
+        app.toggle_screen();
+        assert!(app.screen_picker.is_some() && app.screen.is_some());
+        assert!(!stopped.load(Ordering::Relaxed));
+        app.screen_picker.as_mut().unwrap().include_audio = !original_audio;
+        let _ = ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 700.0))),
+            events: vec![egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }],
+            ..Default::default()
+        }, |ctx| app.ui_screen_picker(ctx));
+        assert!(app.screen_picker.is_none() && app.screen.is_some());
+        assert_eq!(app.config.share_screen_audio, original_audio);
+        assert!(!stopped.load(Ordering::Relaxed));
+        app.toggle_screen();
+        app.stop_screen_share();
+        assert!(app.screen_picker.is_none() && app.screen.is_none());
+        assert!(stopped.load(Ordering::Relaxed), "quick stop still stops capture");
     }
 }
