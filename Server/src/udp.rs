@@ -19,7 +19,7 @@ pub async fn run_udp(state: SharedState, bind: &str) -> Result<()> {
     let socket = UdpSocket::bind(bind).await.with_context(|| format!("Could not bind UDP to {bind}"))?;
     info!("UDP audio listening on {bind}");
 
-    let mut buf = vec![0u8; MAX_PACKET_LEN];
+    let mut buf = vec![0u8; MAX_PACKET_LEN + 1];
 
     loop {
         let (len, from) = socket.recv_from(&mut buf).await?;
@@ -46,7 +46,7 @@ pub async fn run_udp(state: SharedState, bind: &str) -> Result<()> {
                     None => continue, // rate limit
                 }
             };
-            let reply = AudioHeader { flags: FLAG_CONTROL, token: 0, sequence: header.sequence, timestamp: 0, counter: 0 };
+            let reply = AudioHeader { stream_id: 0, flags: FLAG_CONTROL, token: 0, sequence: header.sequence, timestamp: 0, counter: 0 };
             let _ = socket.send_to(&seal_packet(&reply, &sender_key, DIR_TO_CLIENT, &pong.encode()), from).await;
             continue;
         }
@@ -55,6 +55,7 @@ pub async fn run_udp(state: SharedState, bind: &str) -> Result<()> {
             if !st.udp_accept(header.token, header.counter) {
                 continue; // replayed
             }
+            if !plain.is_empty() && !st.allow_audio_packet(header.token, header.stream_id, header.flags == rusttalk_shared::audio_packet::FLAG_SCREEN_AUDIO) { continue; }
             let Some((speaker_id, targets)) = st.udp_relay_targets(header.token, from) else { continue };
             if plain.is_empty() {
                 continue; // Registrierungs-Ping: Adresse ist gelernt
@@ -65,7 +66,7 @@ pub async fn run_udp(state: SharedState, bind: &str) -> Result<()> {
         };
 
         // Token-Feld traegt beim Empfaenger die Sprecher-ID; pro Empfaenger neu versiegelt.
-        let fwd = AudioHeader { flags: header.flags, token: speaker_id, sequence: header.sequence, timestamp: header.timestamp, counter: 0 };
+        let fwd = AudioHeader { stream_id: header.stream_id, flags: header.flags, token: speaker_id, sequence: header.sequence, timestamp: header.timestamp, counter: 0 };
         for (addr, key) in &targets {
             let out = seal_packet(&fwd, key, DIR_TO_CLIENT, &plain);
             // Einzelne Sendefehler (z. B. ICMP unreachable) ignorieren.

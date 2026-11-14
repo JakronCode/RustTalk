@@ -39,11 +39,36 @@
 //!     replayed UDP packets are dropped.
 //! v16: Audio sharing status (`UserInfo.audio_sharing`, `SetAudioSharing`,
 //!     `AudioSharingChanged`): who shares computer audio in a voice channel.
+//! v17: Separate application audio registrations and UDP v4 stream IDs.
 
 use serde::{Deserialize, Serialize};
 
+pub const MAX_AUDIO_STREAMS: usize = 8;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioStreamInfo {
+    pub id: u32,
+    pub label: String,
+}
+
+pub fn valid_audio_label_char(c: char) -> bool {
+    !c.is_control()
+        && (!c.is_whitespace() || c == ' ')
+        && !matches!(c, '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
+}
+
+pub fn valid_audio_streams(streams: &[AudioStreamInfo]) -> bool {
+    streams.len() <= MAX_AUDIO_STREAMS
+        && streams.iter().enumerate().all(|(i, s)| {
+            s.id != 0
+                && !s.label.trim().is_empty()
+                && s.label.len() <= 64
+                && s.label.chars().all(valid_audio_label_char)
+                && !streams[..i].iter().any(|old| old.id == s.id)
+        })
+}
+
 /// Aktuelle Protokollversion. Client und Server müssen übereinstimmen.
-pub const PROTOCOL_VERSION: u16 = 16;
+pub const PROTOCOL_VERSION: u16 = 17;
 
 /// Max. length of a poke message.
 pub const MAX_POKE_LEN: usize = 100;
@@ -471,6 +496,7 @@ pub enum ClientMessage {
     },
     /// Sauberes Trennen (Server antwortet nicht, schließt nur).
     Disconnect,
+    SetAudioStreams { streams: Vec<AudioStreamInfo> },
 }
 
 /// Server -> Client
@@ -629,11 +655,32 @@ pub enum ServerMessage {
     Error {
         message: String,
     },
+    // Append new variants here: older clients must still decode Error on version mismatch.
+    AudioStreamsChanged { client_id: u64, streams: Vec<AudioStreamInfo> },
+    AudioStreamsRejected { stream_id: u32 },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_refusal_keeps_the_v16_wire_tag() {
+        let message = ServerMessage::Error { message: "Protocol mismatch".into() };
+        let encoded = bincode::serialize(&message).unwrap();
+        assert_eq!(&encoded[..4], &29u32.to_le_bytes());
+        let mut legacy = 29u32.to_le_bytes().to_vec();
+        legacy.extend(bincode::serialize(&"Protocol mismatch").unwrap());
+        assert_eq!(bincode::deserialize::<ServerMessage>(&legacy).unwrap(), message);
+    }
+
+    #[test]
+    fn app_labels_reject_invisible_direction_and_line_separators() {
+        for c in ['\u{2028}', '\u{2029}', '\u{061c}', '\u{200e}', '\u{200f}', '\u{200b}', '\u{2066}', '\n'] {
+            assert!(!valid_audio_streams(&[AudioStreamInfo { id: 1, label: format!("app{c}name") }]));
+        }
+        assert!(valid_audio_streams(&[AudioStreamInfo { id: 1, label: "Music player".into() }]));
+    }
 
     #[test]
     fn channel_kind_capabilities() {

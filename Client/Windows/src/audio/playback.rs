@@ -157,7 +157,7 @@ fn build_out<T: cpal::SizedSample + Send + 'static>(
     let mut chunk = [0f32; FRAME_SAMPLES];
     let mut tmp = [0f32; FRAME_SAMPLES];
     let mut mono_out: Vec<f32> = Vec::with_capacity(16384);
-    let mut levels: Vec<(u64, f32, std::time::Instant)> = Vec::with_capacity(64);
+    let mut levels: Vec<(u128, f32, std::time::Instant)> = Vec::with_capacity(64);
 
     let stream = device.build_output_stream(
         config,
@@ -170,7 +170,12 @@ fn build_out<T: cpal::SizedSample + Send + 'static>(
                 chunk.fill(0.0);
                 if !control.self_deafened.load(Ordering::Relaxed) {
                     let mut map = mixer.lock().unwrap();
-                    map.retain(|_, u| u.last_seen.elapsed() < USER_TIMEOUT);
+                    let registrations = control.shared_streams.lock().unwrap();
+                    map.retain(|key, u| {
+                        let stream = (key >> 1) as u32;
+                        u.last_seen.elapsed() < USER_TIMEOUT && (stream == 0 || registrations.get(&super::mixer_speaker(*key)).is_some_and(|v| v.iter().any(|s| s.id == stream)))
+                    });
+                    drop(registrations);
                     let local = local_muted.lock().unwrap();
                     let volumes = user_volumes.lock().unwrap();
                     let muted_streams = control.muted_streams.lock().unwrap();

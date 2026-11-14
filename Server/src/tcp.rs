@@ -421,6 +421,13 @@ async fn message_loop(
                     });
                 }
             }
+            ClientMessage::SetAudioStreams { streams } => {
+                let stream_id = streams.iter().map(|s| s.id).max().unwrap_or(0);
+                if let Err(message) = st.set_audio_streams(client_id, streams) {
+                    st.send_to(client_id, &ServerMessage::AudioStreamsRejected { stream_id });
+                    st.send_to(client_id, &ServerMessage::Error { message });
+                }
+            }
             ClientMessage::SetAudioSharing { sharing } => match st.set_audio_sharing(client_id, sharing) {
                 Ok(true) => st.broadcast(&ServerMessage::AudioSharingChanged { client_id, sharing }),
                 Ok(false) => {}

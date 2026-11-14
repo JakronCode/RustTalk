@@ -25,7 +25,7 @@ pub(super) fn volume_slider(pct: &mut f32) -> egui::Slider<'_> {
 pub(super) fn mixer_rows(
     members: &[UserInfo],
     my_id: u64,
-    meters: &HashMap<u64, StreamMeter>,
+    meters: &HashMap<u128, StreamMeter>,
     now: Instant,
 ) -> Vec<(UserInfo, StreamKind)> {
     let mut others: Vec<&UserInfo> = members.iter().filter(|u| u.id != my_id).collect();
@@ -69,7 +69,7 @@ fn level_bar(p: &egui::Painter, rect: egui::Rect, level: f32, muted: bool) {
 fn kind_label(kind: StreamKind) -> (&'static str, &'static str) {
     match kind {
         StreamKind::Voice => (icons::regular::MICROPHONE, "Voice"),
-        StreamKind::Shared => (icons::regular::MONITOR_PLAY, "Shared audio"),
+        StreamKind::Shared | StreamKind::App(_) => (icons::regular::MONITOR_PLAY, "Shared audio"),
     }
 }
 
@@ -185,7 +185,13 @@ impl RustTalkApp {
         ui.add_space(2.0);
         let now = Instant::now();
         let meters = self.control.stream_meters.lock().unwrap().clone();
-        let rows = mixer_rows(members, self.srv.my_id, &meters, now);
+        let mut rows = mixer_rows(members, self.srv.my_id, &meters, now);
+        let streams = self.control.shared_streams.lock().unwrap().clone();
+        for user in members.iter().filter(|u| u.id != self.srv.my_id) {
+            if let Some(apps) = streams.get(&user.id) {
+                rows.extend(apps.iter().map(|a| (user.clone(), StreamKind::App(a.id))));
+            }
+        }
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             self.mixer_own_rows(ui);
@@ -202,13 +208,16 @@ impl RustTalkApp {
                 let key = kind.key(user.id);
                 let whole_user = user_muted.contains(&user.id);
                 let muted = whole_user || stream_muted.contains(&key);
-                let (icon, label) = kind_label(kind);
+                let (icon, default_label) = kind_label(kind);
+                let label = if let StreamKind::App(id) = kind {
+                    streams.get(&user.id).and_then(|v| v.iter().find(|s| s.id == id)).map(|s| s.label.as_str()).unwrap_or("Application")
+                } else { default_label };
                 let (mute_enabled, tip) = match kind {
                     StreamKind::Voice if whole_user => (true, "Unmute for me"),
                     StreamKind::Voice => (true, "Mute for me (voice and shared audio)"),
-                    StreamKind::Shared if whole_user => (false, "Everything from this user is muted"),
-                    StreamKind::Shared if muted => (true, "Unmute their shared audio"),
-                    StreamKind::Shared => (true, "Mute only their shared audio"),
+                    StreamKind::Shared | StreamKind::App(_) if whole_user => (false, "Everything from this user is muted"),
+                    StreamKind::Shared | StreamKind::App(_) if muted => (true, "Unmute their shared audio"),
+                    StreamKind::Shared | StreamKind::App(_) => (true, "Mute only their shared audio"),
                 };
                 let row = Row {
                     title: &user.name,
@@ -223,17 +232,18 @@ impl RustTalkApp {
                         .get(&key)
                         .filter(|m| now.saturating_duration_since(m.heard) < METER_FRESH)
                         .map_or(0.0, |m| m.level);
-                    let mut pct = (self.user_volume(&user.name, kind) * 100.0).round();
+                    let gain = if matches!(kind, StreamKind::App(_)) { self.user_volumes.lock().unwrap().get(&key).copied().unwrap_or(1.0) } else { self.user_volume(&user.name, kind) };
+                    let mut pct = (gain * 100.0).round();
                     let r = mixer_row(ui, &row, &mut pct, level, muted || deafened);
                     r.title.on_hover_text("Right-click for more").context_menu(|ui| self.user_menu(ui, &user));
                     if r.mute.clicked() {
                         match kind {
                             StreamKind::Voice => toggle(&mut self.local_muted.lock().unwrap(), user.id),
-                            StreamKind::Shared => toggle(&mut self.control.muted_streams.lock().unwrap(), key),
+                            StreamKind::Shared | StreamKind::App(_) => toggle(&mut self.control.muted_streams.lock().unwrap(), key),
                         }
                     }
                     if r.slider.changed() {
-                        self.set_user_volume(user.id, &user.name, kind, pct / 100.0);
+                        if matches!(kind, StreamKind::App(_)) { self.user_volumes.lock().unwrap().insert(key, pct / 100.0); } else { self.set_user_volume(user.id, &user.name, kind, pct / 100.0); }
                     }
                     if r.slider.drag_stopped() || (r.slider.changed() && !r.slider.dragged()) {
                         self.config.save();
@@ -296,7 +306,7 @@ impl RustTalkApp {
     }
 }
 
-fn toggle(set: &mut HashSet<u64>, id: u64) {
+fn toggle<T: Eq + std::hash::Hash + Copy>(set: &mut HashSet<T>, id: T) {
     if !set.remove(&id) {
         set.insert(id);
     }
@@ -336,7 +346,7 @@ mod tests {
 
     #[test]
     fn stream_keys_are_distinct_per_user_and_kind() {
-        let keys: HashSet<u64> = [1u64, 2]
+        let keys: HashSet<u128> = [1u64, 2]
             .iter()
             .flat_map(|&id| StreamKind::ALL.map(|k| k.key(id)))
             .collect();

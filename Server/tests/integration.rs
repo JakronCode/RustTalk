@@ -1228,7 +1228,8 @@ async fn audio_sharing_status_follows_voice_membership() {
     }
     let msgs = drain(&mut b, 1000).await;
     let changes = msgs.iter().filter(|m| matches!(m, ServerMessage::AudioSharingChanged { .. })).count();
-    assert!(changes <= 10, "bounded broadcasts, got {changes}");
+    assert!(changes <= 20, "at most ten starts plus their stops, got {changes}");
+    assert!(msgs.iter().rev().find(|m| matches!(m, ServerMessage::AudioSharingChanged { .. })).is_some_and(|m| matches!(m, ServerMessage::AudioSharingChanged { sharing: false, .. })), "stopping must remain possible after rate limiting");
     let errors = drain(&mut a, 300).await;
     assert!(errors.iter().any(|m| matches!(m, ServerMessage::Error { .. })), "the flood is refused with an error");
 }
@@ -1420,6 +1421,47 @@ mod udp_stats {
     const VOICE: &str = "[[channels]]\nname = \"Funkturm\"\nkind = \"voice\"\n";
 
     #[tokio::test]
+    async fn separate_streams_require_registration_and_keep_replay_protection() {
+        use rusttalk_shared::protocol::AudioStreamInfo;
+        use rusttalk_shared::audio_packet::FLAG_SCREEN_AUDIO;
+        let port = free_port();
+        let _server = spawn_server(port, VOICE);
+        wait_for_port(port);
+        let ((mut a, wa), (mut b, wb)) = two_in_voice(port).await;
+        let (mut outsider, _) = connect(port, "outside", None).await;
+        drain(&mut outsider, 100).await;
+        let ua = Udp::new(port, &wa).await;
+        let ub = Udp::new(port, &wb).await;
+        let streams = vec![AudioStreamInfo { id: 1, label: "Application 1".into() }, AudioStreamInfo { id: 2, label: "Application 2".into() }];
+        send(&mut a, &ClientMessage::SetAudioStreams { streams: streams.clone() }).await;
+        expect(&mut b, "registered streams", |m| matches!(m, ServerMessage::AudioStreamsChanged { streams: got, .. } if got == &streams)).await;
+        assert!(!drain(&mut outsider, 100).await.iter().any(|m| matches!(m, ServerMessage::AudioStreamsChanged { .. })));
+        send(&mut a, &ClientMessage::SetAudioSharing { sharing: true }).await;
+        expect(&mut b, "sharing", |m| matches!(m, ServerMessage::AudioSharingChanged { sharing: true, .. })).await;
+        for id in [1, 2] {
+            let mut h = AudioHeader::new(ua.token, 1, 960);
+            h.flags = FLAG_SCREEN_AUDIO;
+            h.stream_id = id;
+            let packet = seal_packet(&h, &ua.cipher, DIR_TO_SERVER, b"opus");
+            ua.send(&packet).await;
+            let (got, _) = ub.recv(1000).await.expect("registered stream relayed");
+            assert_eq!(got.stream_id, id);
+            ua.send(&packet).await;
+            assert!(ub.recv(100).await.is_none(), "replay rejected independently of stream");
+        }
+        let mut h = AudioHeader::new(ua.token, 2, 1920);
+        h.flags = FLAG_SCREEN_AUDIO;
+        h.stream_id = 3;
+        ua.send(&seal_packet(&h, &ua.cipher, DIR_TO_SERVER, b"opus")).await;
+        assert!(ub.recv(100).await.is_none(), "unregistered ID");
+        send(&mut a, &ClientMessage::SetAudioStreams { streams: vec![streams[1].clone()] }).await;
+        expect(&mut b, "stream removed", |m| matches!(m, ServerMessage::AudioStreamsChanged { streams, .. } if streams.len() == 1)).await;
+        h.stream_id = 1;
+        ua.send(&seal_packet(&h, &ua.cipher, DIR_TO_SERVER, b"late")).await;
+        assert!(ub.recv(100).await.is_none(), "removed ID");
+    }
+
+    #[tokio::test]
     async fn ping_pong_reports_packet_counters() {
         let port = free_port();
         let _server = spawn_server(port, VOICE);
@@ -1496,6 +1538,8 @@ mod udp_stats {
         let _server = spawn_server(port, VOICE);
         wait_for_port(port);
         let ((mut a, wa), (mut b, wb)) = two_in_voice(port).await;
+        send(&mut a, &ClientMessage::SetAudioSharing { sharing: true }).await;
+        drain(&mut a, 100).await;
         let ua = Udp::new(port, &wa).await;
         let ub = Udp::new(port, &wb).await;
         tokio::time::sleep(Duration::from_millis(200)).await;

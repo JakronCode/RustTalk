@@ -47,6 +47,9 @@ pub struct Client {
     pub sharing: bool,
     /// Shares computer audio (voice channels only).
     pub audio_sharing: bool,
+    pub audio_streams: Vec<rusttalk_shared::protocol::AudioStreamInfo>,
+    pub audio_stream_high: u32,
+    pub audio_packets: (Instant, usize),
     /// When audio sharing last changed (bounds how fast it can flip).
     pub audio_changes: VecDeque<Instant>,
     /// Streams this client is sending (known from its first frame of each kind).
@@ -524,6 +527,7 @@ impl State {
         for id in ids {
             if let Some(c) = self.clients.get_mut(id) {
                 c.watching.clear();
+                c.audio_streams.clear();
             }
             self.clear_streams(*id);
             if let Some(c) = self.clients.get_mut(id).filter(|c| c.sharing) {
@@ -532,6 +536,7 @@ impl State {
             }
             if let Some(c) = self.clients.get_mut(id).filter(|c| c.audio_sharing) {
                 c.audio_sharing = false;
+                c.audio_streams.clear();
                 self.broadcast(&ServerMessage::AudioSharingChanged { client_id: *id, sharing: false });
             }
         }
@@ -844,6 +849,9 @@ impl State {
                 deafened: false,
                 sharing: false,
                 audio_sharing: false,
+                audio_streams: Vec::new(),
+                audio_stream_high: 0,
+                audio_packets: (Instant::now(), 0),
                 audio_changes: VecDeque::new(),
                 streams: BTreeSet::new(),
                 watching: HashSet::new(),
@@ -1276,6 +1284,7 @@ impl State {
     /// Computer audio sharing status. Err when sharing outside a voice channel.
     /// Ok(true) = the status changed (tell everyone).
     pub fn set_audio_sharing(&mut self, client_id: u64, sharing: bool) -> Result<bool, String> {
+        if !sharing { self.set_audio_streams(client_id, Vec::new())?; }
         let client = self.clients.get_mut(&client_id).ok_or("Client does not exist")?;
         let in_voice = self
             .channels
@@ -1292,12 +1301,94 @@ impl State {
         while client.audio_changes.front().is_some_and(|t| now.duration_since(*t) > AUDIO_CHANGE_WINDOW) {
             client.audio_changes.pop_front();
         }
-        if client.audio_changes.len() >= MAX_AUDIO_CHANGES {
+        if sharing && client.audio_changes.len() >= MAX_AUDIO_CHANGES {
             return Err("Audio sharing changed too often, wait a moment".to_string());
         }
-        client.audio_changes.push_back(now);
+        if sharing { client.audio_changes.push_back(now); }
         client.audio_sharing = sharing;
+        if !sharing { client.audio_streams.clear(); }
         Ok(true)
+    }
+
+    pub fn set_audio_streams(
+        &mut self,
+        id: u64,
+        mut streams: Vec<rusttalk_shared::protocol::AudioStreamInfo>,
+    ) -> Result<(), String> {
+        use rusttalk_shared::protocol::valid_audio_streams;
+        if !valid_audio_streams(&streams) {
+            return Err("Invalid audio streams".into());
+        }
+        streams.sort_unstable_by_key(|stream| stream.id);
+        let c = self.clients.get_mut(&id).ok_or("Unknown client")?;
+        if c.audio_streams == streams {
+            return Ok(());
+        }
+        let reducing = streams.iter().all(|s| c.audio_streams.contains(s));
+        if !reducing
+            && !self
+                .channels
+                .get(&c.channel_id)
+                .is_some_and(|ch| ch.kind.has_voice())
+        {
+            return Err("Join a voice channel first".into());
+        }
+        if streams
+            .iter()
+            .any(|s| s.id <= c.audio_stream_high && !c.audio_streams.contains(s))
+        {
+            return Err("Audio stream ID was already used".into());
+        }
+        let now = Instant::now();
+        c.audio_changes
+            .retain(|t| now.duration_since(*t) < AUDIO_CHANGE_WINDOW);
+        if !reducing && c.audio_changes.len() >= MAX_AUDIO_CHANGES {
+            return Err("Audio sharing changed too often".into());
+        }
+        if !reducing {
+            c.audio_changes.push_back(now);
+        }
+        c.audio_stream_high = streams
+            .iter()
+            .map(|s| s.id)
+            .max()
+            .unwrap_or(0)
+            .max(c.audio_stream_high);
+        c.audio_streams = streams.clone();
+        let channel = c.channel_id;
+        for listener in self.clients.values().filter(|c| c.channel_id == channel) {
+            let _ = listener.tx.send(ServerMessage::AudioStreamsChanged {
+                client_id: id,
+                streams: streams.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn allow_audio_packet(&mut self, token: u64, stream: u32, shared: bool) -> bool {
+        let Some(c) = self
+            .token_index
+            .get(&token)
+            .and_then(|id| self.clients.get_mut(id))
+        else {
+            return false;
+        };
+        if shared
+            && (!c.audio_sharing
+                || if stream == 0 {
+                    !c.audio_streams.is_empty()
+                } else {
+                    !c.audio_streams.iter().any(|s| s.id == stream)
+                })
+        {
+            return false;
+        }
+        let now = Instant::now();
+        if now.duration_since(c.audio_packets.0) >= Duration::from_secs(1) {
+            c.audio_packets = (now, 0);
+        }
+        c.audio_packets.1 = c.audio_packets.1.saturating_add(1);
+        c.audio_packets.1 <= 600
     }
 
     /// Who gets a stream: members of the sender's channel who watch it.
@@ -1352,6 +1443,11 @@ impl State {
     pub fn broadcast(&self, msg: &ServerMessage) {
         for client in self.clients.values() {
             let _ = client.tx.send(msg.clone());
+        }
+        if let ServerMessage::UserMoved { client_id, channel_id } = msg {
+            for sender in self.clients.values().filter(|c| c.channel_id == *channel_id && !c.audio_streams.is_empty()) {
+                self.send_to(*client_id, &ServerMessage::AudioStreamsChanged { client_id: sender.id, streams: sender.audio_streams.clone() });
+            }
         }
     }
 
@@ -1459,6 +1555,57 @@ mod channel_deletion_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_start_can_clear_registrations_and_repeated_sets_do_not_broadcast() {
+        use rusttalk_shared::protocol::AudioStreamInfo;
+        let mut state = test_state();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (id, token) = state.add_client("sender".into(), tx);
+        state.move_client(id, 3).unwrap();
+        while rx.try_recv().is_ok() {}
+        let streams = vec![AudioStreamInfo { id: 1, label: "Application 1".into() }, AudioStreamInfo { id: 2, label: "Application 2".into() }];
+        state.set_audio_streams(id, streams.clone()).unwrap();
+        assert!(matches!(rx.try_recv(), Ok(ServerMessage::AudioStreamsChanged { .. })));
+        for _ in 0..100 {
+            state.set_audio_streams(id, streams.clone()).unwrap();
+            state.set_audio_streams(id, streams.iter().rev().cloned().collect()).unwrap();
+        }
+        assert!(rx.try_recv().is_err(), "identical or reordered registrations do not flood listeners");
+        assert!(!state.set_audio_sharing(id, false).unwrap(), "capture never started");
+        assert!(matches!(rx.try_recv(), Ok(ServerMessage::AudioStreamsChanged { streams, .. }) if streams.is_empty()));
+        assert!(state.clients[&id].audio_streams.is_empty());
+        state.set_audio_sharing(id, true).unwrap();
+        assert!(state.allow_audio_packet(token, 0, true), "mixed audio works after failed Separate");
+        state.move_client(id, 1).unwrap();
+        assert!(state.set_audio_streams(id, vec![]).is_ok(), "late cleanup after leaving voice");
+    }
+
+    #[test]
+    fn separate_audio_registration_is_bounded_and_ids_cannot_be_reused() {
+        use rusttalk_shared::protocol::AudioStreamInfo;
+        let mut state = test_state();
+        let (id, token) = add_test_client(&mut state, "sender");
+        let app = |id| AudioStreamInfo { id, label: "Application".into() };
+        assert!(state.set_audio_streams(id, vec![app(1)]).is_err());
+        state.move_client(id, 3).unwrap();
+        assert!(state.set_audio_streams(id, (1..=9).map(app).collect()).is_err());
+        assert!(state.set_audio_streams(id, vec![app(1), app(1)]).is_err());
+        assert!(state.set_audio_streams(id, vec![AudioStreamInfo { id: 1, label: "bad\nlabel".into() }]).is_err());
+        state.set_audio_streams(id, vec![app(1), app(2)]).unwrap();
+        assert!(!state.allow_audio_packet(token, 1, true));
+        state.set_audio_sharing(id, true).unwrap();
+        assert!(state.allow_audio_packet(token, 1, true));
+        assert!(!state.allow_audio_packet(token, 3, true));
+        assert!(!state.allow_audio_packet(token, 0, true));
+        state.set_audio_streams(id, vec![app(2)]).unwrap();
+        assert!(!state.allow_audio_packet(token, 1, true));
+        assert!(state.set_audio_streams(id, vec![app(1), app(2)]).is_err());
+        for _ in 0..600 { state.allow_audio_packet(token, 2, true); }
+        assert!(!state.allow_audio_packet(token, 2, true));
+        state.move_client(id, 1).unwrap();
+        assert!(state.clients[&id].audio_streams.is_empty());
+    }
 
     fn test_state() -> State {
         let cfg: ServerConfig = toml::from_str(

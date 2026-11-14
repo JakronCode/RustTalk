@@ -636,7 +636,7 @@ impl RustTalkApp {
     fn saved_volumes(&self, kind: StreamKind) -> &std::collections::BTreeMap<String, f32> {
         match kind {
             StreamKind::Voice => &self.config.user_volumes,
-            StreamKind::Shared => &self.config.share_volumes,
+            StreamKind::Shared | StreamKind::App(_) => &self.config.share_volumes,
         }
     }
 
@@ -741,7 +741,7 @@ impl RustTalkApp {
         let v = volume.clamp(0.0, crate::audio::MAX_VOLUME);
         let saved = match kind {
             StreamKind::Voice => &mut self.config.user_volumes,
-            StreamKind::Shared => &mut self.config.share_volumes,
+            StreamKind::Shared | StreamKind::App(_) => &mut self.config.share_volumes,
         };
         if (v - 1.0).abs() < 0.005 {
             saved.remove(name);
@@ -1139,9 +1139,32 @@ impl RustTalkApp {
                     self.clear_video_of(client_id, None);
                 }
             }
+            ServerMessage::AudioStreamsRejected { stream_id } => {
+                if voice && matches!(&self.shared_audio_source, crate::audio::share_source::AudioShareSource::Separate(apps) if apps.iter().any(|(_, s)| s.id == stream_id)) {
+                    self.stop_shared_audio();
+                }
+            }
+            ServerMessage::AudioStreamsChanged { client_id, streams } => {
+                if voice && rusttalk_shared::protocol::valid_audio_streams(&streams) && s.users.get(&client_id).zip(s.users.get(&s.my_id)).is_some_and(|(u, me)| u.channel_id == me.channel_id) {
+                    if client_id == s.my_id {
+                        if let Some(audio) = &self.screen_audio { audio.register(streams.iter().map(|s| s.id).collect()); }
+                    }
+                    let keep = |key: &u128| crate::audio::mixer_speaker(*key) != client_id || (*key >> 1) as u32 == 0 || streams.iter().any(|s| s.id == (*key >> 1) as u32);
+                    self.user_volumes.lock().unwrap().retain(|k, _| keep(k));
+                    self.control.stream_meters.lock().unwrap().retain(|k, _| keep(k));
+                    self.control.muted_streams.lock().unwrap().retain(keep);
+                    let mut all = self.control.shared_streams.lock().unwrap();
+                    if all.len() < 256 || all.contains_key(&client_id) { all.insert(client_id, streams); }
+                }
+            }
             ServerMessage::AudioSharingChanged { client_id, sharing } => {
                 if let Some(u) = s.users.get_mut(&client_id) {
                     u.audio_sharing = sharing;
+                    if voice && !sharing {
+                        self.control.shared_streams.lock().unwrap().remove(&client_id);
+                        self.user_volumes.lock().unwrap().retain(|k, _| crate::audio::mixer_speaker(*k) != client_id || (*k >> 1) as u32 == 0);
+                        self.control.muted_streams.lock().unwrap().retain(|k| crate::audio::mixer_speaker(*k) != client_id || (*k >> 1) as u32 == 0);
+                    }
                 }
             }
             ServerMessage::VideoFrame { from_id, kind, data } => {
@@ -1245,6 +1268,10 @@ impl RustTalkApp {
                     self.notify_presence(name.as_deref(), false);
                 }
             }
+        }
+        if voice {
+            if me { self.control.shared_streams.lock().unwrap().clear(); }
+            else { self.control.shared_streams.lock().unwrap().remove(&client_id); }
         }
         let Some(s) = self.session_mut(id) else { return };
         if let Some(u) = s.users.get_mut(&client_id) {

@@ -81,7 +81,7 @@ Client (Windows)                          Server (Debian)
                                             └──────────────┘
 ```
 
-- **TCP:** login, channels, chat (text + images), events, video frames (camera/screen), channel order, server settings, chat edits/replies, GIF search, roles/moderation/invites (protocol v16, TLS)
+- **TCP:** login, channels, chat (text + images), events, video frames (camera/screen), channel order, server settings, chat edits/replies, GIF search, roles/moderation/invites (protocol v17, TLS)
 - **UDP:** Opus audio plus small ping/pong control packets (20 ms frames, 28-byte header with token, sequence, counter; payload ChaCha20-Poly1305); the server opens each packet with the sender's key and seals it again per receiver, and drops replayed packets. Pongs carry two per-session packet counters (kept in RAM only) for the connection stats
 - **Lobby:** everyone lands here when connecting; talking is blocked on the server; join log
 
@@ -394,7 +394,7 @@ make docker-test
 ## Project structure
 
 ```
-├── shared/            # protocol (v16), framing, secure (TLS pinning + packet encryption), UDP packet format
+├── shared/            # protocol (v17), framing, secure (TLS pinning + packet encryption), UDP packet format
 ├── Server/            # Linux server (+ test_client CLI, integration tests, deploy/, Test_Scripts/)
 │   └── src/           #   main, config, state (RAM), db (SQLite), tcp, udp
 └── Client/Windows/    # egui client
@@ -418,3 +418,5 @@ make docker-test
 - Video runs over the TCP control connection (H.264): fine in a LAN, on weak Wi-Fi pick "Balanced"
 - Link safety warnings are local heuristics plus the optional feed you import; there is no live reputation lookup. Google Safe Browsing (non-commercial only, needs an API key) and URLhaus downloads (need a personal Auth-Key) cannot ship inside RustTalk, so known-malicious detection only works with a feed you download and refresh yourself. Redirects, URL shorteners, downloads whose address carries no file name, and pages that turn malicious later are not detected. Links cannot be focused with the keyboard yet
 - Natural voices use `ort` 2.0 release candidate `=2.0.0-rc.15` (no stable 2.0 exists yet; pinned exactly so builds don't change on their own). Switch to 2.0.0 once it is out
+
+Separate application audio can be enabled with **Send separately** in the share dialog (up to eight apps). Listeners get an independent volume and mute for each app. Generic labels are the default; sharing app names with voice-channel members is opt-in. Labels are session-only. Client and server must both support protocol v17 (UDP audio header v4).
