@@ -117,6 +117,14 @@ test-packaging: ## AppImage audio packaging regression checks (no build or hardw
 test-server: ## Server unit and integration tests
 	@bash Server/Test_Scripts/run_tests.sh
 
+.PHONY: test-channel-deletion format-channel-deletion
+test-channel-deletion: ## Atomic channel deletion failures and actual client replies
+	@$(CARGO) test --locked -p rusttalk-server --bin rusttalk-server channel_deletion -- --test-threads=1
+	@$(CARGO) test --locked -p rusttalk-server --test integration channel_deletion -- --test-threads=1
+
+format-channel-deletion: ## Format the focused deletion regression module
+	@rustfmt --edition 2021 Server/src/state/channel_deletion_tests.rs
+
 .PHONY: test-client
 test-client: ## Client tests
 	@$(CARGO) test --locked -p rusttalk-client
