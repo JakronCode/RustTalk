@@ -359,10 +359,15 @@ systemctl enable --now rusttalk-server</code></pre>
         <p data-l="de">Verbinde dich mit der App zu <code>dein-server</code> und wähle „Admin werden“ im Servermenü. Kanäle, Einladungen und Rollen legst du dann direkt in der App an.</p>
       </div>
       <div>
-        <h3 data-l="en">Updates</h3><h3 data-l="de">Updates</h3>
-        <p data-l="en">The app tells admins when a new server version is out. Update with one command:</p>
-        <p data-l="de">Die App zeigt Admins, wenn eine neue Server-Version da ist. Update mit einem Befehl:</p>
-<pre><code>sudo /opt/rusttalk/server/bin/rusttalk-server update</code></pre>
+        <h3 data-l="en">Update the systemd server</h3><h3 data-l="de">systemd-Server aktualisieren</h3>
+        <p data-l="en">Paste this on your server from any directory (bash or fish). Uses the standard install path, downloads the latest release for your architecture, verifies SHA-256 and checks that the binary starts before replacing it:</p>
+        <p data-l="de">Auf deinem Server in einem beliebigen Verzeichnis einfügen (bash oder fish). Verwendet den Standard-Installationspfad, lädt die neueste Version für deine Architektur, prüft SHA-256 und testet vor dem Austausch, ob die Datei startet:</p>
+<pre><code>sudo /opt/rusttalk/server/bin/rusttalk-server update --no-restart &amp;&amp;
+sudo systemctl restart rusttalk-server.service &amp;&amp;
+systemctl --no-pager --full status rusttalk-server.service &amp;&amp;
+/opt/rusttalk/server/bin/rusttalk-server --version</code></pre>
+        <p class="small" data-l="en">Each command runs only if the previous one succeeds. Restarting briefly disconnects users. Config, database and TLS identity files stay in place; update clients too when the protocol changes. The previous binary is kept as <code>rusttalk-server.old</code>. <a href="https://github.com/rusttalkcrew/RustTalk#update-the-systemd-server-copy-and-paste" rel="noopener">Update checks, rollback and troubleshooting</a>.</p>
+        <p class="small" data-l="de">Jeder Befehl läuft nur, wenn der vorherige erfolgreich war. Der Neustart trennt Benutzer kurzzeitig. Konfiguration, Datenbank und TLS-Identitätsdateien bleiben erhalten; bei Protokolländerungen auch die Clients aktualisieren. Die vorherige Datei bleibt als <code>rusttalk-server.old</code> erhalten. <a href="https://github.com/rusttalkcrew/RustTalk#update-the-systemd-server-copy-and-paste" rel="noopener">Update-Prüfung, Rückkehr zur vorherigen Version und Fehlerbehebung</a>.</p>
       </div>
     </div>
 

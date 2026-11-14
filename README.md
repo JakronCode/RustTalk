@@ -121,14 +121,36 @@ Open port **7331** (TCP+UDP) in the firewall if nftables/ufw is active.
 
 Prebuilt binaries are attached to the [GitHub releases](https://github.com/rusttalkcrew/RustTalk/releases) (`rusttalk-server-linux-x86_64.tar.gz`).
 
-**Updates:** the server looks for a newer release on start and once a day (`check_updates` in `server.toml`, on by default) and shows admins "Server update available" in the client. It never installs anything by itself - the service user cannot write its own program. To update, run on the server:
+#### Update the systemd server (copy and paste)
+
+The server looks for a newer release on start and once a day (`check_updates` in `server.toml`, on by default) and shows admins "Server update available" in the client. It never installs anything by itself - the service user cannot write its own program.
+
+For the standard install at `/opt/rusttalk/server/`, paste this on the server from any directory (bash or fish):
 
 ```bash
-sudo /opt/rusttalk/server/bin/rusttalk-server update            # download, SHA-256 check, test-start, swap, restart the service
-/opt/rusttalk/server/bin/rusttalk-server update --check         # only look
+sudo /opt/rusttalk/server/bin/rusttalk-server update --no-restart &&
+sudo systemctl restart rusttalk-server.service &&
+systemctl --no-pager --full status rusttalk-server.service &&
+/opt/rusttalk/server/bin/rusttalk-server --version
 ```
 
-The previous version stays next to it as `rusttalk-server.old` (to go back: `sudo mv rusttalk-server.old rusttalk-server && sudo systemctl restart rusttalk-server`). `--no-restart` skips the restart; `rusttalk-server --version` prints the version. Works the same for a Windows server (`rusttalk-server.exe update`, restart it yourself).
+The updater selects the latest release for your architecture, downloads it, verifies SHA-256, checks that the binary starts with `--version`, and replaces it. Each command runs only if the previous one succeeds. The restart briefly disconnects users. Configuration, database and TLS identity files stay in place; update clients too when the protocol version changes. No manual `wget`, `chmod` or deletion of the running binary is needed.
+
+Check for an update without installing:
+
+```bash
+/opt/rusttalk/server/bin/rusttalk-server update --check
+```
+
+After an update, the previous binary stays at `/opt/rusttalk/server/bin/rusttalk-server.old`. To restore that binary (this does not roll back database changes):
+
+```bash
+sudo mv /opt/rusttalk/server/bin/rusttalk-server.old /opt/rusttalk/server/bin/rusttalk-server &&
+sudo systemctl restart rusttalk-server.service &&
+systemctl --no-pager --full status rusttalk-server.service
+```
+
+If the service fails to start, inspect `sudo journalctl -u rusttalk-server.service -n 50 --no-pager`. For custom installs, adjust the binary path and service name. Without `--no-restart`, the updater restarts the standard service automatically if it is running. Windows servers use `rusttalk-server.exe update`; restart them yourself.
 
 ### Server (Docker)
 
